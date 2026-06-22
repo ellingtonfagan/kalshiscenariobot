@@ -1,0 +1,135 @@
+# Scenario library + market resolution map + learned correlation haircuts.
+#
+# Each scenario is ONE coherent game-script. Legs carry the prop, threshold, and the
+# PRIOR probability the bot tests and recalibrates. est_payout_x is the NAIVE multiply
+# (overstated vs SGP); the live engine divides joint prob and then applies sgp_haircut.
+
+# ── market_map ────────────────────────────────────────────────────────────────
+# Resolves a scenario leg's `market` key to (a) a Kalshi prop family for pricing and
+# (b) a box-score stat for live tracking + final resolution.
+#   player : lowercase surname matched against Kalshi market titles + ESPN names
+#   stat   : points|rebounds|assists|threes|minutes  (or a special resolver)
+market_map:
+  castle_assists:   { player: castle,   stat: assists }
+  castle_points:    { player: castle,   stat: points }
+  castle_threes:    { player: castle,   stat: threes }
+  vassell_points:   { player: vassell,  stat: points }
+  brunson_points:   { player: brunson,  stat: points }
+  brunson_assists:  { player: brunson,  stat: assists }
+  bridges_points:   { player: bridges,  stat: points }
+  towns_points:     { player: towns,    stat: points }
+  towns_rebounds:   { player: towns,    stat: rebounds }
+  towns_assists:    { player: towns,    stat: assists }
+  towns_minutes:    { player: towns,    stat: minutes }
+  wemby_points:     { player: wembanyama, stat: points }
+  wemby_rebounds:   { player: wembanyama, stat: rebounds }
+  wemby_assists:    { player: wembanyama, stat: assists }
+  harper_points:    { player: harper,   stat: points }
+  harper_pts_reb:   { special: pra,      player: harper }     # points + rebounds
+  champagnie_points: { player: champagnie, stat: points }
+  knicks_win:       { special: win, team: NYK }
+  spurs_win:        { special: win, team: SAS }
+  spurs_cover:      { special: cover, team: SAS, resolvable: false } # wire spread series
+  game_total:       { special: total, resolvable: false }            # wire O/U series
+
+# ── correlation haircut ───────────────────────────────────────────────────────
+# realized_joint_hit_rate / prod(leg_priors), learned by reconcile over time.
+# 1.0 = no adjustment yet. Lower = legs are MORE correlated than independence implies.
+sgp_haircut:
+  S1: 1.0
+  S2: 1.0
+  S3: 1.0
+  S4: 1.0
+  S5: 1.0
+  S6: 1.0
+  S7: 1.0
+
+# ── scenarios ─────────────────────────────────────────────────────────────────
+scenarios:
+  - id: S1
+    name: "Castle controls the pace"
+    side: SAS
+    trigger: "Castle 6+ ast, sub-4 TO, Spurs push tempo off misses"
+    est_payout_x: 11
+    risk: 3
+    counter: "Castle's turnover-prone aggression (benched late in G2) kills it."
+    legs:
+      - { market: castle_assists,  op: ">=", line: 6,    p: 0.48 }
+      - { market: vassell_points,  op: ">=", line: 15,   p: 0.38 }
+      - { market: brunson_points,  op: "<",  line: 24.5, p: 0.50 }
+
+  - id: S2
+    name: "OG clamps Wemby, bench feasts"
+    side: NYK
+    trigger: "Anunoby holds Wemby <24; Knicks punish weakside in transition"
+    est_payout_x: 9
+    risk: 3
+    counter: "Win-or-go-home Wemby cleared 25 in both games; foul magnet."
+    legs:
+      - { market: wemby_points,    op: "<",  line: 24, p: 0.35 }
+      - { market: bridges_points,  op: ">=", line: 16, p: 0.60 }
+      - { market: towns_rebounds,  op: ">=", line: 12, p: 0.52 }
+
+  - id: S3
+    name: "Brunson MSG takeover"
+    side: NYK
+    trigger: "Crowd lifts Brunson 27+/6+ ast; SAS bench stays cold"
+    est_payout_x: 7
+    risk: 3
+    counter: "Brunson <32.5 PRA in 4 of last 5 vs top-10 D."
+    legs:
+      - { market: brunson_points,  op: ">=", line: 27, p: 0.45 }
+      - { market: brunson_assists, op: ">=", line: 6,  p: 0.55 }
+      - { market: knicks_win,      op: "==", line: 1,  p: 0.55 }
+
+  - id: S4
+    name: "KAT wins both ends"
+    side: NYK
+    trigger: "Towns avoids early fouls, 34+ min, smothers Wemby + scores"
+    est_payout_x: 9
+    risk: 2
+    counter: "Single point of failure: one cheap early foul. Wemby career 30.4 vs NYK."
+    legs:
+      - { market: towns_rebounds,  op: ">=", line: 12,  p: 0.58 }
+      - { market: towns_assists,   op: ">=", line: 4,   p: 0.55 }
+      - { market: wemby_assists,   op: "<",  line: 2.5, p: 0.58 }
+      - { market: towns_points,    op: ">=", line: 18,  p: 0.55 }
+
+  - id: S5
+    name: "Harper homecoming eruption"
+    side: SAS
+    trigger: "NJ native erupts at MSG, usage climbs, drags game into a shootout"
+    est_payout_x: 11
+    risk: 3
+    counter: "Model projects fewer rebound chances at MSG — prefer points over PRA."
+    legs:
+      - { market: harper_points,    op: ">=", line: 13.5, p: 0.58 }
+      - { market: harper_pts_reb,   op: ">=", line: 22,   p: 0.65 }
+      - { market: champagnie_points,op: ">=", line: 10.5, p: 0.50 }
+      - { market: game_total,       op: ">",  line: 216.5,p: 0.50 }
+
+  - id: S6
+    name: "KAT fouls out of it, Wemby feasts"   # inverse of S4
+    side: SAS
+    trigger: "Wemby baits 2 quick fouls on Towns; KAT minutes capped + rattled"
+    est_payout_x: 15
+    risk: 4
+    counter: "Finals refs swallow whistles; KAT beat this twice. Bet minutes, not KAT-under-pts."
+    legs:
+      - { market: towns_minutes,   op: "<",  line: 34.5, p: 0.45 }
+      - { market: wemby_points,    op: ">=", line: 25.5, p: 0.55 }
+      - { market: wemby_rebounds,  op: ">=", line: 11.5, p: 0.58 }
+      - { market: spurs_win,       op: "==", line: 1,    p: 0.45 }
+
+  - id: S7
+    name: "Castle stops hesitating"
+    side: SAS
+    trigger: "Castle controlled as 2nd creator; jumper finally falls"
+    est_payout_x: 18
+    risk: 5
+    counter: "Missed 1.5+ threes in 7 of last 9. Hope bet, not value bet."
+    legs:
+      - { market: castle_points,   op: ">=", line: 16,  p: 0.52 }
+      - { market: castle_assists,  op: ">=", line: 4.5, p: 0.55 }
+      - { market: castle_threes,   op: ">=", line: 1.5, p: 0.38 }
+      - { market: spurs_cover,     op: ">=", line: 2.5, p: 0.50 }

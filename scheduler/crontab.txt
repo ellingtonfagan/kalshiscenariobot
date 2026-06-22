@@ -1,0 +1,28 @@
+# Portable crontab for nba-scenario-bot. Runs anywhere cron exists — no OpenClaw needed.
+# Edit RUN to point at your venv, then:  crontab scheduler/crontab.txt
+# Server clock should be ET, or keep CRON_TZ.
+#
+# Game: NBA-2026-FINALS-G3 · tip 2026-06-08 20:30 America/New_York
+
+CRON_TZ=America/New_York
+RUN=/Users/ellingtonfagan/Downloads/nba-scenario-bot/.venv/bin/nbabot
+
+# fixed pre-tip checkpoints
+30 16 8 6 *   $RUN baseline      # T-4h
+0  19 8 6 *   $RUN lineups       # T-90m
+0  20 8 6 *   $RUN lock          # T-30m
+
+# live loop: every 10 min from tip through the likely end of the game.
+# heartbeat self-skips when not live and self-detects the final buzzer.
+30,40,50 20 8 6 *   $RUN heartbeat
+*/10 21-23 8 6 *    $RUN heartbeat
+
+# learning step (the buzzer also tells you to run this; this is the safety net)
+5 0 9 6 *     $RUN reconcile
+
+# optional fully automated runner: can replace the fixed phase rows above after testing.
+# */10 * * * * $RUN autopilot
+
+# ── recurring game-day template (uncomment + adapt per game) ───────────────────
+# Replace the one-shot day/month (8 6) above with your game's date, or drive it
+# from a wrapper that sets NBABOT_GAME_ID and computes the date offsets.

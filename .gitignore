@@ -1,0 +1,25 @@
+# secrets — never commit
+.env
+secrets/*.pem
+secrets/*.key
+secrets/*.txt
+
+# runtime state + learning log artifacts (keep the dir, ignore contents)
+data/*.json
+data/*.jsonl
+data/*.sqlite
+data/*.sqlite-*
+!data/.gitkeep
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# operating system
+.DS_Store

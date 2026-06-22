@@ -1,0 +1,75 @@
+// monitor-cron.jsonc — schedule for nba-scenario-monitor
+// Game: NBA-2026-FINALS-G3 · tip 2026-06-08 20:30 America/New_York
+//
+// NOTE: field names below follow OpenClaw's automation model (cron + heartbeat toggling).
+// Confirm exact keys against your version: `openclaw cron --help` or docs.openclaw.ai/automation.
+// Times are one-shot for this game. For a recurring game-day template, swap `at` for the
+// equivalent 5-field `cron` shown in comments. All times America/New_York.
+
+{
+  "tz": "America/New_York",
+  "deliver_to": "chat:betting-bot",          // or a webhook URL
+  "skill": "nba-scenario-monitor",
+  "jobs": [
+    {
+      "name": "baseline",                     // cron: 30 16 8 6 *
+      "at": "2026-06-08T16:30:00-04:00",      // T-4h
+      "prompt": "Load skill nba-scenario-monitor. Run phase=baseline for game NBA-2026-FINALS-G3: pull all leg contract prices, set entry_implied_p, flag legs where market vs skill prior differ >10pts."
+    },
+    {
+      "name": "lineups",                      // cron: 0 19 8 6 *
+      "at": "2026-06-08T19:00:00-04:00",      // T-90m
+      "prompt": "Run phase=lineups: confirm inactives/starters. If Towns/Wemby/Brunson/Harper/Castle is OUT or limited, mark affected scenarios void and alert."
+    },
+    {
+      "name": "lock-board",                   // cron: 0 20 8 6 *
+      "at": "2026-06-08T20:00:00-04:00",      // T-30m
+      "prompt": "Run phase=lock: re-pull prices, lock the live board (entry price + skill prior per leg)."
+    },
+    {
+      "name": "heartbeat-on",                 // cron: 28 20 8 6 *
+      "at": "2026-06-08T20:28:00-04:00",      // just before tip
+      "prompt": "Set heartbeat interval to 10m and load HEARTBEAT.md. Begin live loop for NBA-2026-FINALS-G3.",
+      "effect": { "heartbeat": { "intervalMinutes": 10, "checklist": "HEARTBEAT.md" } }
+    },
+    {
+      "name": "heartbeat-off-safety",         // cron: 59 23 8 6 *
+      "at": "2026-06-08T23:59:00-04:00",      // safety net (game-final hook should fire first)
+      "prompt": "If game not yet final, keep polling; otherwise disable game heartbeat and restore default interval.",
+      "effect": { "heartbeat": { "intervalMinutes": 30 } }
+    },
+    {
+      "name": "reconcile",                    // cron: 5 0 9 6 *
+      "at": "2026-06-09T00:05:00-04:00",      // T+ ~ after expected end (safety; hook is primary)
+      "prompt": "Run phase=reconcile: resolve every leg to 1/0, append to log (SKILL §6), recompute Brier per market family + per scenario, update sgp_haircut, write a 5-line recap."
+    }
+  ],
+
+  // Event hooks beat fixed timers for the in-between moments.
+  "hooks": [
+    {
+      "name": "score-events",
+      "on": "webhook:scores",                 // quarter-end / foul / final events from your scores feed
+      "prompt": "Evaluate SKILL §5 triggers against the event payload. On status=final, set buzzer_detected, disable game heartbeat, and run the reconcile job now."
+    }
+  ],
+
+  // Standing orders (SKILL §7) — keep persistent so guardrails survive session resets.
+  "standing_orders": "Show SGP-adjusted payout, never naive multiply. Stake <=1 unit on multis; never increase after a loss. Refuse to stack longshots to hit a target payout. Flag risk-5 hope bets. Append: 'Bet only what you can lose. NY help: 877-8-HOPENY / text HOPENY (467369).'"
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   PORTABLE FALLBACK — standard crontab (runs even without OpenClaw's scheduler)
+   Edit `RUN`, then: `crontab -e` and paste. Server must be ET, or keep CRON_TZ.
+
+   CRON_TZ=America/New_York
+   RUN="openclaw run --skill nba-scenario-monitor --prompt"   # or: claude -p
+
+   30 16 8 6 *  $RUN 'phase=baseline NBA-2026-FINALS-G3'
+   0  19 8 6 *  $RUN 'phase=lineups  NBA-2026-FINALS-G3'
+   0  20 8 6 *  $RUN 'phase=lock     NBA-2026-FINALS-G3'
+   # live loop: every 10 min from tip; bounded to the game window
+   30,40,50 20 8 6 *  $RUN 'phase=live NBA-2026-FINALS-G3'
+   */10 21-23 8 6 *   $RUN 'phase=live NBA-2026-FINALS-G3'
+   5  0  9 6 *  $RUN 'phase=reconcile NBA-2026-FINALS-G3'
+   ─────────────────────────────────────────────────────────────────────────── */

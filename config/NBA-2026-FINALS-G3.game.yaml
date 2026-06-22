@@ -1,0 +1,38 @@
+# Game snapshot (template instance). One file per game id.
+game:
+  id: NBA-2026-FINALS-G3
+  matchup: "Knicks (home) vs Spurs"
+  tip_iso: "2026-06-08T20:30:00-04:00"
+  venue: "Madison Square Garden"
+  series: "NYK leads 2-0"
+  status: "both teams healthy"
+  decisive_axis: "Towns vs Wembanyama; foul math is the hinge."
+
+# How the data layer finds this game:
+sources:
+  # Kalshi encodes the game in the ticker as <yyMONdd><AWAY><HOME>. Used to filter
+  # markets for THIS game. Verify against a live `list_markets` call before tip.
+  kalshi_game_tag: "26JUN08SASNYK"
+  # ESPN event id for box score + win prob. Leave null to auto-resolve by keyword
+  # (scores.find_event scans the NBA scoreboard for these team names).
+  espn_event_id: null
+  espn_matchup_keywords: ["Knicks", "Spurs", "New York", "San Antonio"]
+  home_abbr: "NYK"
+  away_abbr: "SAS"
+
+# Players the heartbeat tracks in the box score (full display names as ESPN reports them).
+tracked_players:
+  - "Karl-Anthony Towns"
+  - "Victor Wembanyama"
+  - "Jalen Brunson"
+  - "Dylan Harper"
+  - "Stephon Castle"
+  - "Mikal Bridges"
+  - "Devin Vassell"
+  - "Julian Champagnie"
+  - "OG Anunoby"
+  - "De'Aaron Fox"
+
+# 1 unit = the only stake size this bot will ever endorse for a multi-leg ticket.
+bankroll:
+  unit_usd: 5
