@@ -374,3 +374,136 @@ postmortem:
     - "Nested legs need scoreline-set probability, not hand-adjusted multiplication."
     - "Official lineups should trigger a final probability refresh 60-75 minutes before kickoff."
     - "No remaining leg has a model edge of 0.05, so the polished recommendation is monitoring, not execution."
+
+candidate_plays:
+  reviewed_at_utc: "2026-06-23T22:21:11Z"
+  status: conditional_only
+  execution_note: "No current standalone or combined price clears the configured 0.05 edge."
+  lineup_notes:
+    - "Panama listed Adalberto Carrasquilla among the substitutes after his groin issue."
+    - "Croatia starts its experienced Modric-Kovacic core with Perisic and Musa."
+    - "Colombia-DR Congo official lineups were not yet available at review time; refresh before kickoff."
+  standalone:
+    - id: CROATIA_MINUS_1P5
+      label: Croatia wins by at least two
+      ticker: KXWCSPREAD-26JUN23PANCRO-CRO2
+      side: yes
+      ask_cents: 44
+      model_p: 0.438
+      edge: -0.002
+      risk: 3
+      suggested_stake_units: 0
+      decision: pass_at_current_price
+      buy_gate_cents: 38
+      rationale: "Carrasquilla's bench role helps Croatia, but 44 cents already prices the fitted scoring advantage."
+    - id: PANAMA_UNDER_0P5
+      label: Panama under 0.5 team goals
+      ticker: KXWCTEAMTOTAL-26JUN23PANCRO-PAN1
+      side: no
+      ask_cents: 44
+      model_p: 0.438
+      edge: -0.002
+      risk: 3
+      suggested_stake_units: 0
+      decision: pass_at_current_price
+      buy_gate_cents: 38
+      rationale: "Panama's creation concern is real, but the clean-sheet price has no measurable edge."
+    - id: COLOMBIA_MINUS_1P5
+      label: Colombia wins by at least two
+      ticker: KXWCSPREAD-26JUN23COLCOD-COL2
+      side: yes
+      ask_cents: 37
+      model_p: 0.366
+      edge: -0.004
+      risk: 3
+      suggested_stake_units: 0
+      decision: pass_at_current_price
+      buy_gate_cents: 31
+      rationale: "Colombia is stronger, but DR Congo's low block and Portugal draw are already reflected."
+    - id: COLOMBIA_WIN
+      label: Colombia moneyline
+      ticker: KXWCGAME-26JUN23COLCOD-COL
+      side: yes
+      ask_cents: 64
+      model_p: 0.632
+      edge: -0.008
+      risk: 2
+      suggested_stake_units: 0
+      decision: pass_at_current_price
+      buy_gate_cents: 58
+      rationale: "The favorite is credible but too short without a lineup or price catalyst."
+  parlays:
+    - id: CRO-COL-FAVORITES
+      label: Croatia and Colombia both win
+      legs:
+        - KXWCGAME-26JUN23PANCRO-CRO
+        - KXWCGAME-26JUN23COLCOD-COL
+      risk: 3
+      hope_bet: false
+      sgp_adjusted_joint_p: 0.41
+      sgp_adjusted_fair_payout_x: 2.4
+      minimum_payout_for_0p05_edge_x: 2.8
+      current_individual_ask_product_p: 0.435
+      current_naive_payout_x: 2.3
+      suggested_stake_units: 0
+      decision: pass_below_2p8x
+      note: "Different games reduce direct correlation, but the available price is still shorter than the adjusted fair estimate."
+    - id: CROATIA-PROFESSIONAL-SGP
+      label: Croatia by 2-3 goals to nil
+      legs:
+        - KXWCSPREAD-26JUN23PANCRO-CRO2
+        - KXWCTEAMTOTAL-26JUN23PANCRO-PAN1
+        - KXWCTOTAL-26JUN23PANCRO-4
+      risk: 4
+      hope_bet: false
+      sgp_adjusted_joint_p: 0.18
+      sgp_adjusted_fair_payout_x: 5.6
+      minimum_payout_for_0p05_edge_x: 7.7
+      current_naive_payout_x: 7.6
+      suggested_stake_units: 0
+      decision: pass_unless_sgp_offer_is_at_least_7p7x
+      note: "The legs are strongly correlated. The 7.6x naive multiplication is not a valid fair payout."
+    - id: PANAMA-CROATIA-CHAOS-SGP
+      label: Both teams score in a three-plus-goal match
+      legs:
+        - KXWCBTTS-26JUN23PANCRO-BTTS
+        - KXWCTOTAL-26JUN23PANCRO-3
+      risk: 4
+      hope_bet: false
+      sgp_adjusted_joint_p: 0.37
+      sgp_adjusted_fair_payout_x: 2.7
+      minimum_payout_for_0p05_edge_x: 3.2
+      current_naive_payout_x: 3.3
+      suggested_stake_units: 0
+      decision: lineup_supported_monitor_at_3p2x_or_better
+      note: "BTTS plus over 2.5 is a nested outcome; do not multiply the two legs as independent."
+    - id: COLOMBIA-CONTROL-SGP
+      label: Colombia wins 2-0 or 3-0
+      legs:
+        - KXWCSPREAD-26JUN23COLCOD-COL2
+        - KXWCTEAMTOTAL-26JUN23COLCOD-COD1
+        - KXWCTOTAL-26JUN23COLCOD-4
+      risk: 4
+      hope_bet: false
+      sgp_adjusted_joint_p: 0.19
+      sgp_adjusted_fair_payout_x: 5.3
+      minimum_payout_for_0p05_edge_x: 7.2
+      current_naive_payout_x: 6.9
+      suggested_stake_units: 0
+      decision: pass_unless_sgp_offer_is_at_least_7p2x
+      note: "Wait for Colombia's official lineup; the present combined price does not clear the edge gate."
+    - id: COLOMBIA-CONGO-ONE-ONE-HOPE
+      label: Colombia and DR Congo draw 1-1
+      legs:
+        - KXWCGAME-26JUN23COLCOD-TIE
+        - KXWCTOTAL-26JUN23COLCOD-3
+        - KXWCBTTS-26JUN23COLCOD-BTTS
+      risk: 5
+      hope_bet: true
+      sgp_adjusted_joint_p: 0.09
+      sgp_adjusted_fair_payout_x: 11.1
+      minimum_payout_for_0p05_edge_x: 25.0
+      current_naive_payout_x: 16.6
+      suggested_stake_units: 0
+      decision: pass_hope_bet
+      note: "This is an exact-score proxy and explicitly a hope bet, not a value play."
