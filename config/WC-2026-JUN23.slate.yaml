@@ -13,34 +13,50 @@ slate:
   date: "2026-06-23"
   timezone: America/New_York
   captured_at_utc: "2026-06-23T17:12:07Z"
+  reviewed_at_utc: "2026-06-23T22:01:42Z"
+  remaining_lines_refreshed_at_utc: "2026-06-23T22:06:42Z"
   source_note: "Kalshi open-market snapshot pulled on 2026-06-23; Portugal-Uzbekistan was already live."
   guardrail: "Report SGP-adjusted probabilities; do not use naive multiplied payout."
+  research_method: "Market team-total Poisson fit plus 0.90 uncertainty adjustment."
+  execution_guidance: "Monitor only. No remaining scenario has the configured 0.05 edge."
 
 matches:
   - id: PORUZB
     kickoff_et: "13:00"
     matchup: Portugal vs Uzbekistan
+    status: final
+    final_score: "Portugal 5-0 Uzbekistan"
+    calibration_eligible: false
+    calibration_note: "Scenario prices were captured after kickoff."
     context:
       - "Portugal drew DR Congo 1-1 in its opener and needs a cleaner chance-creation game."
       - "Uzbekistan lost 3-1 to Colombia and must survive long periods without the ball."
   - id: ENGGHA
     kickoff_et: "16:00"
     matchup: England vs Ghana
+    status: final
+    final_score: "England 0-0 Ghana"
+    calibration_eligible: true
     context:
       - "England opened with a 4-2 win over Croatia and showed high attacking ceiling."
       - "Ghana beat Panama late but conceded enough pressure to keep clean-sheet risk live."
   - id: PANCRO
     kickoff_et: "19:00"
     matchup: Panama vs Croatia
+    status: scheduled
     context:
       - "Croatia needs a bounce-back response after losing to England."
+      - "Both teams are on zero points, making a passive draw strategically weak."
+      - "Panama creator Adalberto Carrasquilla was returning only to partial training after a groin issue."
       - "Panama likely needs transition chances and set pieces to stay alive."
   - id: COLCOD
     kickoff_et: "22:00"
     matchup: Colombia vs DR Congo
+    status: scheduled
     context:
       - "Colombia beat Uzbekistan 3-1 and can take control of the group."
       - "DR Congo frustrated Portugal in a 1-1 draw and can make this game ugly."
+      - "Colombia can nearly secure progression with a win and is expected to retain its core lineup."
 
 scenarios:
   - id: POR-UZB-AVALANCHE
@@ -53,6 +69,13 @@ scenarios:
     hope_bet: false
     sgp_adjusted_joint_p: 0.44
     sgp_adjusted_payout_x: 2.3
+    snapshot_timing: in_play
+    calibration_eligible: false
+    result: hit
+    legs_hit: 3
+    total_legs: 3
+    brier_joint: 0.3136
+    review: "The 5-0 score matched the avalanche script, but this is not valid evidence of pregame edge because the prices were captured after kickoff."
     legs:
       - label: Portugal wins by more than 2.5 goals
         ticker: KXWCSPREAD-26JUN23PORUZB-POR3
@@ -86,6 +109,13 @@ scenarios:
     hope_bet: false
     sgp_adjusted_joint_p: 0.35
     sgp_adjusted_payout_x: 2.9
+    snapshot_timing: in_play
+    calibration_eligible: false
+    result: miss
+    legs_hit: 2
+    total_legs: 3
+    brier_joint: 0.1225
+    review: "Portugal won and kept a clean sheet, but five goals broke the under. The scenario mixed a strong favorite with a fragile tempo assumption."
     legs:
       - label: Portugal wins
         ticker: KXWCGAME-26JUN23PORUZB-POR
@@ -119,6 +149,13 @@ scenarios:
     hope_bet: false
     sgp_adjusted_joint_p: 0.34
     sgp_adjusted_payout_x: 2.9
+    snapshot_timing: pregame
+    calibration_eligible: true
+    result: miss
+    legs_hit: 2
+    total_legs: 3
+    brier_joint: 0.1156
+    review: "The clean-sheet and under legs were correct, but England never broke Ghana's low block. Future favorite scenarios need a draw/low-block counter-script."
     legs:
       - label: England wins by more than 1.5 goals
         ticker: KXWCSPREAD-26JUN23ENGGHA-ENG2
@@ -152,6 +189,13 @@ scenarios:
     hope_bet: false
     sgp_adjusted_joint_p: 0.27
     sgp_adjusted_payout_x: 3.7
+    snapshot_timing: pregame
+    calibration_eligible: true
+    result: miss
+    legs_hit: 0
+    total_legs: 3
+    brier_joint: 0.0729
+    review: "All three attacking assumptions failed in the 0-0 draw. One high-scoring opener was overweighted relative to Ghana's defensive shape."
     legs:
       - label: England wins
         ticker: KXWCGAME-26JUN23ENGGHA-ENG
@@ -183,30 +227,32 @@ scenarios:
     counter: "Panama scoring once turns the clean-margin script into chaos."
     risk: 4
     hope_bet: false
-    sgp_adjusted_joint_p: 0.22
-    sgp_adjusted_payout_x: 4.5
+    research_status: monitor_only_no_edge
+    probability_basis: "Croatia 2.153 xG, Panama 0.825 xG; 2-0 or 3-0 scorelines; 0.90 uncertainty adjustment."
+    sgp_adjusted_joint_p: 0.18
+    sgp_adjusted_payout_x: 5.6
     legs:
       - label: Croatia wins by more than 1.5 goals
         ticker: KXWCSPREAD-26JUN23PANCRO-CRO2
         side: yes
-        bid_cents: 41
-        ask_cents: 42
-        market_implied_p: 0.42
-        model_p: 0.43
+        bid_cents: 43
+        ask_cents: 44
+        market_implied_p: 0.44
+        model_p: 0.438
       - label: Panama under 0.5 team goals
         ticker: KXWCTEAMTOTAL-26JUN23PANCRO-PAN1
         side: no
-        bid_cents: 42
-        ask_cents: 43
-        market_implied_p: 0.43
-        model_p: 0.43
+        bid_cents: 43
+        ask_cents: 44
+        market_implied_p: 0.44
+        model_p: 0.438
       - label: Match under 3.5 goals
         ticker: KXWCTOTAL-26JUN23PANCRO-4
         side: no
         bid_cents: 65
         ask_cents: 66
         market_implied_p: 0.66
-        model_p: 0.65
+        model_p: 0.652
 
   - id: PAN-CRO-CHAOS
     match_id: PANCRO
@@ -216,8 +262,10 @@ scenarios:
     counter: "Croatia's midfield control can turn this into a slow 2-0 instead of BTTS."
     risk: 4
     hope_bet: false
-    sgp_adjusted_joint_p: 0.31
-    sgp_adjusted_payout_x: 3.2
+    research_status: monitor_only_no_edge
+    probability_basis: "Croatia 2.153 xG, Panama 0.825 xG; both score and total reaches at least three; 0.90 uncertainty adjustment."
+    sgp_adjusted_joint_p: 0.37
+    sgp_adjusted_payout_x: 2.7
     legs:
       - label: Both teams score
         ticker: KXWCBTTS-26JUN23PANCRO-BTTS
@@ -225,21 +273,21 @@ scenarios:
         bid_cents: 51
         ask_cents: 52
         market_implied_p: 0.52
-        model_p: 0.53
+        model_p: 0.497
       - label: Match over 2.5 goals
         ticker: KXWCTOTAL-26JUN23PANCRO-3
         side: yes
         bid_cents: 57
         ask_cents: 58
         market_implied_p: 0.58
-        model_p: 0.58
+        model_p: 0.572
       - label: Panama over 0.5 team goals
         ticker: KXWCTEAMTOTAL-26JUN23PANCRO-PAN1
         side: yes
-        bid_cents: 57
-        ask_cents: 58
-        market_implied_p: 0.58
-        model_p: 0.57
+        bid_cents: 56
+        ask_cents: 57
+        market_implied_p: 0.57
+        model_p: 0.562
 
   - id: COL-COD-CONTROL
     match_id: COLCOD
@@ -249,8 +297,10 @@ scenarios:
     counter: "DR Congo already held Portugal to 1-1; a low-block draw is live if Colombia gets impatient."
     risk: 3
     hope_bet: false
-    sgp_adjusted_joint_p: 0.24
-    sgp_adjusted_payout_x: 4.2
+    research_status: monitor_only_no_edge
+    probability_basis: "Colombia 1.769 xG, DR Congo 0.702 xG; 2-0 or 3-0 scorelines; 0.90 uncertainty adjustment."
+    sgp_adjusted_joint_p: 0.19
+    sgp_adjusted_payout_x: 5.3
     legs:
       - label: Colombia wins by more than 1.5 goals
         ticker: KXWCSPREAD-26JUN23COLCOD-COL2
@@ -258,21 +308,21 @@ scenarios:
         bid_cents: 36
         ask_cents: 37
         market_implied_p: 0.37
-        model_p: 0.38
+        model_p: 0.366
       - label: DR Congo under 0.5 team goals
         ticker: KXWCTEAMTOTAL-26JUN23COLCOD-COD1
         side: no
         bid_cents: 49
         ask_cents: 50
         market_implied_p: 0.50
-        model_p: 0.50
+        model_p: 0.496
       - label: Match under 3.5 goals
         ticker: KXWCTOTAL-26JUN23COLCOD-4
         side: no
         bid_cents: 77
         ask_cents: 78
         market_implied_p: 0.78
-        model_p: 0.77
+        model_p: 0.764
 
   - id: COL-COD-STALEMATE-HOPE
     match_id: COLCOD
@@ -282,8 +332,10 @@ scenarios:
     counter: "If Colombia scores early, the draw/under script dies quickly."
     risk: 5
     hope_bet: true
-    sgp_adjusted_joint_p: 0.10
-    sgp_adjusted_payout_x: 10.0
+    research_status: monitor_only_no_edge
+    probability_basis: "Exact 1-1 scoreline from Colombia 1.769 xG and DR Congo 0.702 xG; 0.90 uncertainty adjustment."
+    sgp_adjusted_joint_p: 0.09
+    sgp_adjusted_payout_x: 11.1
     legs:
       - label: Draw
         ticker: KXWCGAME-26JUN23COLCOD-TIE
@@ -291,18 +343,34 @@ scenarios:
         bid_cents: 23
         ask_cents: 24
         market_implied_p: 0.24
-        model_p: 0.24
+        model_p: 0.227
       - label: Match under 2.5 goals
         ticker: KXWCTOTAL-26JUN23COLCOD-3
         side: no
         bid_cents: 55
         ask_cents: 56
         market_implied_p: 0.56
-        model_p: 0.56
+        model_p: 0.551
       - label: Both teams score
         ticker: KXWCBTTS-26JUN23COLCOD-BTTS
         side: yes
         bid_cents: 43
         ask_cents: 44
         market_implied_p: 0.44
-        model_p: 0.44
+        model_p: 0.418
+
+postmortem:
+  completed_matches: 2
+  calibration_eligible_scenarios: 2
+  eligible_hits: 0
+  eligible_brier_mean: 0.09425
+  result_sources:
+    - "FIFA/ESPN and settled Kalshi markets: Portugal 5-0 Uzbekistan."
+    - "FIFA/Guardian and settled Kalshi markets: England 0-0 Ghana."
+  findings:
+    - "Do not publish a slate-level captured_at when matches have different kickoff states; record timing per match."
+    - "Portugal's winning scenario was in-play and must not be presented as pregame forecasting performance."
+    - "England-Ghana required a favorite-fails-to-break-low-block scenario; both published scripts leaned toward an England win."
+    - "Nested legs need scoreline-set probability, not hand-adjusted multiplication."
+    - "Official lineups should trigger a final probability refresh 60-75 minutes before kickoff."
+    - "No remaining leg has a model edge of 0.05, so the polished recommendation is monitoring, not execution."

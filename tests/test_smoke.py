@@ -13,7 +13,19 @@ import pytest
 os.environ.setdefault("KALSHI_API_KEY", "test")
 os.environ.setdefault("NBABOT_GAME_ID", "NBA-2026-FINALS-G3")
 
-from nbabot import backtesting, calibration, execution, guardrails, market_discovery, research, risk, scenarios, sizing, ui  # noqa: E402
+from nbabot import (  # noqa: E402
+    backtesting,
+    calibration,
+    execution,
+    guardrails,
+    market_discovery,
+    research,
+    risk,
+    scenarios,
+    sizing,
+    soccer_research,
+    ui,
+)
 from nbabot.agents import PHASES, reconcile  # noqa: E402
 from nbabot.kalshi import Quote, _TITLE_RE  # noqa: E402
 from nbabot.scores import GameState, PlayerLine  # noqa: E402
@@ -311,6 +323,26 @@ def test_capped_kelly_uses_five_unit_default_cap():
 
     assert result.stake_units == guardrails.MAX_STAKE_UNITS
     assert result.contracts == 10
+
+
+def test_soccer_expected_goals_fit_and_scoreline_probability():
+    panama_xg = soccer_research.fit_expected_goals({1: 0.565, 2: 0.195, 3: 0.055})
+    croatia_xg = soccer_research.fit_expected_goals(
+        {1: 0.875, 2: 0.635, 3: 0.365, 4: 0.175}
+    )
+    professional = soccer_research.scoreline_probability(
+        croatia_xg,
+        panama_xg,
+        lambda croatia, panama: panama == 0 and croatia in (2, 3),
+    )
+
+    assert panama_xg == pytest.approx(0.825, abs=0.002)
+    assert croatia_xg == pytest.approx(2.153, abs=0.002)
+    assert professional == pytest.approx(0.203, abs=0.002)
+
+
+def test_soccer_uncertainty_adjust_is_conservative():
+    assert soccer_research.uncertainty_adjust(0.40) == pytest.approx(0.36)
 
 
 def test_paper_execution_is_idempotent(tmp_path):
