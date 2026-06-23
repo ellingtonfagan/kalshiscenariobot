@@ -1,0 +1,308 @@
+# World Cup scenario slate for Tuesday, 2026-06-23.
+#
+# This is a soccer slate playbook, not an NBA `scenarios.py` runtime config.
+# Legs are mapped directly to Kalshi tickers because the current live scenario
+# engine resolves NBA box-score props and simple NBA winners, not soccer totals.
+# Use this for research, alerts, paper/live intent construction, and future
+# soccer resolver work.
+
+slate:
+  id: WC-2026-JUN23
+  sport: soccer
+  competition: FIFA World Cup 2026
+  date: "2026-06-23"
+  timezone: America/New_York
+  captured_at_utc: "2026-06-23T17:12:07Z"
+  source_note: "Kalshi open-market snapshot pulled on 2026-06-23; Portugal-Uzbekistan was already live."
+  guardrail: "Report SGP-adjusted probabilities; do not use naive multiplied payout."
+
+matches:
+  - id: PORUZB
+    kickoff_et: "13:00"
+    matchup: Portugal vs Uzbekistan
+    context:
+      - "Portugal drew DR Congo 1-1 in its opener and needs a cleaner chance-creation game."
+      - "Uzbekistan lost 3-1 to Colombia and must survive long periods without the ball."
+  - id: ENGGHA
+    kickoff_et: "16:00"
+    matchup: England vs Ghana
+    context:
+      - "England opened with a 4-2 win over Croatia and showed high attacking ceiling."
+      - "Ghana beat Panama late but conceded enough pressure to keep clean-sheet risk live."
+  - id: PANCRO
+    kickoff_et: "19:00"
+    matchup: Panama vs Croatia
+    context:
+      - "Croatia needs a bounce-back response after losing to England."
+      - "Panama likely needs transition chances and set pieces to stay alive."
+  - id: COLCOD
+    kickoff_et: "22:00"
+    matchup: Colombia vs DR Congo
+    context:
+      - "Colombia beat Uzbekistan 3-1 and can take control of the group."
+      - "DR Congo frustrated Portugal in a 1-1 draw and can make this game ugly."
+
+scenarios:
+  - id: POR-UZB-AVALANCHE
+    match_id: PORUZB
+    name: Portugal avalanche
+    side: POR
+    trigger: "Portugal scores before 30', Uzbekistan opens up, Portugal chance volume compounds."
+    counter: "If Uzbekistan reaches halftime level or only down one, the wide spread becomes fragile."
+    risk: 3
+    hope_bet: false
+    sgp_adjusted_joint_p: 0.44
+    sgp_adjusted_payout_x: 2.3
+    legs:
+      - label: Portugal wins by more than 2.5 goals
+        ticker: KXWCSPREAD-26JUN23PORUZB-POR3
+        side: yes
+        bid_cents: 63
+        ask_cents: 64
+        market_implied_p: 0.64
+        model_p: 0.66
+      - label: Portugal over 2.5 team goals
+        ticker: KXWCTEAMTOTAL-26JUN23PORUZB-POR3
+        side: yes
+        bid_cents: 79
+        ask_cents: 80
+        market_implied_p: 0.80
+        model_p: 0.82
+      - label: Match over 3.5 goals
+        ticker: KXWCTOTAL-26JUN23PORUZB-4
+        side: yes
+        bid_cents: 60
+        ask_cents: 62
+        market_implied_p: 0.62
+        model_p: 0.63
+
+  - id: POR-UZB-CONTROLLED-CLEAN
+    match_id: PORUZB
+    name: Portugal controlled clean win
+    side: POR
+    trigger: "Portugal dominates territory but does not need a shootout; Uzbekistan rarely reaches high-quality shots."
+    counter: "One Uzbekistan goal forces this script into BTTS/over territory."
+    risk: 3
+    hope_bet: false
+    sgp_adjusted_joint_p: 0.35
+    sgp_adjusted_payout_x: 2.9
+    legs:
+      - label: Portugal wins
+        ticker: KXWCGAME-26JUN23PORUZB-POR
+        side: yes
+        bid_cents: 96
+        ask_cents: 97
+        market_implied_p: 0.97
+        model_p: 0.96
+      - label: Uzbekistan under 0.5 team goals
+        ticker: KXWCTEAMTOTAL-26JUN23PORUZB-UZB1
+        side: no
+        bid_cents: 63
+        ask_cents: 64
+        market_implied_p: 0.64
+        model_p: 0.64
+      - label: Match under 3.5 goals
+        ticker: KXWCTOTAL-26JUN23PORUZB-4
+        side: no
+        bid_cents: 38
+        ask_cents: 40
+        market_implied_p: 0.40
+        model_p: 0.39
+
+  - id: ENG-GHA-CLEAN-SHEET
+    match_id: ENGGHA
+    name: England squeeze and clean sheet
+    side: ENG
+    trigger: "England controls rest defense, Ghana struggles to progress centrally, England win margin grows late."
+    counter: "Ghana scoring first or forcing transition fouls kills the clean-sheet leg."
+    risk: 3
+    hope_bet: false
+    sgp_adjusted_joint_p: 0.34
+    sgp_adjusted_payout_x: 2.9
+    legs:
+      - label: England wins by more than 1.5 goals
+        ticker: KXWCSPREAD-26JUN23ENGGHA-ENG2
+        side: yes
+        bid_cents: 63
+        ask_cents: 64
+        market_implied_p: 0.64
+        model_p: 0.65
+      - label: Ghana under 0.5 team goals
+        ticker: KXWCTEAMTOTAL-26JUN23ENGGHA-GHA1
+        side: no
+        bid_cents: 58
+        ask_cents: 59
+        market_implied_p: 0.59
+        model_p: 0.60
+      - label: Match under 3.5 goals
+        ticker: KXWCTOTAL-26JUN23ENGGHA-4
+        side: no
+        bid_cents: 60
+        ask_cents: 61
+        market_implied_p: 0.61
+        model_p: 0.60
+
+  - id: ENG-GHA-TRACK-MEET
+    match_id: ENGGHA
+    name: England win with Ghana resistance
+    side: ENG
+    trigger: "England's attack stays hot, but Ghana's pace creates enough transition danger for both teams to score."
+    counter: "If England scores early and manages the game, BTTS becomes the weak leg."
+    risk: 4
+    hope_bet: false
+    sgp_adjusted_joint_p: 0.27
+    sgp_adjusted_payout_x: 3.7
+    legs:
+      - label: England wins
+        ticker: KXWCGAME-26JUN23ENGGHA-ENG
+        side: yes
+        bid_cents: 82
+        ask_cents: 83
+        market_implied_p: 0.83
+        model_p: 0.83
+      - label: Both teams score
+        ticker: KXWCBTTS-26JUN23ENGGHA-BTTS
+        side: yes
+        bid_cents: 39
+        ask_cents: 40
+        market_implied_p: 0.40
+        model_p: 0.41
+      - label: Match over 2.5 goals
+        ticker: KXWCTOTAL-26JUN23ENGGHA-3
+        side: yes
+        bid_cents: 61
+        ask_cents: 62
+        market_implied_p: 0.62
+        model_p: 0.63
+
+  - id: PAN-CRO-PROFESSIONAL
+    match_id: PANCRO
+    name: Croatia professional bounceback
+    side: CRO
+    trigger: "Croatia slows the game, scores first, and forces Panama to chase low-percentage attacks."
+    counter: "Panama scoring once turns the clean-margin script into chaos."
+    risk: 4
+    hope_bet: false
+    sgp_adjusted_joint_p: 0.22
+    sgp_adjusted_payout_x: 4.5
+    legs:
+      - label: Croatia wins by more than 1.5 goals
+        ticker: KXWCSPREAD-26JUN23PANCRO-CRO2
+        side: yes
+        bid_cents: 41
+        ask_cents: 42
+        market_implied_p: 0.42
+        model_p: 0.43
+      - label: Panama under 0.5 team goals
+        ticker: KXWCTEAMTOTAL-26JUN23PANCRO-PAN1
+        side: no
+        bid_cents: 42
+        ask_cents: 43
+        market_implied_p: 0.43
+        model_p: 0.43
+      - label: Match under 3.5 goals
+        ticker: KXWCTOTAL-26JUN23PANCRO-4
+        side: no
+        bid_cents: 65
+        ask_cents: 66
+        market_implied_p: 0.66
+        model_p: 0.65
+
+  - id: PAN-CRO-CHAOS
+    match_id: PANCRO
+    name: Panama drags Croatia into chaos
+    side: PAN
+    trigger: "Panama threatens in transition, Croatia still creates volume, and the match opens by halftime."
+    counter: "Croatia's midfield control can turn this into a slow 2-0 instead of BTTS."
+    risk: 4
+    hope_bet: false
+    sgp_adjusted_joint_p: 0.31
+    sgp_adjusted_payout_x: 3.2
+    legs:
+      - label: Both teams score
+        ticker: KXWCBTTS-26JUN23PANCRO-BTTS
+        side: yes
+        bid_cents: 51
+        ask_cents: 52
+        market_implied_p: 0.52
+        model_p: 0.53
+      - label: Match over 2.5 goals
+        ticker: KXWCTOTAL-26JUN23PANCRO-3
+        side: yes
+        bid_cents: 57
+        ask_cents: 58
+        market_implied_p: 0.58
+        model_p: 0.58
+      - label: Panama over 0.5 team goals
+        ticker: KXWCTEAMTOTAL-26JUN23PANCRO-PAN1
+        side: yes
+        bid_cents: 57
+        ask_cents: 58
+        market_implied_p: 0.58
+        model_p: 0.57
+
+  - id: COL-COD-CONTROL
+    match_id: COLCOD
+    name: Colombia controls DR Congo
+    side: COL
+    trigger: "Colombia scores first, denies transition, and DR Congo stays pinned for long defensive spells."
+    counter: "DR Congo already held Portugal to 1-1; a low-block draw is live if Colombia gets impatient."
+    risk: 3
+    hope_bet: false
+    sgp_adjusted_joint_p: 0.24
+    sgp_adjusted_payout_x: 4.2
+    legs:
+      - label: Colombia wins by more than 1.5 goals
+        ticker: KXWCSPREAD-26JUN23COLCOD-COL2
+        side: yes
+        bid_cents: 36
+        ask_cents: 37
+        market_implied_p: 0.37
+        model_p: 0.38
+      - label: DR Congo under 0.5 team goals
+        ticker: KXWCTEAMTOTAL-26JUN23COLCOD-COD1
+        side: no
+        bid_cents: 49
+        ask_cents: 50
+        market_implied_p: 0.50
+        model_p: 0.50
+      - label: Match under 3.5 goals
+        ticker: KXWCTOTAL-26JUN23COLCOD-4
+        side: no
+        bid_cents: 77
+        ask_cents: 78
+        market_implied_p: 0.78
+        model_p: 0.77
+
+  - id: COL-COD-STALEMATE-HOPE
+    match_id: COLCOD
+    name: DR Congo stalemate hope bet
+    side: COD
+    trigger: "DR Congo repeats the Portugal low-block script and steals one transition or set-piece goal."
+    counter: "If Colombia scores early, the draw/under script dies quickly."
+    risk: 5
+    hope_bet: true
+    sgp_adjusted_joint_p: 0.10
+    sgp_adjusted_payout_x: 10.0
+    legs:
+      - label: Draw
+        ticker: KXWCGAME-26JUN23COLCOD-TIE
+        side: yes
+        bid_cents: 23
+        ask_cents: 24
+        market_implied_p: 0.24
+        model_p: 0.24
+      - label: Match under 2.5 goals
+        ticker: KXWCTOTAL-26JUN23COLCOD-3
+        side: no
+        bid_cents: 55
+        ask_cents: 56
+        market_implied_p: 0.56
+        model_p: 0.56
+      - label: Both teams score
+        ticker: KXWCBTTS-26JUN23COLCOD-BTTS
+        side: yes
+        bid_cents: 43
+        ask_cents: 44
+        market_implied_p: 0.44
+        model_p: 0.44
