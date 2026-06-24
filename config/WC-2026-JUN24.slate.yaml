@@ -13,7 +13,10 @@ slate:
   researched_at_utc: "2026-06-24T16:26:04Z"
   phase: scenario_research_only
   line_analysis_status: deferred
+  market_alignment_status: complete
+  market_snapshot_at_utc: "2026-06-24T16:55:58Z"
   execution_status: disabled
+  market_alignment_report: docs/WC-2026-JUN24-market-alignment.md
   methodology:
     - "Start with group incentives, prior match performance, availability, and tactical shape."
     - "Define scenarios as coherent scoreline sets before selecting any market legs."

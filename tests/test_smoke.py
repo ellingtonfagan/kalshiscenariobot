@@ -477,7 +477,11 @@ def test_june_24_world_cup_slate_defers_line_analysis():
     slate = yaml.safe_load((root / "config" / "WC-2026-JUN24.slate.yaml").read_text())
 
     assert slate["slate"]["line_analysis_status"] == "deferred"
+    assert slate["slate"]["market_alignment_status"] == "complete"
     assert slate["slate"]["execution_status"] == "disabled"
+    report = root / slate["slate"]["market_alignment_report"]
+    assert report.exists()
+    assert "No parlay is constructed" in report.read_text()
     assert len(slate["matches"]) == 6
     assert len(slate["scenarios"]) == 12
 
