@@ -1,0 +1,396 @@
+# World Cup scenario research slate for Wednesday, 2026-06-24.
+#
+# This file intentionally contains no Kalshi prices, ticker mappings, payouts,
+# edge calculations, or stake suggestions. Those belong to a later line-analysis
+# pass after official lineups and executable prices are available.
+
+slate:
+  id: WC-2026-JUN24
+  sport: soccer
+  competition: FIFA World Cup 2026
+  date: "2026-06-24"
+  timezone: America/New_York
+  researched_at_utc: "2026-06-24T16:26:04Z"
+  phase: scenario_research_only
+  line_analysis_status: deferred
+  execution_status: disabled
+  methodology:
+    - "Start with group incentives, prior match performance, availability, and tactical shape."
+    - "Define scenarios as coherent scoreline sets before selecting any market legs."
+    - "Pair the expected script with a credible counter-script for every match."
+    - "Do not infer that a must-win match must be high scoring."
+    - "Refresh after official lineups; analyze Kalshi prices only in a separate pass."
+
+yesterday_review:
+  slate_id: WC-2026-JUN23
+  results:
+    - matchup: Portugal vs Uzbekistan
+      final_score: "5-0"
+      lesson: "The avalanche script hit, but it was captured in-play and is excluded from pregame calibration."
+    - matchup: England vs Ghana
+      final_score: "0-0"
+      lesson: "Both published scripts leaned toward an England win; every large favorite needs a low-block failure scenario."
+    - matchup: Panama vs Croatia
+      final_score: "0-1"
+      lesson: "Croatia control and Panama scoring weakness were correct, but the two-goal-margin requirement was too aggressive."
+    - matchup: Colombia vs DR Congo
+      final_score: "1-0"
+      lesson: "Favorite win-to-nil was the right direction; low-block opponents make narrow wins more likely than alternate spreads."
+  rules_carried_forward:
+    - "Use 1-0 and 2-0 as the primary favorite-control scorelines against compact underdogs."
+    - "Separate margin scenarios from clean-sheet scenarios instead of assuming both."
+    - "Treat lineup absences as stronger evidence than generic must-win narratives."
+    - "Include draw or favorite-frustration scripts when one side benefits from game control."
+
+matches:
+  - id: BIHQAT
+    kickoff_et: "15:00"
+    group: B
+    matchup: Bosnia and Herzegovina vs Qatar
+    venue: Seattle
+    standings_context:
+      - "Both teams have one point; a draw is unlikely to help either qualify."
+      - "Bosnia lost 4-1 to Switzerland after drawing Canada 1-1."
+      - "Qatar drew Switzerland 1-1 before losing 6-0 to Canada."
+    availability:
+      - "Bosnia defender Tarik Muharemovic is suspended after his red card against Switzerland."
+      - "Qatar is without Homam Ahmed and Assim Madibo after red cards against Canada."
+      - "Haris Tabakovic is available again to support Bosnia's striker depth."
+    decisive_questions:
+      - "Can Bosnia convert box entries and set pieces through Dzeko, Demirovic, or Tabakovic?"
+      - "Can Qatar survive its defensive absences and release Akram Afif in transition?"
+
+  - id: SUICAN
+    kickoff_et: "15:00"
+    group: B
+    matchup: Switzerland vs Canada
+    venue: Vancouver
+    standings_context:
+      - "Both teams have four points and are nearly through."
+      - "Canada wins the group with a draw because of its superior goal difference."
+      - "Switzerland must win to take first place."
+    availability:
+      - "Canada midfielder Ismael Kone is out after a serious leg injury against Qatar."
+      - "Alphonso Davies may again be limited while returning from long-term injury."
+      - "Switzerland has generated 39 shots and 5.26 expected goals through two matches."
+    decisive_questions:
+      - "Can Canada protect central midfield without Kone?"
+      - "Will Switzerland's need to win overcome Canada's home advantage and draw-friendly incentive?"
+
+  - id: MORHAI
+    kickoff_et: "18:00"
+    group: C
+    matchup: Morocco vs Haiti
+    venue: Atlanta
+    standings_context:
+      - "Morocco has four points and can still win the group."
+      - "Haiti is eliminated after two scoreless defeats."
+      - "Goal difference may determine whether Morocco finishes above Brazil."
+    availability:
+      - "Morocco is expected to preserve its established attacking core."
+      - "Haiti has no major injury concerns and may switch from a back five to a more adventurous 4-4-2."
+    decisive_questions:
+      - "Does Morocco convert territorial dominance early enough to chase margin?"
+      - "Does Haiti's freedom to attack create its first goal or simply expose more space?"
+
+  - id: SCOBRA
+    kickoff_et: "18:00"
+    group: C
+    matchup: Scotland vs Brazil
+    venue: Miami
+    standings_context:
+      - "Brazil leads the group with four points and a draw guarantees progression."
+      - "Scotland has three points and also guarantees progression with a draw."
+      - "Morocco can pressure both teams' group position by beating Haiti."
+    availability:
+      - "Brazil winger Raphinha is unavailable with a hamstring injury."
+      - "Neymar has returned to full training but is expected to begin on the bench."
+      - "Scotland defender Scott McKenna has returned to training; Aaron Hickey remains doubtful."
+    decisive_questions:
+      - "Will both teams' draw incentive suppress risk?"
+      - "Can Brazil's altered attack break Scotland's compact back three without Raphinha?"
+
+  - id: CZEMEX
+    kickoff_et: "21:00"
+    group: A
+    matchup: Czechia vs Mexico
+    venue: Mexico City
+    standings_context:
+      - "Mexico has six points and has already clinched first place."
+      - "Czechia has one point and needs a win to preserve a realistic qualification path."
+      - "Mexico can rotate while Czechia must eventually increase risk."
+    availability:
+      - "Czechia left back David Jurasek remains unavailable."
+      - "Patrik Schick is still searching for his first tournament goal."
+      - "Mexico may rotate, but previews still project a strong core at altitude."
+    decisive_questions:
+      - "How much does Mexico rotate after clinching the group?"
+      - "Can Czechia create enough around Schick without exposing its back line?"
+
+  - id: RSAKOR
+    kickoff_et: "21:00"
+    group: A
+    matchup: South Africa vs South Korea
+    venue: Monterrey
+    standings_context:
+      - "South Korea has three points and advances with a win or draw."
+      - "South Africa has one point and must win while monitoring Czechia-Mexico."
+      - "South Africa's need to chase may create late transition space."
+    availability:
+      - "South Africa is without suspended midfielders Themba Zwane and Teboho Mokoena."
+      - "Sphephelo Sithole returns from suspension."
+      - "South Korea has no reported unavailable players and can build around Son Heung-min, Lee Kang-in, and Kim Min-jae."
+    decisive_questions:
+      - "Can South Africa replace the control and set-piece quality lost with Mokoena and Zwane?"
+      - "Will South Korea manage the draw or punish South Africa once it opens up?"
+
+scenarios:
+  - id: BIH-QAT-BOSNIA-BOX-PRESSURE
+    match_id: BIHQAT
+    name: Bosnia owns the penalty area
+    side: BIH
+    research_confidence: medium
+    trigger: "Bosnia wins early set pieces and second balls, then sustains pressure through multiple central targets."
+    counter: "Muharemovic's absence weakens rest defense and leaves Bosnia vulnerable when attacks break down."
+    scoreline_set: ["2-0", "2-1", "3-1"]
+    outcome_shape:
+      - "Bosnia wins."
+      - "Bosnia scores at least twice."
+      - "The match does not require a Qatar goal."
+    monitor:
+      - "Bosnia touches and aerial wins inside Qatar's box."
+      - "Whether Dzeko has a second striker close enough to collect knockdowns."
+      - "Qatar's replacement defensive structure."
+    pricing_status: deferred
+
+  - id: BIH-QAT-DESPERATION-CHAOS
+    match_id: BIHQAT
+    name: Elimination pressure opens the match
+    side: BOTH
+    research_confidence: medium
+    trigger: "The match remains level into the second half, making a draw useless and forcing both teams to add attackers."
+    counter: "Bosnia scores early and controls territory without allowing Qatar transition access."
+    scoreline_set: ["2-1", "1-2", "2-2", "3-1"]
+    outcome_shape:
+      - "Both teams score."
+      - "At least three total goals."
+      - "A second-half goal materially changes qualification."
+    monitor:
+      - "Akram Afif receiving behind Bosnia's midfield."
+      - "Bosnia's center-back spacing without Muharemovic."
+      - "Score state after 55 minutes."
+    pricing_status: deferred
+
+  - id: SUI-CAN-SWISS-PRESSURE
+    match_id: SUICAN
+    name: Switzerland takes the group
+    side: SUI
+    research_confidence: medium
+    trigger: "Switzerland's midfield controls second balls and its sustained shot volume exposes Canada's Kone-less center."
+    counter: "Canada can play toward a draw and has enough transition quality through David, Larin, and Buchanan."
+    scoreline_set: ["1-0", "2-0", "2-1"]
+    outcome_shape:
+      - "Switzerland wins narrowly."
+      - "Canada scores no more than once."
+      - "The match stays below five total goals."
+    monitor:
+      - "Canada's replacement midfield pairing."
+      - "Switzerland's shots and entries before halftime."
+      - "Davies' availability and role."
+    pricing_status: deferred
+
+  - id: SUI-CAN-CANADA-MANAGES-TOP
+    match_id: SUICAN
+    name: Canada manages first place
+    side: CAN
+    research_confidence: medium
+    trigger: "Canada protects the center, accepts lower possession, and creates enough transition threat to stop Switzerland overcommitting."
+    counter: "Switzerland scores first and removes Canada's ability to manage the draw."
+    scoreline_set: ["0-0", "1-1", "1-0"]
+    outcome_shape:
+      - "Canada avoids defeat."
+      - "No more than two total goals."
+      - "Canada finishes first in Group B."
+    monitor:
+      - "Canada's defensive distance between midfield and center backs."
+      - "Jonathan David's ability to hold transition possessions."
+      - "Whether Switzerland commits both fullbacks high."
+    pricing_status: deferred
+
+  - id: MOR-HAI-MARGIN-CHASE
+    match_id: MORHAI
+    name: Morocco chases first-place margin
+    side: MOR
+    research_confidence: medium_high
+    trigger: "Morocco scores in the first half and keeps attacking because goal difference remains relevant."
+    counter: "Haiti's goalkeeper and compact defending reproduce the resistance shown in its first two matches."
+    scoreline_set: ["2-0", "3-0", "4-0", "3-1"]
+    outcome_shape:
+      - "Morocco wins by multiple goals."
+      - "Morocco scores at least twice."
+      - "Haiti scores no more than once."
+    monitor:
+      - "Brahim Diaz and Ismael Saibari combinations between the lines."
+      - "Morocco's shot quality rather than raw possession."
+      - "Whether Haiti uses a back four or back five."
+    pricing_status: deferred
+
+  - id: MOR-HAI-HAITI-FREEDOM
+    match_id: MORHAI
+    name: Haiti finally attacks
+    side: HAI
+    research_confidence: low
+    trigger: "Haiti uses two forwards, attacks earlier than in prior matches, and finds its first tournament goal."
+    counter: "A more adventurous shape gives Morocco even more transition and wide overloads."
+    scoreline_set: ["1-1", "2-1", "3-1"]
+    outcome_shape:
+      - "Haiti scores."
+      - "Both teams score."
+      - "Morocco may still win."
+    monitor:
+      - "Wilson Isidor and Frantzdy Pierrot starting together."
+      - "Haiti's first-half shots on target."
+      - "Space behind Haiti's fullbacks."
+    pricing_status: deferred
+
+  - id: SCO-BRA-CONTROLLED-BRAZIL
+    match_id: SCOBRA
+    name: Brazil solves the low block narrowly
+    side: BRA
+    research_confidence: medium
+    trigger: "Brazil circulates patiently, avoids Scotland's transition traps, and creates through Vinicius Junior and Matheus Cunha."
+    counter: "Raphinha's absence reduces width and Scotland's back five protects the box."
+    scoreline_set: ["1-0", "2-0", "2-1"]
+    outcome_shape:
+      - "Brazil wins."
+      - "Brazil does not require a large margin."
+      - "The match stays at three goals or fewer."
+    monitor:
+      - "Brazil's right-side replacement for Raphinha."
+      - "Scotland's ability to prevent central cutbacks."
+      - "Neymar's minutes and match state when introduced."
+    pricing_status: deferred
+
+  - id: SCO-BRA-MUTUAL-CAUTION
+    match_id: SCOBRA
+    name: Both teams protect qualification
+    side: DRAW
+    research_confidence: medium
+    trigger: "The match remains level past halftime and neither team wants to expose itself while the other Group C match is close."
+    counter: "An early Morocco lead increases Brazil's need to win the group, or an early Brazil goal forces Scotland forward."
+    scoreline_set: ["0-0", "1-1"]
+    outcome_shape:
+      - "The match is drawn."
+      - "Two or fewer total goals."
+      - "Scotland reaches the knockouts."
+    monitor:
+      - "Tempo during the opening 20 minutes."
+      - "Live Morocco-Haiti score."
+      - "Scotland's wingbacks' average position."
+    pricing_status: deferred
+
+  - id: CZE-MEX-MEXICO-CONTROL
+    match_id: CZEMEX
+    name: Mexico's depth controls Czechia
+    side: MEX
+    research_confidence: medium
+    trigger: "Mexico's rotated or full-strength midfield still controls altitude and territory while Czechia struggles to supply Schick."
+    counter: "Heavy rotation reduces Mexico's cohesion and Czechia's urgency wins second balls."
+    scoreline_set: ["1-0", "2-0", "2-1"]
+    outcome_shape:
+      - "Mexico remains unbeaten."
+      - "Czechia scores no more than once."
+      - "Mexico punishes Czechia after it increases risk."
+    monitor:
+      - "Mexico's confirmed rotation count."
+      - "Schick's touches in the penalty area."
+      - "Czechia's ability to sustain pressure at altitude."
+    pricing_status: deferred
+
+  - id: CZE-MEX-CZECH-DESPERATION
+    match_id: CZEMEX
+    name: Czechia turns necessity into an open match
+    side: CZE
+    research_confidence: low_medium
+    trigger: "Czechia commits runners around Schick, scores first or stays level late, and Mexico's rotated defense loses control."
+    counter: "Czechia's forward commitment exposes a slow back line to Mexico's transition."
+    scoreline_set: ["1-2", "2-2", "2-1"]
+    outcome_shape:
+      - "Both teams score."
+      - "At least three total goals."
+      - "Czechia remains alive deep into the match."
+    monitor:
+      - "Provod and Sulc starting behind Schick."
+      - "Mexico's center-back and goalkeeper rotation."
+      - "Czechia's rest defense after set pieces."
+    pricing_status: deferred
+
+  - id: RSA-KOR-KOREA-PUNISHES-CHASE
+    match_id: RSAKOR
+    name: Korea punishes South Africa's must-win chase
+    side: KOR
+    research_confidence: medium_high
+    trigger: "South Africa's weakened midfield pushes forward, leaving space for Son and Lee Kang-in to attack transition lanes."
+    counter: "South Korea settles for the draw too early and allows South Africa to dictate field position."
+    scoreline_set: ["0-1", "0-2", "1-2", "1-3"]
+    outcome_shape:
+      - "South Korea wins."
+      - "South Korea scores after South Africa increases risk."
+      - "South Africa scores no more than once."
+    monitor:
+      - "South Africa's replacement set-piece taker and midfield structure."
+      - "Son's starting position and transition touches."
+      - "Score state in Czechia-Mexico."
+    pricing_status: deferred
+
+  - id: RSA-KOR-QUALIFICATION-STALL
+    match_id: RSAKOR
+    name: Korea manages the draw
+    side: DRAW
+    research_confidence: medium
+    trigger: "South Korea protects the center and accepts a low-tempo match because one point guarantees progression."
+    counter: "South Africa must win and may force chaos with early pressure or set pieces."
+    scoreline_set: ["0-0", "1-1"]
+    outcome_shape:
+      - "The match is drawn."
+      - "Two or fewer total goals."
+      - "South Korea advances."
+    monitor:
+      - "South Korea's defensive line height."
+      - "South Africa's chance creation without Mokoena and Zwane."
+      - "Whether either manager changes shape before halftime."
+    pricing_status: deferred
+
+line_analysis_checklist:
+  status: not_started
+  prerequisites:
+    - "Confirmed lineups for all six matches."
+    - "Fresh Kalshi winner, total, team-total, spread, and BTTS order books."
+    - "Per-match expected-goal fit from multiple team-total thresholds."
+    - "Scoreline-set joint probability with explicit uncertainty adjustment."
+    - "Liquidity, spread, stale-data, exposure, and loss-chasing risk checks."
+  prohibited_in_this_phase:
+    - "No edge claims."
+    - "No payout comparisons."
+    - "No stake suggestions."
+    - "No order submission."
+
+sources:
+  - label: FIFA World Cup schedule and standings
+    url: https://www.fifa.com/en/tournaments/mens/worldcup/canadamexicousa2026/scores-fixtures
+  - label: June 24 schedule and match context
+    url: https://www.theguardian.com/football/2026/jun/24/world-cup-schedule-today-how-to-watch-scotland-v-brazil
+  - label: Group B advancement scenarios
+    url: https://www.sbnation.com/fifa-world-cup/1118974/world-cup-2026-group-b-advancement-scenarios-for-canada-and-others
+  - label: Switzerland vs Canada preview
+    url: https://www.si.com/soccer/switzerland-vs-canada-world-cup-preview-predictions-lineups-6-24-26
+  - label: Bosnia and Herzegovina vs Qatar preview
+    url: https://www.si.com/soccer/bosnia-herzegovina-vs-qatar-world-cup-preview-predictions-lineups-6-24-26
+  - label: Morocco vs Haiti preview
+    url: https://www.si.com/soccer/morocco-vs-haiti-world-cup-preview-predictions-lineups-6-24-26
+  - label: Scotland vs Brazil preview
+    url: https://www.si.com/soccer/scotland-vs-brazil-world-cup-preview-predictions-lineups-6-24-26
+  - label: Czechia vs Mexico preview
+    url: https://www.si.com/soccer/czechia-vs-mexico-world-cup-preview-predictions-lineups-6-24-26
+  - label: South Africa vs South Korea preview
+    url: https://www.si.com/soccer/south-africa-vs-south-korea-world-cup-preview-predictions-lineups-6-24-26

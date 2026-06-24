@@ -468,3 +468,23 @@ def test_new_automation_phases_registered():
     assert "discover-markets" in PHASES
     assert "autopilot" in PHASES
     assert "live-execute" in PHASES
+
+
+def test_june_24_world_cup_slate_defers_line_analysis():
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    slate = yaml.safe_load((root / "config" / "WC-2026-JUN24.slate.yaml").read_text())
+
+    assert slate["slate"]["line_analysis_status"] == "deferred"
+    assert slate["slate"]["execution_status"] == "disabled"
+    assert len(slate["matches"]) == 6
+    assert len(slate["scenarios"]) == 12
+
+    forbidden = {
+        "ticker", "bid_cents", "ask_cents", "market_implied_p", "edge",
+        "stake_units", "suggested_stake_units", "payout_x",
+    }
+    for scenario in slate["scenarios"]:
+        assert scenario["pricing_status"] == "deferred"
+        assert forbidden.isdisjoint(scenario)

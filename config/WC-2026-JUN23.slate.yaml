@@ -43,7 +43,9 @@ matches:
   - id: PANCRO
     kickoff_et: "19:00"
     matchup: Panama vs Croatia
-    status: scheduled
+    status: final
+    final_score: "Panama 0-1 Croatia"
+    calibration_eligible: true
     context:
       - "Croatia needs a bounce-back response after losing to England."
       - "Both teams are on zero points, making a passive draw strategically weak."
@@ -52,7 +54,9 @@ matches:
   - id: COLCOD
     kickoff_et: "22:00"
     matchup: Colombia vs DR Congo
-    status: scheduled
+    status: final
+    final_score: "Colombia 1-0 DR Congo"
+    calibration_eligible: true
     context:
       - "Colombia beat Uzbekistan 3-1 and can take control of the group."
       - "DR Congo frustrated Portugal in a 1-1 draw and can make this game ugly."
@@ -231,6 +235,11 @@ scenarios:
     probability_basis: "Croatia 2.153 xG, Panama 0.825 xG; 2-0 or 3-0 scorelines; 0.90 uncertainty adjustment."
     sgp_adjusted_joint_p: 0.18
     sgp_adjusted_payout_x: 5.6
+    result: miss
+    legs_hit: 2
+    total_legs: 3
+    brier_joint: 0.0324
+    review: "Croatia won and kept a clean sheet, but only by one. The defensive-control thesis was right; requiring a two-goal margin made the scenario too narrow."
     legs:
       - label: Croatia wins by more than 1.5 goals
         ticker: KXWCSPREAD-26JUN23PANCRO-CRO2
@@ -266,6 +275,11 @@ scenarios:
     probability_basis: "Croatia 2.153 xG, Panama 0.825 xG; both score and total reaches at least three; 0.90 uncertainty adjustment."
     sgp_adjusted_joint_p: 0.37
     sgp_adjusted_payout_x: 2.7
+    result: miss
+    legs_hit: 0
+    total_legs: 3
+    brier_joint: 0.1369
+    review: "Panama created no scoring payoff and the match stayed at one goal. Carrasquilla's bench role mattered more than the must-win incentive."
     legs:
       - label: Both teams score
         ticker: KXWCBTTS-26JUN23PANCRO-BTTS
@@ -301,6 +315,11 @@ scenarios:
     probability_basis: "Colombia 1.769 xG, DR Congo 0.702 xG; 2-0 or 3-0 scorelines; 0.90 uncertainty adjustment."
     sgp_adjusted_joint_p: 0.19
     sgp_adjusted_payout_x: 5.3
+    result: miss
+    legs_hit: 2
+    total_legs: 3
+    brier_joint: 0.0361
+    review: "Colombia won to nil and the match stayed under, but again the two-goal-margin leg failed. A low-block opponent calls for a one-goal favorite script."
     legs:
       - label: Colombia wins by more than 1.5 goals
         ticker: KXWCSPREAD-26JUN23COLCOD-COL2
@@ -336,6 +355,11 @@ scenarios:
     probability_basis: "Exact 1-1 scoreline from Colombia 1.769 xG and DR Congo 0.702 xG; 0.90 uncertainty adjustment."
     sgp_adjusted_joint_p: 0.09
     sgp_adjusted_payout_x: 11.1
+    result: miss
+    legs_hit: 1
+    total_legs: 3
+    brier_joint: 0.0081
+    review: "The low total was correct, but Colombia avoided the draw and DR Congo did not score. The exact 1-1 proxy remained a hope bet."
     legs:
       - label: Draw
         ticker: KXWCGAME-26JUN23COLCOD-TIE
@@ -360,13 +384,15 @@ scenarios:
         model_p: 0.418
 
 postmortem:
-  completed_matches: 2
-  calibration_eligible_scenarios: 2
+  completed_matches: 4
+  calibration_eligible_scenarios: 6
   eligible_hits: 0
-  eligible_brier_mean: 0.09425
+  eligible_brier_mean: 0.067
   result_sources:
     - "FIFA/ESPN and settled Kalshi markets: Portugal 5-0 Uzbekistan."
     - "FIFA/Guardian and settled Kalshi markets: England 0-0 Ghana."
+    - "FIFA/ESPN and settled Kalshi markets: Panama 0-1 Croatia."
+    - "FIFA/ESPN and settled Kalshi markets: Colombia 1-0 DR Congo."
   findings:
     - "Do not publish a slate-level captured_at when matches have different kickoff states; record timing per match."
     - "Portugal's winning scenario was in-play and must not be presented as pregame forecasting performance."
@@ -374,10 +400,13 @@ postmortem:
     - "Nested legs need scoreline-set probability, not hand-adjusted multiplication."
     - "Official lineups should trigger a final probability refresh 60-75 minutes before kickoff."
     - "No remaining leg has a model edge of 0.05, so the polished recommendation is monitoring, not execution."
+    - "Croatia and Colombia both validated favorite-win and opponent-clean-sheet logic, but neither cleared a two-goal margin."
+    - "For favorites facing low blocks, build the primary script around 1-0/2-0 scorelines before considering alternate spreads."
+    - "Must-win incentives do not automatically create goals; lineup quality and chance creation still dominate the game state."
 
 candidate_plays:
   reviewed_at_utc: "2026-06-23T22:21:11Z"
-  status: conditional_only
+  status: settled_no_orders
   execution_note: "No current standalone or combined price clears the configured 0.05 edge."
   lineup_notes:
     - "Panama listed Adalberto Carrasquilla among the substitutes after his groin issue."
@@ -394,6 +423,7 @@ candidate_plays:
       risk: 3
       suggested_stake_units: 0
       decision: pass_at_current_price
+      result: miss
       buy_gate_cents: 38
       rationale: "Carrasquilla's bench role helps Croatia, but 44 cents already prices the fitted scoring advantage."
     - id: PANAMA_UNDER_0P5
@@ -406,6 +436,7 @@ candidate_plays:
       risk: 3
       suggested_stake_units: 0
       decision: pass_at_current_price
+      result: hit
       buy_gate_cents: 38
       rationale: "Panama's creation concern is real, but the clean-sheet price has no measurable edge."
     - id: COLOMBIA_MINUS_1P5
@@ -418,6 +449,7 @@ candidate_plays:
       risk: 3
       suggested_stake_units: 0
       decision: pass_at_current_price
+      result: miss
       buy_gate_cents: 31
       rationale: "Colombia is stronger, but DR Congo's low block and Portugal draw are already reflected."
     - id: COLOMBIA_WIN
@@ -430,6 +462,7 @@ candidate_plays:
       risk: 2
       suggested_stake_units: 0
       decision: pass_at_current_price
+      result: hit
       buy_gate_cents: 58
       rationale: "The favorite is credible but too short without a lineup or price catalyst."
   parlays:
@@ -447,6 +480,7 @@ candidate_plays:
       current_naive_payout_x: 2.3
       suggested_stake_units: 0
       decision: pass_below_2p8x
+      result: hit
       note: "Different games reduce direct correlation, but the available price is still shorter than the adjusted fair estimate."
     - id: CROATIA-PROFESSIONAL-SGP
       label: Croatia by 2-3 goals to nil
@@ -462,6 +496,7 @@ candidate_plays:
       current_naive_payout_x: 7.6
       suggested_stake_units: 0
       decision: pass_unless_sgp_offer_is_at_least_7p7x
+      result: miss
       note: "The legs are strongly correlated. The 7.6x naive multiplication is not a valid fair payout."
     - id: PANAMA-CROATIA-CHAOS-SGP
       label: Both teams score in a three-plus-goal match
@@ -476,6 +511,7 @@ candidate_plays:
       current_naive_payout_x: 3.3
       suggested_stake_units: 0
       decision: lineup_supported_monitor_at_3p2x_or_better
+      result: miss
       note: "BTTS plus over 2.5 is a nested outcome; do not multiply the two legs as independent."
     - id: COLOMBIA-CONTROL-SGP
       label: Colombia wins 2-0 or 3-0
@@ -491,6 +527,7 @@ candidate_plays:
       current_naive_payout_x: 6.9
       suggested_stake_units: 0
       decision: pass_unless_sgp_offer_is_at_least_7p2x
+      result: miss
       note: "Wait for Colombia's official lineup; the present combined price does not clear the edge gate."
     - id: COLOMBIA-CONGO-ONE-ONE-HOPE
       label: Colombia and DR Congo draw 1-1
@@ -506,4 +543,5 @@ candidate_plays:
       current_naive_payout_x: 16.6
       suggested_stake_units: 0
       decision: pass_hope_bet
+      result: miss
       note: "This is an exact-score proxy and explicitly a hope bet, not a value play."
