@@ -26,6 +26,10 @@ Default run mode is **monitor-only** (`NBABOT_DRY_RUN=1`). Live order placement 
 only because the human explicitly requested it. It must remain gated behind
 `NBABOT_EXECUTION_MODE=live`, `NBABOT_DRY_RUN=0`, and
 `NBABOT_LIVE_TRADING_ACK=LIVE_TRADES_REAL_MONEY`, and every order must pass `risk.py`.
+The research override may waive only the minimum-edge check. It requires the exact
+environment acknowledgment, a named human approver, an evidence rationale, at least
+two sources, and a stake of at most 1 unit. It must never bypass any other risk check,
+and every approved use must be written to the audit log.
 
 ---
 

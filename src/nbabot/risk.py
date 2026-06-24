@@ -8,6 +8,11 @@ from typing import Any
 
 from .guardrails import MAX_STAKE_UNITS
 
+RESEARCH_OVERRIDE_ACK = "RESEARCH_OVERRIDE_APPROVED"
+RESEARCH_OVERRIDE_MAX_UNITS = 1.0
+MIN_RESEARCH_OVERRIDE_REASON_CHARS = 80
+MIN_RESEARCH_OVERRIDE_SOURCES = 2
+
 
 @dataclass(frozen=True)
 class RiskCheck:
@@ -44,6 +49,65 @@ def _parse_ts(raw: str | None) -> datetime | None:
         return None
 
 
+def _research_override_status(intent: Any, settings: Any,
+                              stake_units: float) -> tuple[bool, bool, str]:
+    requested = bool(getattr(intent, "research_override", False))
+    if not requested:
+        return False, False, "research override not requested"
+
+    ack_ok = (
+        getattr(settings, "research_override_ack", "")
+        == RESEARCH_OVERRIDE_ACK
+    )
+    approved_by = str(getattr(intent, "research_approved_by", "") or "").strip()
+    reason = str(getattr(intent, "research_override_reason", "") or "").strip()
+    sources = tuple(
+        str(source).strip()
+        for source in (getattr(intent, "research_sources", ()) or ())
+        if str(source).strip()
+    )
+    configured_cap = min(
+        float(getattr(
+            settings,
+            "research_override_max_units",
+            RESEARCH_OVERRIDE_MAX_UNITS,
+        )),
+        RESEARCH_OVERRIDE_MAX_UNITS,
+    )
+    stake_ok = 0 < stake_units <= configured_cap
+    reason_ok = len(reason) >= MIN_RESEARCH_OVERRIDE_REASON_CHARS
+    sources_ok = len(set(sources)) >= MIN_RESEARCH_OVERRIDE_SOURCES
+    approved = all((ack_ok, bool(approved_by), stake_ok, reason_ok, sources_ok))
+
+    failures = []
+    if not ack_ok:
+        failures.append(
+            f"set NBABOT_RESEARCH_OVERRIDE_ACK={RESEARCH_OVERRIDE_ACK}"
+        )
+    if not approved_by:
+        failures.append("missing named human approver")
+    if not stake_ok:
+        failures.append(f"override stake must be >0 and <={configured_cap:.3f}u")
+    if not reason_ok:
+        failures.append(
+            "research rationale must be at least "
+            f"{MIN_RESEARCH_OVERRIDE_REASON_CHARS} characters"
+        )
+    if not sources_ok:
+        failures.append(
+            f"at least {MIN_RESEARCH_OVERRIDE_SOURCES} distinct research sources required"
+        )
+
+    if failures:
+        return True, False, "; ".join(failures)
+    return (
+        True,
+        True,
+        f"approved by {approved_by}; {len(set(sources))} sources; "
+        f"stake {stake_units:.3f}u <= {configured_cap:.3f}u",
+    )
+
+
 def evaluate_trade_intent(intent: Any, settings: Any,
                           context: RiskContext | None = None) -> RiskDecision:
     context = context or RiskContext()
@@ -57,6 +121,9 @@ def evaluate_trade_intent(intent: Any, settings: Any,
     ))
 
     stake_units = float(getattr(intent, "stake_units", 0.0))
+    override_requested, override_approved, override_reason = (
+        _research_override_status(intent, settings, stake_units)
+    )
     checks.append(RiskCheck(
         "stake_cap",
         0 < stake_units <= MAX_STAKE_UNITS,
@@ -109,11 +176,28 @@ def evaluate_trade_intent(intent: Any, settings: Any,
     edge = getattr(intent, "edge", None)
     min_edge = float(settings.min_edge)
     edge_ok = edge is not None and float(edge) >= min_edge
+    if override_requested:
+        checks.append(RiskCheck(
+            "research_override",
+            override_approved,
+            override_reason,
+        ))
+    edge_passed = edge_ok or (
+        edge is not None and override_requested and override_approved
+    )
     checks.append(RiskCheck(
         "edge",
-        edge_ok,
-        f"edge {float(edge):+.3f} meets min {min_edge:.3f}" if edge is not None
-        else "missing edge",
+        edge_passed,
+        (
+            f"edge {float(edge):+.3f} meets min {min_edge:.3f}"
+            if edge_ok else
+            f"edge {float(edge):+.3f} below min {min_edge:.3f}; "
+            "approved research override applied"
+            if edge_passed else
+            f"edge {float(edge):+.3f} below min {min_edge:.3f}"
+            if edge is not None else
+            "missing edge"
+        ),
     ))
 
     captured_at = _parse_ts(getattr(intent, "captured_at", None))

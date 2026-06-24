@@ -25,28 +25,46 @@ def _candidate_intents(ctx: Context) -> list[TradeIntent]:
         if implied is None or not ticker or not entry:
             continue
         edge = float(row["prior_p"]) - float(implied)
-        if edge < ctx.settings.min_edge:
+        research_override = bool(row.get("research_override", False))
+        if edge < ctx.settings.min_edge and not research_override:
             continue
-        size = capped_kelly(
-            edge=edge,
-            market_prob=float(implied),
-            entry_price_cents=int(entry),
-            unit_cents=unit_cents,
-            max_units=guardrails.MAX_STAKE_UNITS,
-            min_edge=ctx.settings.min_edge,
-        )
-        if size.contracts <= 0:
-            continue
+        if research_override:
+            target_units = min(
+                float(row.get("research_override_stake_units", 0.25)),
+                float(getattr(ctx.settings, "research_override_max_units", 1.0)),
+                1.0,
+            )
+            contracts = int(target_units * unit_cents) // int(entry)
+            if contracts <= 0:
+                continue
+            stake_units = (contracts * int(entry)) / max(unit_cents, 1)
+            side = row.get("side") or "yes"
+            entry_price_cents = int(entry)
+        else:
+            size = capped_kelly(
+                edge=edge,
+                market_prob=float(implied),
+                entry_price_cents=int(entry),
+                unit_cents=unit_cents,
+                max_units=guardrails.MAX_STAKE_UNITS,
+                min_edge=ctx.settings.min_edge,
+            )
+            if size.contracts <= 0:
+                continue
+            contracts = size.contracts
+            stake_units = size.stake_units
+            side = row.get("side") or size.side
+            entry_price_cents = size.entry_price_cents
         risk = int(row.get("risk", 0))
         intents.append(TradeIntent(
             game_id=ctx.settings.game_id,
             scenario_id=row["scenario_id"],
             ticker=ticker,
             action="buy",
-            side=row.get("side") or size.side,
-            contracts=size.contracts,
-            price_cents=size.entry_price_cents,
-            stake_units=size.stake_units,
+            side=side,
+            contracts=contracts,
+            price_cents=entry_price_cents,
+            stake_units=stake_units,
             model_prob=float(row["prior_p"]),
             market_prob=float(implied),
             edge=edge,
@@ -57,6 +75,14 @@ def _candidate_intents(ctx: Context) -> list[TradeIntent]:
             bid_cents=row.get("bid"),
             ask_cents=row.get("ask"),
             rationale=f"{row.get('label')} prior edge {edge:+.3f}",
+            research_override=research_override,
+            research_override_reason=str(
+                row.get("research_override_reason", "")
+            ),
+            research_sources=tuple(row.get("research_sources", ()) or ()),
+            research_approved_by=str(
+                row.get("research_approved_by", "")
+            ),
         ))
     intents.sort(key=lambda i: i.edge or 0, reverse=True)
     return intents

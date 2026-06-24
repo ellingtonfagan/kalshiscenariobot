@@ -44,6 +44,8 @@ class Settings:
     calibration_overrides_path: Path
     execution_mode: str
     live_trading_ack: str
+    research_override_ack: str
+    research_override_max_units: float
     demo_api_base: str
     max_daily_loss_units: float
     max_game_exposure_units: float
@@ -123,6 +125,11 @@ def load_settings(game_id: str | None = None) -> Settings:
         calibration_overrides_path=calibration_overrides_path,
         execution_mode=os.environ.get("NBABOT_EXECUTION_MODE", "paper").lower(),
         live_trading_ack=os.environ.get("NBABOT_LIVE_TRADING_ACK", ""),
+        research_override_ack=os.environ.get("NBABOT_RESEARCH_OVERRIDE_ACK", ""),
+        research_override_max_units=min(
+            float(os.environ.get("NBABOT_RESEARCH_OVERRIDE_MAX_UNITS", "1")),
+            1.0,
+        ),
         demo_api_base=os.environ.get(
             "NBABOT_DEMO_API_BASE",
             "https://external-api.demo.kalshi.co/trade-api/v2",

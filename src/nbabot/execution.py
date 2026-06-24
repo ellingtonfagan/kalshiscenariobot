@@ -32,6 +32,10 @@ class TradeIntent:
     bid_cents: int | None = None
     ask_cents: int | None = None
     rationale: str = ""
+    research_override: bool = False
+    research_override_reason: str = ""
+    research_sources: tuple[str, ...] = ()
+    research_approved_by: str = ""
 
 
 @dataclass(frozen=True)
@@ -82,6 +86,24 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         f.write(json.dumps(payload, sort_keys=True, default=str) + "\n")
 
 
+def _audit_research_override(intent: TradeIntent, audit: AuditTrail) -> None:
+    if not intent.research_override:
+        return
+    audit.log(
+        "RESEARCH_OVERRIDE_USED",
+        {
+            "scenario_id": intent.scenario_id,
+            "ticker": intent.ticker,
+            "edge": intent.edge,
+            "stake_units": intent.stake_units,
+            "approved_by": intent.research_approved_by,
+            "reason": intent.research_override_reason,
+            "sources": list(intent.research_sources),
+        },
+        intent.game_id,
+    )
+
+
 def client_order_id(intent: TradeIntent, mode: str) -> str:
     raw = json.dumps({
         "mode": mode,
@@ -119,6 +141,7 @@ def execute_paper(intent: TradeIntent, decision: RiskDecision, settings: Any,
         audit.log("PAPER_REJECTED", asdict(receipt), intent.game_id)
         return receipt
 
+    _audit_research_override(intent, audit)
     fill = PaperFill(
         client_order_id=request.client_order_id,
         ticker=request.ticker,
@@ -152,6 +175,7 @@ def execute_demo(intent: TradeIntent, decision: RiskDecision, settings: Any,
         audit.log("DEMO_REJECTED", asdict(receipt), intent.game_id)
         return receipt
 
+    _audit_research_override(intent, audit)
     body = request.kalshi_v2_body()
     try:
         response = kalshi.demo_place_order(settings.demo_api_base, body)
@@ -195,6 +219,7 @@ def execute_live(intent: TradeIntent, decision: RiskDecision, settings: Any,
         audit.log("LIVE_REJECTED", asdict(receipt), intent.game_id)
         return receipt
 
+    _audit_research_override(intent, audit)
     body = request.kalshi_v2_body()
     try:
         response = kalshi.place_order(body)

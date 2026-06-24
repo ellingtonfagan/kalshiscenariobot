@@ -5,6 +5,7 @@ these fail. Do not delete the assertions to make a build pass.
 """
 import json
 import os
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -255,6 +256,8 @@ class _ExecSettings:
     game_id = "TEST-GAME"
     execution_mode = "paper"
     live_trading_ack = ""
+    research_override_ack = ""
+    research_override_max_units = 1.0
     dry_run = True
     demo_api_base = "https://demo-api.kalshi.co/trade-api/v2"
     max_daily_loss_units = 2.0
@@ -311,6 +314,81 @@ def test_risk_gate_rejects_core_failures(tmp_path):
     assert not risk.evaluate_trade_intent(_intent(risk=5, hope_bet=False), settings).approved
     settings.kill_switch_path.write_text("stop")
     assert not risk.evaluate_trade_intent(_intent(), settings).approved
+
+
+def test_research_override_waives_only_minimum_edge(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    intent = _intent(
+        edge=0.01,
+        stake_units=0.5,
+        research_override=True,
+        research_override_reason=(
+            "Human-reviewed tactical research supports this selected outcome despite "
+            "the modeled edge remaining below the automated minimum threshold."
+        ),
+        research_sources=(
+            "https://example.com/source-one",
+            "https://example.com/source-two",
+        ),
+        research_approved_by="ellingtonfagan",
+    )
+
+    missing_ack = risk.evaluate_trade_intent(intent, settings)
+    assert not missing_ack.approved
+    assert any("NBABOT_RESEARCH_OVERRIDE_ACK" in reason for reason in missing_ack.reasons)
+
+    settings.research_override_ack = risk.RESEARCH_OVERRIDE_ACK
+    approved = risk.evaluate_trade_intent(intent, settings)
+    assert approved.approved
+    assert any(check.name == "research_override" and check.passed
+               for check in approved.checks)
+
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    assert not risk.evaluate_trade_intent(
+        replace(intent, captured_at=stale),
+        settings,
+    ).approved
+    assert not risk.evaluate_trade_intent(
+        replace(intent, stake_units=1.1),
+        settings,
+    ).approved
+
+
+def test_research_override_execution_is_audited(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.research_override_ack = risk.RESEARCH_OVERRIDE_ACK
+    store = research.ResearchStore(settings.research_db_path)
+    audit = __import__("nbabot.audit", fromlist=["AuditTrail"]).AuditTrail(tmp_path, store)
+    intent = _intent(
+        edge=0.01,
+        stake_units=0.5,
+        research_override=True,
+        research_override_reason=(
+            "Human-reviewed tactical research supports this selected outcome despite "
+            "the modeled edge remaining below the automated minimum threshold."
+        ),
+        research_sources=(
+            "https://example.com/source-one",
+            "https://example.com/source-two",
+        ),
+        research_approved_by="ellingtonfagan",
+    )
+    decision = risk.evaluate_trade_intent(intent, settings)
+
+    receipt = execution.execute_paper(intent, decision, settings, store, audit)
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "audit.jsonl").read_text().splitlines()
+    ]
+
+    assert receipt.status == "filled"
+    override = next(
+        record for record in records
+        if record["type"] == "RESEARCH_OVERRIDE_USED"
+    )
+    assert override["approved_by"] == "ellingtonfagan"
+    assert len(override["sources"]) == 2
+    assert override["edge"] == 0.01
 
 
 def test_capped_kelly_uses_five_unit_default_cap():

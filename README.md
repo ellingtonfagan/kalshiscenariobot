@@ -100,6 +100,8 @@ Useful environment knobs:
 ```bash
 NBABOT_EXECUTION_MODE=paper|demo|live
 NBABOT_LIVE_TRADING_ACK=
+NBABOT_RESEARCH_OVERRIDE_ACK=
+NBABOT_RESEARCH_OVERRIDE_MAX_UNITS=1
 NBABOT_MAX_DAILY_LOSS_UNITS=2
 NBABOT_MAX_GAME_EXPOSURE_UNITS=5
 NBABOT_MIN_EDGE=0.05
@@ -109,6 +111,22 @@ NBABOT_KILL_SWITCH=data/KILL_SWITCH
 NBABOT_CALIBRATION_OVERRIDES=data/calibration_overrides.json
 NBABOT_UI_PORT=8765
 ```
+
+### Research override
+
+The minimum-edge check has a narrow, audit-friendly override for a human-approved
+research thesis. It does not disable the risk gate. Set:
+
+```bash
+NBABOT_RESEARCH_OVERRIDE_ACK=RESEARCH_OVERRIDE_APPROVED
+NBABOT_RESEARCH_OVERRIDE_MAX_UNITS=1
+```
+
+The individual market-snapshot row must also set `research_override: true`, include a
+named `research_approved_by`, an evidence-based `research_override_reason` of at least
+80 characters, at least two `research_sources`, and an override stake no greater than
+1 unit. Kill switch, stale quote, spread, exposure, daily-loss, loss-chasing, ticker,
+SGP probability, hope-bet, dry-run, and live-trading acknowledgment checks still apply.
 
 `reconcile` writes conservative learned calibration overrides to
 `NBABOT_CALIBRATION_OVERRIDES`. Loading the bot applies those overrides in memory only:
