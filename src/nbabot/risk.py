@@ -108,7 +108,7 @@ def evaluate_trade_intent(intent: Any, settings: Any,
 
     edge = getattr(intent, "edge", None)
     min_edge = float(settings.min_edge)
-    edge_ok = edge is not None and abs(float(edge)) >= min_edge
+    edge_ok = edge is not None and float(edge) >= min_edge
     checks.append(RiskCheck(
         "edge",
         edge_ok,

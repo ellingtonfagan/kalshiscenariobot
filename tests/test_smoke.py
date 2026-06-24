@@ -303,6 +303,7 @@ def test_risk_gate_rejects_core_failures(tmp_path):
     settings = _ExecSettings(tmp_path)
     assert risk.evaluate_trade_intent(_intent(stake_units=5.0), settings).approved
     assert not risk.evaluate_trade_intent(_intent(stake_units=5.01), settings).approved
+    assert not risk.evaluate_trade_intent(_intent(edge=-0.10), settings).approved
     assert "missing SGP-adjusted probability" in risk.evaluate_trade_intent(
         _intent(sgp_adjusted_prob=None), settings).reasons
     stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()

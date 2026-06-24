@@ -25,7 +25,7 @@ def _candidate_intents(ctx: Context) -> list[TradeIntent]:
         if implied is None or not ticker or not entry:
             continue
         edge = float(row["prior_p"]) - float(implied)
-        if abs(edge) < ctx.settings.min_edge:
+        if edge < ctx.settings.min_edge:
             continue
         size = capped_kelly(
             edge=edge,
@@ -58,7 +58,7 @@ def _candidate_intents(ctx: Context) -> list[TradeIntent]:
             ask_cents=row.get("ask"),
             rationale=f"{row.get('label')} prior edge {edge:+.3f}",
         ))
-    intents.sort(key=lambda i: abs(i.edge or 0), reverse=True)
+    intents.sort(key=lambda i: i.edge or 0, reverse=True)
     return intents
 
 
