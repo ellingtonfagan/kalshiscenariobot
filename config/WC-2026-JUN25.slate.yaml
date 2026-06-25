@@ -19,6 +19,10 @@ slate:
   potential_plays_snapshot_at_utc: "2026-06-25T18:37:35Z"
   potential_plays_file: config/WC-2026-JUN25.plays.yaml
   potential_plays_report: docs/WC-2026-JUN25-potential-plays.md
+  edge_analysis_status: complete
+  edge_snapshot_at_utc: "2026-06-25T19:01:43Z"
+  edge_analysis_file: config/WC-2026-JUN25.edges.yaml
+  edge_analysis_report: docs/WC-2026-JUN25-edge-analysis.md
   execution_status: disabled
   scoreline_order: listed_match_order
   market_alignment_report: docs/WC-2026-JUN25-market-alignment.md

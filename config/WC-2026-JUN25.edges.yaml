@@ -1,0 +1,228 @@
+# Independent edge analysis for the June 25 World Cup potential-play watchlist.
+#
+# Fair probabilities are derived from external sportsbook prices, not the Kalshi
+# contract being evaluated. No candidate is approved for execution in this file.
+
+edge_analysis:
+  id: WC-2026-JUN25-EDGE-ANALYSIS
+  slate_id: WC-2026-JUN25
+  watchlist_id: WC-2026-JUN25-POTENTIAL-PLAYS
+  captured_at_utc: "2026-06-25T19:01:43Z"
+  timezone: America/New_York
+  status: complete
+  execution_status: disabled
+  normal_minimum_edge: 0.05
+  actionable_candidates: 0
+  research_override_supported: false
+  lineup_status:
+    early_matches: confirmed
+    later_matches: pending
+  lineup_updates:
+    - "Germany retained Neuer, Kimmich, Pavlovic, Nmecha, Sane, Musiala, Wirtz, and Havertz; the expected heavy rotation did not occur."
+    - "Ivory Coast starts Diallo, Pepe, Bonny, and Yan Diomande in a strong attacking XI."
+  methodology:
+    - "De-vig both sides of a two-way market or all outcomes of a three-way moneyline."
+    - "For Ivory Coast's team total, fit independent Poisson scoring rates to de-vigged DraftKings match-result and total prices."
+    - "Use the midpoint only when two independent sportsbook snapshots define a fair-probability range."
+    - "A one-sided sportsbook quote is an upper bound on fair probability, not a verified fair price."
+    - "Gross edge equals external fair probability minus the current Kalshi ask."
+    - "Estimated taker-fee load uses Kalshi's general formula before per-order rounding: 0.07 * P * (1-P)."
+    - "Fee-adjusted edge equals gross edge minus estimated taker-fee load."
+    - "The normal gate requires at least 0.05 gross edge before execution risk checks."
+
+matches:
+  - match_id: CUWCIV
+    matchup: Curacao vs Ivory Coast
+    candidates:
+      - label: Ivory Coast scores 3+ goals
+        ticker: KXWCTEAMTOTAL-26JUN25CUWCIV-CIV3
+        side: "yes"
+        kalshi_ask_probability: 0.57
+        fair_probability: 0.5210
+        fair_probability_range: [0.5210, 0.5556]
+        estimation_method: external_1x2_total_poisson_fit
+        independent_reference: "DraftKings de-vigged 1X2 and 3.5-goal total; sportsbook 4/5 quote supplies an upper bound."
+        gross_edge: -0.0490
+        estimated_taker_fee_load: 0.0172
+        fee_adjusted_edge: -0.0662
+        max_ask_to_clear_normal_gate_cents: 47
+        classification: negative_edge
+        conclusion: "Reject at 57 cents. The external sportsbook quote is already below the Kalshi ask before removing its margin."
+      - label: Ivory Coast records 7+ corners
+        ticker: KXWCTCORNERS-26JUN25CUWCIV-CIV7
+        side: "yes"
+        kalshi_ask_probability: 0.53
+        fair_probability: null
+        fair_probability_range: null
+        estimation_method: insufficient_comparable_price
+        independent_reference: "Independent previews support the corner script but no paired 6.5-corner price was available to de-vig."
+        gross_edge: null
+        estimated_taker_fee_load: 0.0174
+        fee_adjusted_edge: null
+        max_ask_to_clear_normal_gate_cents: null
+        classification: edge_unverified
+        conclusion: "Do not treat qualitative corner support as measurable edge."
+
+  - match_id: ECUGER
+    matchup: Ecuador vs Germany
+    candidates:
+      - label: Under 2.5 total goals
+        ticker: KXWCTOTAL-26JUN25ECUGER-3
+        side: "no"
+        kalshi_ask_probability: 0.42
+        fair_probability: 0.4344
+        fair_probability_range: [0.4344, 0.4344]
+        estimation_method: direct_two_way_devig
+        independent_reference: "Post-lineup DraftKings over -145 / under +120."
+        gross_edge: 0.0144
+        estimated_taker_fee_load: 0.0171
+        fee_adjusted_edge: -0.0027
+        max_ask_to_clear_normal_gate_cents: 38
+        classification: no_edge_after_fees
+        conclusion: "Despite Germany's confirmed full-strength attack, the post-lineup market leaves only a 1.4-point gross discrepancy, which is erased by fees."
+      - label: Germany wins
+        ticker: KXWCGAME-26JUN25ECUGER-GER
+        side: "yes"
+        kalshi_ask_probability: 0.62
+        fair_probability: 0.5911
+        fair_probability_range: [0.5911, 0.5911]
+        estimation_method: direct_three_way_devig
+        independent_reference: "DraftKings Germany -160 / Ecuador +380 / draw +360."
+        gross_edge: -0.0289
+        estimated_taker_fee_load: 0.0165
+        fee_adjusted_edge: -0.0454
+        max_ask_to_clear_normal_gate_cents: 54
+        classification: negative_edge
+        conclusion: "The Germany script is plausible, but the 63-cent contract is expensive relative to the external fair price."
+
+  - match_id: JPNSWE
+    matchup: Japan vs Sweden
+    candidates:
+      - label: Over 2.5 total goals
+        ticker: KXWCTOTAL-26JUN25JPNSWE-3
+        side: "yes"
+        kalshi_ask_probability: 0.51
+        fair_probability: 0.4843
+        fair_probability_range: [0.4843, 0.4843]
+        estimation_method: direct_two_way_devig
+        independent_reference: "DraftKings over -105 / under -120."
+        gross_edge: -0.0257
+        estimated_taker_fee_load: 0.0175
+        fee_adjusted_edge: -0.0432
+        max_ask_to_clear_normal_gate_cents: 43
+        classification: negative_edge
+        conclusion: "Analyst support for goals does not overcome the current price."
+      - label: Match records 10+ corners
+        ticker: KXWCCORNERS-26JUN25JPNSWE-10
+        side: "yes"
+        kalshi_ask_probability: 0.44
+        fair_probability: null
+        fair_probability_range: [null, 0.4651]
+        estimation_method: one_sided_quote_upper_bound
+        independent_reference: "RotoWire listed over 9.5 corners at +115; the opposite side was unavailable."
+        gross_edge: null
+        gross_edge_upper_bound: 0.0251
+        estimated_taker_fee_load: 0.0172
+        fee_adjusted_edge: null
+        fee_adjusted_edge_upper_bound: 0.0079
+        max_ask_to_clear_normal_gate_cents: null
+        classification: edge_unverified_below_gate
+        conclusion: "Even the vig-inclusive upper bound does not reach the 5-point gate."
+
+  - match_id: TUNNED
+    matchup: Tunisia vs Netherlands
+    candidates:
+      - label: Netherlands wins by 3+ goals
+        ticker: KXWCSPREAD-26JUN25TUNNED-NED3
+        side: "yes"
+        kalshi_ask_probability: 0.51
+        fair_probability: 0.4947
+        fair_probability_range: [0.4878, 0.4947]
+        estimation_method: direct_two_way_devig
+        independent_reference: "FOX/FanDuel Netherlands -2.5 -110 / Tunisia +2.5 -115; ESPN also showed +100 / -125."
+        gross_edge: -0.0153
+        estimated_taker_fee_load: 0.0175
+        fee_adjusted_edge: -0.0328
+        max_ask_to_clear_normal_gate_cents: 44
+        classification: negative_edge
+        conclusion: "Strong scenario fit, but the market already prices the blowout."
+      - label: Cody Gakpo scores
+        ticker: KXWCGOAL-26JUN25TUNNED-NEDCGAKPO18-1
+        side: "yes"
+        kalshi_ask_probability: 0.51
+        fair_probability: null
+        fair_probability_range: [null, 0.5238]
+        estimation_method: one_sided_quote_upper_bound
+        independent_reference: "FOX/FanDuel listed Gakpo anytime scorer at -110."
+        gross_edge: null
+        gross_edge_upper_bound: 0.0138
+        estimated_taker_fee_load: 0.0175
+        fee_adjusted_edge: null
+        fee_adjusted_edge_upper_bound: -0.0037
+        max_ask_to_clear_normal_gate_cents: null
+        classification: edge_unverified_below_fees
+        conclusion: "The sportsbook's vig-inclusive probability is only 1.4 points above Kalshi and does not survive estimated fees."
+
+  - match_id: TURUSA
+    matchup: Turkiye vs USA
+    candidates:
+      - label: Both teams score
+        ticker: KXWCBTTS-26JUN25TURUSA-BTTS
+        side: "yes"
+        kalshi_ask_probability: 0.59
+        fair_probability: 0.5784
+        fair_probability_range: [0.5784, 0.5784]
+        estimation_method: direct_two_way_devig
+        independent_reference: "OddsTrader BTTS Yes -158 / No +124."
+        gross_edge: -0.0116
+        estimated_taker_fee_load: 0.0169
+        fee_adjusted_edge: -0.0285
+        max_ask_to_clear_normal_gate_cents: 52
+        classification: negative_edge
+        conclusion: "Broad analyst agreement is already reflected in the 59-cent ask."
+      - label: USA does not win
+        ticker: KXWCGAME-26JUN25TURUSA-USA
+        side: "no"
+        kalshi_ask_probability: 0.46
+        fair_probability: 0.4920
+        fair_probability_range: [0.4850, 0.4990]
+        estimation_method: two_snapshot_three_way_devig_midpoint
+        independent_reference: "ESPN/DraftKings and OddsTrader three-way prices."
+        gross_edge: 0.0320
+        estimated_taker_fee_load: 0.0174
+        fee_adjusted_edge: 0.0146
+        max_ask_to_clear_normal_gate_cents: 44
+        classification: watch_below_gate
+        conclusion: "Best verified candidate, but 3.2 points gross and roughly 1.5 points after estimated fees remain below the 5-point gate."
+
+  - match_id: PARAUS
+    matchup: Paraguay vs Australia
+    candidates:
+      - label: Match ends in a draw
+        ticker: KXWCGAME-26JUN25PARAUS-TIE
+        side: "yes"
+        kalshi_ask_probability: 0.43
+        fair_probability: 0.4245
+        fair_probability_range: [0.4183, 0.4307]
+        estimation_method: two_snapshot_three_way_devig_midpoint
+        independent_reference: "ESPN/DraftKings and FOX/FanDuel three-way prices."
+        gross_edge: -0.0055
+        estimated_taker_fee_load: 0.0172
+        fee_adjusted_edge: -0.0227
+        max_ask_to_clear_normal_gate_cents: 37
+        classification: no_edge_after_fees
+        conclusion: "The draw thesis is strong, but the 43-cent contract is approximately fair before fees."
+      - label: Both teams score - No
+        ticker: KXWCBTTS-26JUN25PARAUS-BTTS
+        side: "no"
+        kalshi_ask_probability: 0.57
+        fair_probability: 0.5750
+        fair_probability_range: [0.5750, 0.5750]
+        estimation_method: direct_two_way_devig
+        independent_reference: "FOX/FanDuel BTTS Yes +122 / No -156."
+        gross_edge: 0.0050
+        estimated_taker_fee_load: 0.0172
+        fee_adjusted_edge: -0.0122
+        max_ask_to_clear_normal_gate_cents: 52
+        classification: no_edge_after_fees
+        conclusion: "A half-point gross advantage is erased by estimated taker fees."

@@ -656,3 +656,56 @@ def test_june_25_potential_plays_are_bounded_watchlist():
             assert play["gross_payout_x"] == pytest.approx(
                 100 / play["ask_cents"], abs=0.01
             )
+
+
+def test_june_25_edge_analysis_uses_independent_prices_and_fees():
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    slate = yaml.safe_load((root / "config" / "WC-2026-JUN25.slate.yaml").read_text())
+    edge_path = root / slate["slate"]["edge_analysis_file"]
+    report_path = root / slate["slate"]["edge_analysis_report"]
+    document = yaml.safe_load(edge_path.read_text())
+    analysis = document["edge_analysis"]
+    candidates = [
+        candidate
+        for match in document["matches"]
+        for candidate in match["candidates"]
+    ]
+
+    assert slate["slate"]["edge_analysis_status"] == "complete"
+    assert analysis["execution_status"] == "disabled"
+    assert analysis["normal_minimum_edge"] == 0.05
+    assert analysis["actionable_candidates"] == 0
+    assert analysis["research_override_supported"] is False
+    assert len(candidates) == 12
+    assert "No candidate clears" in report_path.read_text()
+    assert guardrails.GUARDRAIL_FOOTER in report_path.read_text()
+
+    verified = [candidate for candidate in candidates
+                if candidate["fair_probability"] is not None]
+    assert verified
+    assert max(candidate["gross_edge"] for candidate in verified) < 0.05
+
+    for candidate in verified:
+        price = candidate["kalshi_ask_probability"]
+        fair = candidate["fair_probability"]
+        assert candidate["gross_edge"] == pytest.approx(fair - price, abs=0.0001)
+        fee_load = 0.07 * price * (1 - price)
+        assert candidate["estimated_taker_fee_load"] == pytest.approx(
+            fee_load, abs=0.0001
+        )
+        assert candidate["fee_adjusted_edge"] == pytest.approx(
+            candidate["gross_edge"] - fee_load, abs=0.0001
+        )
+        assert candidate["max_ask_to_clear_normal_gate_cents"] <= int(
+            100 * (fair - analysis["normal_minimum_edge"])
+        )
+
+    usa_no = next(
+        candidate for candidate in candidates
+        if candidate["label"] == "USA does not win"
+    )
+    assert usa_no["classification"] == "watch_below_gate"
+    assert usa_no["gross_edge"] > 0
+    assert usa_no["fee_adjusted_edge"] > 0
