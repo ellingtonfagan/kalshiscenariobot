@@ -1,0 +1,468 @@
+# World Cup scenario research slate for Thursday, 2026-06-25.
+#
+# Scorelines are always written in listed-match order. Market probabilities below
+# are calibration references derived from team-total midpoints, not independent
+# model estimates or claims of betting edge.
+
+slate:
+  id: WC-2026-JUN25
+  sport: soccer
+  competition: FIFA World Cup 2026
+  date: "2026-06-25"
+  timezone: America/New_York
+  researched_at_utc: "2026-06-25T17:02:56Z"
+  phase: scenario_research_and_market_alignment
+  line_analysis_status: deferred
+  market_alignment_status: complete
+  market_snapshot_at_utc: "2026-06-25T17:02:56Z"
+  execution_status: disabled
+  scoreline_order: listed_match_order
+  market_alignment_report: docs/WC-2026-JUN25-market-alignment.md
+  methodology:
+    - "Start with qualification incentives, prior match performance, availability, and tactical shape."
+    - "Use listed-match score order for every exact scoreline set."
+    - "Fit market-calibrated expected goals from multiple team-total thresholds."
+    - "Apply a 0.90 uncertainty adjustment to exact scoreline-set probabilities."
+    - "Treat those probabilities as market-alignment references, not independent edge estimates."
+    - "Refresh official lineups 60 to 90 minutes before kickoff before any later price analysis."
+
+yesterday_review:
+  slate_id: WC-2026-JUN24
+  results:
+    - matchup: Bosnia and Herzegovina vs Qatar
+      final_score: "3-1"
+      scenario_review: "Both Bosnia box pressure and late desperation chaos were represented. The primary 3-1 scoreline landed."
+    - matchup: Switzerland vs Canada
+      final_score: "2-1"
+      scenario_review: "Swiss shot pressure converted after halftime. The Switzerland 2-1 primary scoreline landed; Canada draw management failed after conceding first."
+    - matchup: Morocco vs Haiti
+      final_score: "4-2"
+      scenario_review: "Morocco margin direction and Haiti scoring were both correct, but each exact scoreline set was too narrow. Haiti's two goals broke the assumed one-goal ceiling."
+    - matchup: Scotland vs Brazil
+      final_score: "0-3"
+      scenario_review: "Brazil control was correct, but the exact set omitted 3-0. Mutual caution did not survive Brazil's second-half finishing."
+    - matchup: Czechia vs Mexico
+      final_score: "0-3"
+      scenario_review: "Mexico control was correct and Czech desperation produced little. A clinched favorite can still expand the margin after halftime."
+    - matchup: South Africa vs South Korea
+      final_score: "1-0"
+      scenario_review: "Both Korea-centered scripts failed. South Africa's must-win pressure and compact defense deserved a distinct upset scenario."
+  rules_carried_forward:
+    - "Keep direction, margin, and clean-sheet conclusions separate."
+    - "Include a genuine underdog-win path when the underdog must win; a draw-only counter is insufficient."
+    - "Do not assume an eliminated team will remain passive or scoreless."
+    - "Do not assume a clinched favorite will rotate until the manager or official lineup confirms it."
+    - "Use exact scoreline sets for calibration, but review the broader game-script outcome separately."
+
+matches:
+  - id: CUWCIV
+    kickoff_et: "16:00"
+    group: E
+    matchup: Curacao vs Ivory Coast
+    venue: Philadelphia
+    standings_context:
+      - "Ivory Coast advances automatically with a win or draw."
+      - "Curacao must win and needs Ecuador not to beat Germany to control its path."
+      - "Curacao followed a 7-1 loss to Germany with a 0-0 draw against Ecuador."
+    availability:
+      - "Curacao has no reported injury absences and can retain its compact structure."
+      - "Ivory Coast has no confirmed absences; Wilfried Singo and Evan N'Dicka have been listed as doubts."
+      - "Eloy Room made 15 saves against Ecuador and remains central to Curacao's resistance."
+    market_expected_goals:
+      Curacao: 0.553
+      Ivory_Coast: 2.831
+    decisive_questions:
+      - "Can Curacao keep the match level long enough to turn its must-win need into a late push?"
+      - "Does Ivory Coast attack margin immediately or manage the draw once ahead?"
+
+  - id: ECUGER
+    kickoff_et: "16:00"
+    group: E
+    matchup: Ecuador vs Germany
+    venue: New York/New Jersey
+    standings_context:
+      - "Germany has clinched first place with six points."
+      - "Ecuador has one point and must win while monitoring Curacao-Ivory Coast."
+      - "Ecuador has not scored despite producing 27 shots against Curacao."
+    availability:
+      - "Ecuador has no reported injury or suspension concerns."
+      - "Germany is without Nico Schlotterbeck and Nathaniel Brown."
+      - "Julian Nagelsmann reportedly plans only the two injury-forced changes rather than wholesale rotation."
+    market_expected_goals:
+      Ecuador: 0.971
+      Germany: 2.117
+    decisive_questions:
+      - "Does Ecuador finally convert its shot volume before desperation opens transition space?"
+      - "Will Germany's continuity outweigh its lack of qualification pressure?"
+
+  - id: JPNSWE
+    kickoff_et: "19:00"
+    group: F
+    matchup: Japan vs Sweden
+    venue: Dallas
+    standings_context:
+      - "Japan advances with a draw and can still win the group."
+      - "Sweden must win to overtake Japan for an automatic qualifying place."
+      - "Japan drew the Netherlands 2-2 and beat Tunisia 4-0; Sweden beat Tunisia 5-1 before losing 5-1 to the Netherlands."
+    availability:
+      - "Japan is without Takefusa Kubo and Wataru Endo."
+      - "Sweden has no major reported absence and can pair Alexander Isak with Viktor Gyokeres."
+      - "Japan's organized back three must handle Sweden's two-striker power without becoming too passive."
+    market_expected_goals:
+      Japan: 1.737
+      Sweden: 1.079
+    decisive_questions:
+      - "Can Japan punish Sweden's required forward commitment without Kubo?"
+      - "Can Sweden create high-quality service for Isak and Gyokeres rather than low-value volume?"
+
+  - id: TUNNED
+    kickoff_et: "19:00"
+    group: F
+    matchup: Tunisia vs Netherlands
+    venue: Kansas City
+    standings_context:
+      - "Tunisia is eliminated after conceding nine goals in two matches."
+      - "The Netherlands has four points and is competing with Japan for first place."
+      - "The Netherlands enters after a 5-1 win over Sweden."
+    availability:
+      - "Tunisia has no major reported injury concern but changed managers during the tournament."
+      - "Memphis Depay has been listed as questionable."
+      - "Cody Gakpo remains the primary listed Dutch scoring route."
+    market_expected_goals:
+      Tunisia: 0.448
+      Netherlands: 3.168
+    decisive_questions:
+      - "Does the Netherlands pursue goal difference if Japan leads Sweden?"
+      - "Can Tunisia's deeper structure reduce shot quality after two heavy defeats?"
+
+  - id: TURUSA
+    kickoff_et: "22:00"
+    group: D
+    matchup: Turkiye vs USA
+    venue: Los Angeles
+    standings_context:
+      - "The USA has clinched first place after wins over Paraguay and Australia."
+      - "Turkiye is eliminated after two scoreless defeats."
+      - "The match has no effect on either team's group position."
+    availability:
+      - "The USA is expected to rest yellow-carded Tyler Adams, Antonee Robinson, Chris Richards, and Folarin Balogun."
+      - "Christian Pulisic has returned to training but may play limited minutes after a calf issue."
+      - "Turkiye has controlled possession without converting it into a tournament goal."
+    market_expected_goals:
+      Turkiye: 1.210
+      USA: 1.852
+    decisive_questions:
+      - "Can the USA's second unit preserve the pressing and transition quality of the first two matches?"
+      - "Can Turkiye turn possession into central box entries against a rotated defense?"
+
+  - id: PARAUS
+    kickoff_et: "22:00"
+    group: D
+    matchup: Paraguay vs Australia
+    venue: San Francisco Bay Area
+    standings_context:
+      - "Australia secures second place with a win or draw."
+      - "Paraguay takes second with a win; a draw should still make four points enough for a third-place berth."
+      - "The shared value of a draw can suppress early risk."
+    availability:
+      - "Paraguay playmaker Miguel Almiron is suspended after his red card against Turkiye."
+      - "Australia fullback Jacob Italiano is out and Mohamed Toure's fitness requires confirmation."
+      - "Julio Enciso carries more of Paraguay's chance-creation and set-piece burden without Almiron."
+    market_expected_goals:
+      Paraguay: 1.046
+      Australia: 0.849
+    decisive_questions:
+      - "Do both teams accept the qualifying value of a draw?"
+      - "Can Paraguay create enough without Almiron if it chooses to press for second place?"
+
+scenarios:
+  - id: CUW-CIV-IVORIAN-MARGIN
+    match_id: CUWCIV
+    name: Ivory Coast breaks Curacao's resistance
+    side: CIV
+    research_confidence: medium_high
+    trigger: "Ivory Coast scores first, pins Curacao's fullbacks, and forces a must-win opponent to abandon its low block."
+    counter: "Room repeats his Ecuador performance and Ivory Coast protects qualification rather than chasing margin."
+    scoreline_set: ["0-2", "0-3", "1-3", "0-4"]
+    scoreline_set_probability: 0.4258
+    uncertainty_adjusted_probability: 0.3832
+    probability_role: market_alignment_only
+    outcome_shape:
+      - "Ivory Coast wins by at least two."
+      - "Ivory Coast scores at least twice."
+      - "Curacao scores no more than once."
+    monitor:
+      - "Room saves and Ivory Coast shots on target before halftime."
+      - "Whether Amad Diallo starts in an advanced role."
+      - "Curacao's fullback height after conceding."
+    pricing_status: deferred
+
+  - id: CUW-CIV-ROOM-RESISTANCE
+    match_id: CUWCIV
+    name: Curacao keeps the game alive
+    side: CUW
+    research_confidence: low_medium
+    trigger: "Curacao protects the box, Room prevents an early goal, and the match reaches halftime level or within one."
+    counter: "Curacao's need to win eventually creates too much transition space."
+    scoreline_set: ["0-1", "1-1", "1-2"]
+    scoreline_set_probability: 0.2242
+    uncertainty_adjusted_probability: 0.2018
+    probability_role: market_alignment_only
+    outcome_shape:
+      - "Curacao stays within one goal."
+      - "The match does not become an early avalanche."
+      - "A draw remains live into the second half."
+    monitor:
+      - "First-half score and Room save count."
+      - "Curacao's ability to retain the ball after clearances."
+      - "Live Ecuador-Germany score."
+    pricing_status: deferred
+
+  - id: ECU-GER-GERMAN-CONTINUITY
+    match_id: ECUGER
+    name: Germany's continuity controls Ecuador
+    side: GER
+    research_confidence: medium_high
+    trigger: "Germany retains its established core, circulates through Ecuador's press, and attacks the space created by Ecuador's must-win push."
+    counter: "Germany's secured position lowers intensity and Ecuador finally converts its chance volume."
+    scoreline_set: ["0-1", "0-2", "1-2", "1-3"]
+    scoreline_set_probability: 0.3679
+    uncertainty_adjusted_probability: 0.3311
+    probability_role: market_alignment_only
+    outcome_shape:
+      - "Germany wins."
+      - "Germany scores at least once."
+      - "The match stays at four total goals or fewer."
+    monitor:
+      - "Official Germany rotation count."
+      - "Ecuador's shot quality, not only raw attempts."
+      - "Ecuador's rest defense after 55 minutes."
+    pricing_status: deferred
+
+  - id: ECU-GER-ECUADOR-CONVERTS
+    match_id: ECUGER
+    name: Ecuador finally converts pressure
+    side: ECU
+    research_confidence: low_medium
+    trigger: "Ecuador creates early box entries through Valencia and Plata, scores first, and turns Germany's low-stakes match uncomfortable."
+    counter: "Ecuador's finishing problem persists and its required chase exposes Germany's superior attackers."
+    scoreline_set: ["1-1", "2-1", "2-2"]
+    scoreline_set_probability: 0.1874
+    uncertainty_adjusted_probability: 0.1686
+    probability_role: market_alignment_only
+    outcome_shape:
+      - "Ecuador scores."
+      - "Both teams score."
+      - "Ecuador avoids defeat."
+    monitor:
+      - "Valencia touches and shots inside the box."
+      - "Score in Curacao-Ivory Coast."
+      - "Germany's midfield counterpress intensity."
+    pricing_status: deferred
+
+  - id: JPN-SWE-JAPAN-PUNISHES-CHASE
+    match_id: JPNSWE
+    name: Japan punishes Sweden's chase
+    side: JPN
+    research_confidence: medium
+    trigger: "Japan protects central space, draws Sweden forward, and releases Ueda and its wingbacks into transition."
+    counter: "Kubo and Endo's absences reduce Japan's control while Sweden's two strikers dominate the box."
+    scoreline_set: ["2-1", "3-1", "2-0"]
+    scoreline_set_probability: 0.2441
+    uncertainty_adjusted_probability: 0.2197
+    probability_role: market_alignment_only
+    outcome_shape:
+      - "Japan wins."
+      - "Japan scores at least twice."
+      - "Sweden's required attack creates transition opportunities."
+    monitor:
+      - "Japan's replacement creator for Kubo."
+      - "Sweden's defensive spacing behind its wingbacks."
+      - "Ueda's penalty-area touches."
+    pricing_status: deferred
+
+  - id: JPN-SWE-SWEDISH-STRIKERS
+    match_id: JPNSWE
+    name: Sweden's strikers keep qualification alive
+    side: SWE
+    research_confidence: low_medium
+    trigger: "Sweden supplies Isak and Gyokeres early, scores first, and prevents Japan from managing the draw."
+    counter: "Sweden's aggressive shape repeats the defensive problems exposed by the Netherlands."
+    scoreline_set: ["1-2", "2-2", "0-1"]
+    scoreline_set_probability: 0.1776
+    uncertainty_adjusted_probability: 0.1599
+    probability_role: market_alignment_only
+    outcome_shape:
+      - "Sweden scores."
+      - "Sweden avoids defeat."
+      - "The qualification decision remains live late."
+    monitor:
+      - "Isak and Gyokeres touches in Japan's box."
+      - "Sweden's shot quality from central areas."
+      - "Japan's willingness to slow the match after halftime."
+    pricing_status: deferred
+
+  - id: TUN-NED-DUTCH-AVALANCHE
+    match_id: TUNNED
+    name: Netherlands attacks first-place goal difference
+    side: NED
+    research_confidence: high
+    trigger: "The Netherlands scores early and continues attacking because Japan is leading or level in the parallel match."
+    counter: "Tunisia's deeper block and Dutch rotation reduce the game to a professional two-goal win."
+    scoreline_set: ["0-3", "0-4", "1-4", "0-5"]
+    scoreline_set_probability: 0.3774
+    uncertainty_adjusted_probability: 0.3397
+    probability_role: market_alignment_only
+    outcome_shape:
+      - "The Netherlands wins by at least three."
+      - "The Netherlands scores at least three."
+      - "Tunisia scores no more than once."
+    monitor:
+      - "Live Japan-Sweden score."
+      - "Gakpo's starting status and role."
+      - "Dutch shot quality in the first 30 minutes."
+    pricing_status: deferred
+
+  - id: TUN-NED-TUNISIA-COMPRESSES
+    match_id: TUNNED
+    name: Tunisia compresses the margin
+    side: TUN
+    research_confidence: low_medium
+    trigger: "Tunisia protects the center with a back five and avoids the early errors that drove its first two heavy defeats."
+    counter: "Once Tunisia concedes, its confidence and spacing collapse again."
+    scoreline_set: ["0-2", "1-2", "1-3"]
+    scoreline_set_probability: 0.2592
+    uncertainty_adjusted_probability: 0.2333
+    probability_role: market_alignment_only
+    outcome_shape:
+      - "The Netherlands still wins."
+      - "The margin stays below three."
+      - "Tunisia may score once."
+    monitor:
+      - "Tunisia's defensive line and turnover locations."
+      - "Dutch rotation and substitution timing."
+      - "Whether Tunisia survives the opening 25 minutes."
+    pricing_status: deferred
+
+  - id: TUR-USA-US-DEPTH
+    match_id: TURUSA
+    name: USA depth preserves momentum
+    side: USA
+    research_confidence: medium
+    trigger: "The USA's replacements press with intensity, attack Turkiye's rest defense, and convert before the match becomes friendly-paced."
+    counter: "Resting four yellow-carded starters removes too much defensive and transition structure."
+    scoreline_set: ["1-2", "0-2", "1-3"]
+    scoreline_set_probability: 0.2373
+    uncertainty_adjusted_probability: 0.2136
+    probability_role: market_alignment_only
+    outcome_shape:
+      - "The USA wins."
+      - "The USA scores at least twice."
+      - "Turkiye scores no more than once."
+    monitor:
+      - "Confirmed USA rotation and center-forward choice."
+      - "Pulisic's expected minutes."
+      - "Whether the USA press remains coordinated."
+    pricing_status: deferred
+
+  - id: TUR-USA-TURKIYE-CONVERTS
+    match_id: TURUSA
+    name: Turkiye finally converts possession
+    side: TUR
+    research_confidence: low_medium
+    trigger: "Guler and Calhanoglu find central pockets against the rotated USA midfield and create Turkiye's first tournament goal."
+    counter: "Turkiye's possession remains sterile and USA transition quality decides the game."
+    scoreline_set: ["1-1", "2-1", "2-2"]
+    scoreline_set_probability: 0.2270
+    uncertainty_adjusted_probability: 0.2043
+    probability_role: market_alignment_only
+    outcome_shape:
+      - "Turkiye scores."
+      - "Both teams score."
+      - "Turkiye avoids defeat."
+    monitor:
+      - "Guler touches between the lines."
+      - "Turkiye shots from inside the penalty area."
+      - "USA midfield turnover rate."
+    pricing_status: deferred
+
+  - id: PAR-AUS-QUALIFICATION-STALL
+    match_id: PARAUS
+    name: Both teams protect qualification
+    side: DRAW
+    research_confidence: medium_high
+    trigger: "Australia protects its second-place position and Paraguay recognizes that four points should preserve a third-place route."
+    counter: "Paraguay treats second place as essential and increases risk before the final 20 minutes."
+    scoreline_set: ["0-0", "1-1"]
+    scoreline_set_probability: 0.2838
+    uncertainty_adjusted_probability: 0.2554
+    probability_role: market_alignment_only
+    outcome_shape:
+      - "The match is drawn."
+      - "Two or fewer total goals."
+      - "At least one team fails to score."
+    monitor:
+      - "Opening tempo and both fullback lines."
+      - "Live third-place qualification table."
+      - "Substitution intent after 60 minutes."
+    pricing_status: deferred
+
+  - id: PAR-AUS-PARAGUAY-PRESSES
+    match_id: PARAUS
+    name: Paraguay presses for second place
+    side: PAR
+    research_confidence: medium
+    trigger: "Paraguay raises its line, creates set pieces through Enciso, and scores before Australia's draw management settles."
+    counter: "Almiron's suspension removes too much progression and Australia remains compact."
+    scoreline_set: ["1-0", "2-0", "2-1"]
+    scoreline_set_probability: 0.3093
+    uncertainty_adjusted_probability: 0.2784
+    probability_role: market_alignment_only
+    outcome_shape:
+      - "Paraguay wins."
+      - "Paraguay scores first."
+      - "The match stays at three total goals or fewer."
+    monitor:
+      - "Enciso set pieces and progressive carries."
+      - "Australia's ability to play through Paraguay's press."
+      - "Paraguay's risk level if still tied after 65 minutes."
+    pricing_status: deferred
+
+line_analysis_checklist:
+  status: not_started
+  prerequisites:
+    - "Official lineups for all six matches."
+    - "Fresh Kalshi order books captured within 90 seconds of analysis."
+    - "Independent probability estimates that are not copied from the same market being evaluated."
+    - "Explicit comparison of broad script probability and exact scoreline-set probability."
+    - "Liquidity, spread, stale-data, exposure, and loss-chasing risk checks."
+  prohibited_in_this_phase:
+    - "No edge claims."
+    - "No payout comparisons."
+    - "No stake suggestions."
+    - "No parlay construction."
+    - "No order submission."
+
+sources:
+  - label: FIFA schedule
+    url: https://www.fifa.com/en/tournaments/mens/worldcup/canadamexicousa2026/articles/match-schedule-fixtures-results-teams-stadiums
+  - label: Group D advancement scenarios
+    url: https://www.sbnation.com/fifa-world-cup/1119067/world-cup-2026-how-can-the-usmnt-advance-out-of-group-d
+  - label: Group E advancement scenarios
+    url: https://www.foxsports.com/stories/soccer/world-cup-group-e-scenarios-what-ivory-coast-ecuador-curacao-need-advance
+  - label: Group F advancement scenarios
+    url: https://www.foxsports.com/stories/soccer/world-cup-group-f-scenarios-what-netherlands-japan-sweden-need-advance
+  - label: Curacao vs Ivory Coast preview
+    url: https://www.si.com/soccer/curacao-vs-cote-divoire-world-cup-preview-predictions-lineups-6-25-26
+  - label: Ecuador vs Germany lineup update
+    url: https://www.bavarianfootballworks.com/germany-international-soccer/221000/germany-ecuador-world-cup-lineups-rotation-julian-nagelsmann-deniz-undav
+  - label: Japan vs Sweden preview
+    url: https://www.si.com/soccer/japan-vs-sweden-world-cup-preview-predictions-lineups-6-25-26
+  - label: Tunisia vs Netherlands preview
+    url: https://www.si.com/soccer/tunisia-vs-netherlands-world-cup-preview-predictions-lineups-6-25-26
+  - label: USA rotation report
+    url: https://www.starsandstripesfc.com/usmnt/44599/usa-vs-turkiye-2026-world-cup-time-tv-schedule-streaming-and-lineups
+  - label: Paraguay vs Australia report
+    url: https://www.theguardian.com/football/2026/jun/25/socceroos-australia-paraguay-game-permutations-last-32-world-cup
+  - label: June 24 results
+    url: https://www.olympics.com/en/news/fifa-world-cup-2026-every-match-result-wednesday-24-june-live-scores

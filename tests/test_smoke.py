@@ -571,3 +571,49 @@ def test_june_24_world_cup_slate_defers_line_analysis():
     for scenario in slate["scenarios"]:
         assert scenario["pricing_status"] == "deferred"
         assert forbidden.isdisjoint(scenario)
+
+
+def test_june_25_world_cup_slate_is_research_only():
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    slate = yaml.safe_load((root / "config" / "WC-2026-JUN25.slate.yaml").read_text())
+
+    assert slate["slate"]["date"] == "2026-06-25"
+    assert slate["slate"]["scoreline_order"] == "listed_match_order"
+    assert slate["slate"]["line_analysis_status"] == "deferred"
+    assert slate["slate"]["market_alignment_status"] == "complete"
+    assert slate["slate"]["execution_status"] == "disabled"
+    report = root / slate["slate"]["market_alignment_report"]
+    report_text = report.read_text()
+    assert "No parlay is constructed" in report_text
+    assert "No edge conclusion" in report_text
+    assert len(slate["matches"]) == 6
+    assert len(slate["scenarios"]) == 12
+
+    forbidden = {
+        "ticker", "bid_cents", "ask_cents", "market_implied_p", "edge",
+        "stake_units", "suggested_stake_units", "payout_x",
+    }
+    matches = {match["id"]: match for match in slate["matches"]}
+    for scenario in slate["scenarios"]:
+        assert scenario["pricing_status"] == "deferred"
+        assert scenario["probability_role"] == "market_alignment_only"
+        assert 0 < scenario["uncertainty_adjusted_probability"] < 1
+        assert forbidden.isdisjoint(scenario)
+
+        expected_goals = list(
+            matches[scenario["match_id"]]["market_expected_goals"].values()
+        )
+        accepted_scores = set(scenario["scoreline_set"])
+        probability = soccer_research.scoreline_probability(
+            expected_goals[0],
+            expected_goals[1],
+            lambda home, away: f"{home}-{away}" in accepted_scores,
+        )
+        assert scenario["scoreline_set_probability"] == pytest.approx(
+            probability, abs=0.0001
+        )
+        assert scenario["uncertainty_adjusted_probability"] == pytest.approx(
+            soccer_research.uncertainty_adjust(probability), abs=0.0001
+        )
