@@ -617,3 +617,42 @@ def test_june_25_world_cup_slate_is_research_only():
         assert scenario["uncertainty_adjusted_probability"] == pytest.approx(
             soccer_research.uncertainty_adjust(probability), abs=0.0001
         )
+
+
+def test_june_25_potential_plays_are_bounded_watchlist():
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    slate = yaml.safe_load((root / "config" / "WC-2026-JUN25.slate.yaml").read_text())
+    plays_path = root / slate["slate"]["potential_plays_file"]
+    report_path = root / slate["slate"]["potential_plays_report"]
+    document = yaml.safe_load(plays_path.read_text())
+    watchlist = document["watchlist"]
+    matches = document["matches"]
+
+    assert slate["slate"]["potential_plays_status"] == "complete"
+    assert watchlist["execution_status"] == "disabled"
+    assert watchlist["edge_status"] == "not_estimated"
+    assert watchlist["stake_status"] == "none"
+    assert watchlist["parlay_status"] == "none"
+    assert report_path.exists()
+    assert guardrails.GUARDRAIL_FOOTER in report_path.read_text()
+    assert len(matches) == 6
+
+    forbidden = {
+        "edge", "stake_units", "suggested_stake_units", "contracts",
+        "client_order_id", "joint_probability", "sgp_payout_x",
+    }
+    for match in matches:
+        assert 1 <= len(match["plays"]) <= 2
+        for play in match["plays"]:
+            assert forbidden.isdisjoint(play)
+            assert play["sgp_adjustment"] == "not_applicable_single_market"
+            assert play["side"] in {"yes", "no"}
+            assert 0 < play["ask_cents"] < 100
+            assert play["market_implied_probability"] == pytest.approx(
+                play["ask_cents"] / 100
+            )
+            assert play["gross_payout_x"] == pytest.approx(
+                100 / play["ask_cents"], abs=0.01
+            )

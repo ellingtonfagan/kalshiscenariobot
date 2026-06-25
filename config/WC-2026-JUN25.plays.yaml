@@ -1,0 +1,235 @@
+# Researched potential-play watchlist for Thursday, 2026-06-25.
+#
+# These are single-market candidates only. They are not an executable board, do not
+# claim independent edge, contain no stake suggestions, and must not be combined into
+# parlays without a separately calculated SGP-adjusted joint probability and payout.
+
+watchlist:
+  id: WC-2026-JUN25-POTENTIAL-PLAYS
+  slate_id: WC-2026-JUN25
+  captured_at_utc: "2026-06-25T18:37:35Z"
+  timezone: America/New_York
+  status: research_watchlist_only
+  execution_status: disabled
+  edge_status: not_estimated
+  stake_status: none
+  parlay_status: none
+  lineup_status:
+    early_matches: predicted_not_official
+    later_matches: pending
+  notes:
+    - "Ask price is the cost of the selected Yes or No side at capture time."
+    - "Gross payout includes returned principal and excludes fees."
+    - "SGP adjustment is not applicable because every candidate is a standalone market."
+    - "External analyst agreement is evidence for scenario fit, not proof of positive edge."
+
+matches:
+  - match_id: CUWCIV
+    matchup: Curacao vs Ivory Coast
+    kickoff_et: "16:00"
+    plays:
+      - rank: primary
+        label: Ivory Coast scores 3+ goals
+        ticker: KXWCTEAMTOTAL-26JUN25CUWCIV-CIV3
+        side: "yes"
+        ask_cents: 56
+        market_implied_probability: 0.56
+        gross_payout_x: 1.79
+        sgp_adjustment: not_applicable_single_market
+        scenario_id: CUW-CIV-IVORIAN-MARGIN
+        rationale: "Curacao must eventually leave its low block, and independent analysis specifically supports Ivory Coast over 2.5 team goals."
+        external_support:
+          - "New York Post: Ivory Coast over 2.5 team goals."
+          - "Ivory Coast is a -525 to -650 favorite across current sportsbook snapshots."
+        failure_case: "Eloy Room repeats his 15-save performance and Ivory Coast manages qualification after taking a narrow lead."
+        lineup_gate: "No player-specific dependency; confirm Ivory Coast does not unexpectedly rest most of its attacking core."
+      - rank: secondary
+        label: Ivory Coast records 7+ corners
+        ticker: KXWCTCORNERS-26JUN25CUWCIV-CIV7
+        side: "yes"
+        ask_cents: 52
+        market_implied_probability: 0.52
+        gross_payout_x: 1.92
+        sgp_adjustment: not_applicable_single_market
+        scenario_id: CUW-CIV-IVORIAN-MARGIN
+        rationale: "Curacao's projected back five should concede territory, crosses, blocks, and clearances even if the finishing margin stays compressed."
+        external_support:
+          - "Action Network expects Ivory Coast to dominate possession and control territory."
+          - "RotoWire projects Curacao in a defensive 5-4-1."
+        failure_case: "An early Ivory Coast goal allows the favorite to slow the match instead of sustaining pressure."
+        lineup_gate: "Valid with either projected Ivory Coast attacking shape; reject if the official XI signals heavy rotation."
+
+  - match_id: ECUGER
+    matchup: Ecuador vs Germany
+    kickoff_et: "16:00"
+    plays:
+      - rank: primary
+        label: Under 2.5 total goals
+        ticker: KXWCTOTAL-26JUN25ECUGER-3
+        side: "no"
+        ask_cents: 42
+        market_implied_probability: 0.42
+        gross_payout_x: 2.38
+        sgp_adjustment: not_applicable_single_market
+        scenario_id: ECU-GER-GERMAN-CONTINUITY
+        rationale: "Ecuador has not scored in two matches, and Germany has already won the group; controlled 1-0 and 2-0 outcomes remain credible."
+        external_support:
+          - "RotoWire lists under 2.5 goals as its best bet at +132."
+          - "DraftKings' under 2.5 price was +125 in the ESPN snapshot."
+        failure_case: "Ecuador's must-win press creates an early goal or transition-heavy match, as the Action Network BTTS analysis expects."
+        lineup_gate: "Keep only if Germany rotates materially or starts a conservative midfield; downgrade if the full attacking core starts."
+      - rank: secondary
+        label: Germany wins
+        ticker: KXWCGAME-26JUN25ECUGER-GER
+        side: "yes"
+        ask_cents: 64
+        market_implied_probability: 0.64
+        gross_payout_x: 1.56
+        sgp_adjustment: not_applicable_single_market
+        scenario_id: ECU-GER-GERMAN-CONTINUITY
+        rationale: "Germany has scored nine goals, retains major depth, and can punish the space Ecuador must expose while chasing a win."
+        external_support:
+          - "Germany was -160 to -182 at current sportsbook snapshots."
+          - "Recent Germany reporting disputes the assumption of wholesale rotation."
+        failure_case: "Germany's intensity drops after clinching and Ecuador finally converts its high shot volume."
+        lineup_gate: "Confirm the official Germany XI includes enough first-choice creation or finishing."
+
+  - match_id: JPNSWE
+    matchup: Japan vs Sweden
+    kickoff_et: "19:00"
+    plays:
+      - rank: primary
+        label: Over 2.5 total goals
+        ticker: KXWCTOTAL-26JUN25JPNSWE-3
+        side: "yes"
+        ask_cents: 52
+        market_implied_probability: 0.52
+        gross_payout_x: 1.92
+        sgp_adjustment: not_applicable_single_market
+        scenario_id: JPN-SWE-JAPAN-PUNISHES-CHASE
+        rationale: "Sweden must win, Japan can counter into the resulting space, and the teams have combined for 16 goals across four group matches."
+        external_support:
+          - "Action Network's primary pick is BTTS plus over 2.5 goals."
+          - "The New York Post also selects over 2.5 goals."
+        failure_case: "Japan protects the draw and Sweden fails to create quality chances despite territorial pressure."
+        lineup_gate: "Confirm Sweden starts both Alexander Isak and Viktor Gyokeres and Japan retains a credible transition outlet."
+      - rank: secondary
+        label: Match records 10+ corners
+        ticker: KXWCCORNERS-26JUN25JPNSWE-10
+        side: "yes"
+        ask_cents: 44
+        market_implied_probability: 0.44
+        gross_payout_x: 2.27
+        sgp_adjustment: not_applicable_single_market
+        scenario_id: JPN-SWE-SWEDISH-STRIKERS
+        rationale: "Sweden's must-win width and Japan's transition attacks create a plausible two-way corner profile without requiring efficient finishing."
+        external_support:
+          - "RotoWire lists over 9.5 corners as a lean at +115."
+          - "The current Kalshi threshold is the equivalent 10+ corners."
+        failure_case: "Central attacks produce shots and goals without the blocked crosses needed for corner volume."
+        lineup_gate: "Confirm both teams retain attacking wingbacks rather than selecting conservative fullback roles."
+
+  - match_id: TUNNED
+    matchup: Tunisia vs Netherlands
+    kickoff_et: "19:00"
+    plays:
+      - rank: primary
+        label: Netherlands wins by 3+ goals
+        ticker: KXWCSPREAD-26JUN25TUNNED-NED3
+        side: "yes"
+        ask_cents: 51
+        market_implied_probability: 0.51
+        gross_payout_x: 1.96
+        sgp_adjustment: not_applicable_single_market
+        scenario_id: TUN-NED-DUTCH-AVALANCHE
+        rationale: "Tunisia has lost twice by four goals, while the Netherlands may need goal difference to secure first place."
+        external_support:
+          - "Pickswise lists Netherlands -2.5 as its best bet."
+          - "FanDuel projects a 4-0 Netherlands win."
+        failure_case: "Dutch rotation or a low parallel-match score removes the incentive to continue attacking after gaining control."
+        lineup_gate: "Confirm the Netherlands starts at least two of its primary attacking creators or finishers."
+      - rank: secondary
+        label: Cody Gakpo scores
+        ticker: KXWCGOAL-26JUN25TUNNED-NEDCGAKPO18-1
+        side: "yes"
+        ask_cents: 51
+        market_implied_probability: 0.51
+        gross_payout_x: 1.96
+        sgp_adjustment: not_applicable_single_market
+        scenario_id: TUN-NED-DUTCH-AVALANCHE
+        rationale: "Gakpo is the primary listed Dutch scorer and remains central to the strongest attacking mismatch on the slate."
+        external_support:
+          - "FanDuel recommends Gakpo anytime and 2+ goals."
+          - "The Netherlands has scored seven goals while Tunisia has conceded nine."
+        failure_case: "Gakpo is rested, receives limited minutes, or creation is redistributed through a rotated front line."
+        lineup_gate: "Play remains conditional on Gakpo starting; otherwise remove it rather than substituting another scorer."
+
+  - match_id: TURUSA
+    matchup: Turkiye vs USA
+    kickoff_et: "22:00"
+    plays:
+      - rank: primary
+        label: Both teams score
+        ticker: KXWCBTTS-26JUN25TURUSA-BTTS
+        side: "yes"
+        ask_cents: 59
+        market_implied_probability: 0.59
+        gross_payout_x: 1.69
+        sgp_adjustment: not_applicable_single_market
+        scenario_id: TUR-USA-TURKIYE-CONVERTS
+        rationale: "The USA is expected to rotate four yellow-carded starters, while Turkiye's 61 shots suggest creation has been better than its zero goals."
+        external_support:
+          - "Action Network lists BTTS as its best bet."
+          - "Multiple June 25 previews independently select BTTS in this match."
+        failure_case: "Turkiye's poor shot accuracy persists or both eliminated/qualified sides settle into a low-intensity match."
+        lineup_gate: "Confirm the anticipated USA defensive rotation and that Arda Guler starts for Turkiye."
+      - rank: secondary
+        label: USA does not win
+        ticker: KXWCGAME-26JUN25TURUSA-USA
+        side: "no"
+        ask_cents: 46
+        market_implied_probability: 0.46
+        gross_payout_x: 2.17
+        sgp_adjustment: not_applicable_single_market
+        scenario_id: TUR-USA-TURKIYE-CONVERTS
+        rationale: "Buying No on the USA winner contract covers both a Turkiye win and a draw, matching the rotation-sensitive Turkiye double-chance thesis."
+        external_support:
+          - "RotoWire selects Turkiye double chance."
+          - "The USA has already clinched first and is expected to protect four booked starters."
+        failure_case: "The USA's depth maintains its pressing advantage and Turkiye remains inefficient in both boxes."
+        lineup_gate: "Retain only if the expected Adams, Robinson, Richards, and Balogun rests are confirmed."
+
+  - match_id: PARAUS
+    matchup: Paraguay vs Australia
+    kickoff_et: "22:00"
+    plays:
+      - rank: primary
+        label: Match ends in a draw
+        ticker: KXWCGAME-26JUN25PARAUS-TIE
+        side: "yes"
+        ask_cents: 43
+        market_implied_probability: 0.43
+        gross_payout_x: 2.33
+        sgp_adjustment: not_applicable_single_market
+        scenario_id: PAR-AUS-QUALIFICATION-STALL
+        rationale: "A draw guarantees Australia second place and should leave Paraguay well positioned to advance with four points."
+        external_support:
+          - "RotoWire identifies the draw as its value play."
+          - "The draw is also the shortest three-way sportsbook outcome in current snapshots."
+        failure_case: "Paraguay treats automatic second place as essential and increases risk early despite Almiron's suspension."
+        lineup_gate: "Reject if either official XI is materially more aggressive than projected."
+      - rank: secondary
+        label: Both teams score - No
+        ticker: KXWCBTTS-26JUN25PARAUS-BTTS
+        side: "no"
+        ask_cents: 56
+        market_implied_probability: 0.56
+        gross_payout_x: 1.79
+        sgp_adjustment: not_applicable_single_market
+        scenario_id: PAR-AUS-QUALIFICATION-STALL
+        rationale: "The qualification incentives, Almiron's suspension, and a sportsbook total near 1.5 all support at least one scoreless side."
+        external_support:
+          - "Action Network lists BTTS No as its best bet."
+          - "The sportsbook Asian total has been centered near 1.75 goals."
+        failure_case: "An early goal forces the trailing side to abandon the shared low-risk script."
+        lineup_gate: "Confirm Almiron is absent and Australia does not select an unusually attacking front line."

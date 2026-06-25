@@ -15,6 +15,10 @@ slate:
   line_analysis_status: deferred
   market_alignment_status: complete
   market_snapshot_at_utc: "2026-06-25T17:02:56Z"
+  potential_plays_status: complete
+  potential_plays_snapshot_at_utc: "2026-06-25T18:37:35Z"
+  potential_plays_file: config/WC-2026-JUN25.plays.yaml
+  potential_plays_report: docs/WC-2026-JUN25-potential-plays.md
   execution_status: disabled
   scoreline_order: listed_match_order
   market_alignment_report: docs/WC-2026-JUN25-market-alignment.md
