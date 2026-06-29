@@ -1,0 +1,240 @@
+# Independent edge analysis for the June 26 World Cup slate.
+#
+# No execution is authorized by this file. It records market-vs-research edge status
+# for review and monitoring.
+
+edge_analysis:
+  id: WC-2026-JUN26-EDGE-ANALYSIS
+  slate_id: WC-2026-JUN26
+  captured_at_utc: "2026-06-26T15:49:08Z"
+  timezone: America/New_York
+  status: complete
+  execution_status: disabled
+  stake_status: none
+  parlay_status: none
+  normal_minimum_edge: 0.05
+  actionable_candidates: 1
+  research_override_supported: false
+  methodology:
+    - "Kalshi ask probability is the selected side's current ask at capture time."
+    - "For No sides, ask probability is 1 minus the Yes bid."
+    - "Two-way and three-way sportsbook prices are de-vigged before comparison."
+    - "One-sided prop, scorer, and spread prices are upper bounds only."
+    - "Gross edge equals external fair probability minus Kalshi ask probability."
+    - "Estimated taker-fee load uses 0.07 * P * (1 - P), before per-order rounding."
+    - "The normal gate requires at least +0.05 gross edge before execution risk checks."
+
+matches:
+  - match_id: NORFRA
+    matchup: Norway vs France
+    kickoff_et: "15:00"
+    candidates:
+      - label: France wins
+        ticker: KXWCGAME-26JUN26NORFRA-FRA
+        side: "yes"
+        kalshi_ask_probability: 0.61
+        fair_probability: 0.6083
+        estimation_method: direct_three_way_devig
+        independent_reference: "FOX/FanDuel France -175 / Norway +420 / draw +360."
+        gross_edge: -0.0017
+        estimated_taker_fee_load: 0.0167
+        fee_adjusted_edge: -0.0183
+        max_ask_to_clear_normal_gate_cents: 55
+        classification: no_edge_after_fees
+        conclusion: "France is a fair favorite, but not mispriced at 61c."
+      - label: Over 2.5 total goals
+        ticker: KXWCTOTAL-26JUN26NORFRA-3
+        side: "yes"
+        kalshi_ask_probability: 0.66
+        fair_probability: 0.5860
+        estimation_method: direct_two_way_devig
+        independent_reference: "FOX/FanDuel over -160 / under +130."
+        gross_edge: -0.0740
+        estimated_taker_fee_load: 0.0157
+        fee_adjusted_edge: -0.0897
+        max_ask_to_clear_normal_gate_cents: 53
+        classification: negative_edge
+        conclusion: "The Haaland-Mbappe goal script is already overbought."
+
+  - match_id: SENIRQ
+    matchup: Senegal vs Iraq
+    kickoff_et: "15:00"
+    candidates:
+      - label: Senegal wins by 2+ goals
+        ticker: KXWCSPREAD-26JUN26SENIRQ-SEN2
+        side: "yes"
+        kalshi_ask_probability: 0.60
+        fair_probability: 0.5690
+        estimation_method: direct_two_way_devig
+        independent_reference: "FOX/FanDuel Senegal -1.5 -150 / Iraq +1.5 +120."
+        gross_edge: -0.0310
+        estimated_taker_fee_load: 0.0168
+        fee_adjusted_edge: -0.0478
+        max_ask_to_clear_normal_gate_cents: 51
+        classification: negative_edge
+        conclusion: "Senegal margin is plausible, but the 60c ask is rich."
+      - label: Both teams score - No
+        ticker: KXWCBTTS-26JUN26SENIRQ-BTTS
+        side: "no"
+        kalshi_ask_probability: 0.55
+        fair_probability: 0.5631
+        estimation_method: direct_two_way_devig
+        independent_reference: "FOX/FanDuel BTTS No -148 / Yes +116."
+        gross_edge: 0.0131
+        estimated_taker_fee_load: 0.0173
+        fee_adjusted_edge: -0.0042
+        max_ask_to_clear_normal_gate_cents: 51
+        classification: no_edge_after_fees
+        conclusion: "Best measured Senegal-Iraq number, but below gate and negative after fees."
+
+  - match_id: CPVKSA
+    matchup: Cape Verde vs Saudi Arabia
+    kickoff_et: "20:00"
+    candidates:
+      - label: Cape Verde wins
+        ticker: KXWCGAME-26JUN26CPVKSA-CPV
+        side: "yes"
+        kalshi_ask_probability: 0.37
+        fair_probability: 0.3525
+        estimation_method: direct_three_way_devig
+        independent_reference: "FOX/FanDuel Cape Verde +170 / Saudi Arabia +165 / draw +230."
+        gross_edge: -0.0175
+        estimated_taker_fee_load: 0.0163
+        fee_adjusted_edge: -0.0338
+        max_ask_to_clear_normal_gate_cents: 30
+        classification: negative_edge
+        conclusion: "The Cape Verde story is good, but the current price is above fair."
+      - label: Under 2.5 total goals
+        ticker: KXWCTOTAL-26JUN26CPVKSA-3
+        side: "no"
+        kalshi_ask_probability: 0.57
+        fair_probability: 0.5514
+        estimation_method: direct_two_way_devig
+        independent_reference: "FOX/FanDuel under -138 / over +112."
+        gross_edge: -0.0186
+        estimated_taker_fee_load: 0.0172
+        fee_adjusted_edge: -0.0357
+        max_ask_to_clear_normal_gate_cents: 50
+        classification: negative_edge
+        conclusion: "Low-event script is already priced."
+
+  - match_id: URUESP
+    matchup: Uruguay vs Spain
+    kickoff_et: "20:00"
+    candidates:
+      - label: Spain wins by 2+ goals
+        ticker: KXWCSPREAD-26JUN26URUESP-ESP2
+        side: "yes"
+        kalshi_ask_probability: 0.32
+        fair_probability: 0.3860
+        estimation_method: direct_two_way_devig
+        independent_reference: "FOX/FanDuel Spain -1.5 +145 / Uruguay +1.5 -185; Covers makes Spain -1.5 top pick and playable to +125."
+        gross_edge: 0.0660
+        estimated_taker_fee_load: 0.0152
+        fee_adjusted_edge: 0.0508
+        max_ask_to_clear_normal_gate_cents: 33
+        classification: clears_normal_gate
+        conclusion: "Best verified candidate on the slate. Market gives a bigger payout than the external spread view warrants."
+      - label: Spain wins
+        ticker: KXWCGAME-26JUN26URUESP-ESP
+        side: "yes"
+        kalshi_ask_probability: 0.59
+        fair_probability: 0.6468
+        estimation_method: direct_three_way_devig
+        independent_reference: "FOX/FanDuel Spain -220 / Uruguay +600 / draw +330."
+        gross_edge: 0.0568
+        estimated_taker_fee_load: 0.0169
+        fee_adjusted_edge: 0.0399
+        max_ask_to_clear_normal_gate_cents: 59
+        classification: positive_but_less_efficient
+        conclusion: "Screens positive, but the spread carries the cleaner payout-to-thesis ratio."
+      - label: Over 2.5 total goals
+        ticker: KXWCTOTAL-26JUN26URUESP-3
+        side: "yes"
+        kalshi_ask_probability: 0.43
+        fair_probability: 0.4913
+        fair_probability_range: [0.4320, 0.4913]
+        estimation_method: source_divergence_direct_two_way_devig
+        independent_reference: "FOX/FanDuel over -106 / under -114 supports edge; SportsGambler under -143 / over +112 is close to Kalshi."
+        gross_edge: 0.0613
+        estimated_taker_fee_load: 0.0172
+        fee_adjusted_edge: 0.0442
+        max_ask_to_clear_normal_gate_cents: 44
+        classification: source_divergence_watch
+        conclusion: "Do not promote above Spain -1.5 because external total prices disagree."
+
+  - match_id: NZLBEL
+    matchup: New Zealand vs Belgium
+    kickoff_et: "23:00"
+    candidates:
+      - label: Belgium wins
+        ticker: KXWCGAME-26JUN26NZLBEL-BEL
+        side: "yes"
+        kalshi_ask_probability: 0.84
+        fair_probability: 0.8100
+        estimation_method: independent_model_probability
+        independent_reference: "Dimers model Belgium 81.0% / draw 12.7% / New Zealand 6.3%."
+        gross_edge: -0.0300
+        estimated_taker_fee_load: 0.0094
+        fee_adjusted_edge: -0.0394
+        max_ask_to_clear_normal_gate_cents: 76
+        classification: negative_edge
+        conclusion: "Belgium should win, but not at 84c."
+      - label: Belgium wins by 3+ goals
+        ticker: KXWCSPREAD-26JUN26NZLBEL-BEL3
+        side: "yes"
+        kalshi_ask_probability: 0.43
+        fair_probability: 0.4566
+        estimation_method: one_sided_quote_upper_bound
+        independent_reference: "Covers top pick Belgium -2.5 +119, one-sided."
+        gross_edge: 0.0266
+        estimated_taker_fee_load: 0.0172
+        fee_adjusted_edge: 0.0095
+        max_ask_to_clear_normal_gate_cents: 40
+        classification: edge_unverified_below_gate
+        conclusion: "Margin story is plausible but the measured upper bound is below the normal gate."
+
+  - match_id: EGYIRI
+    matchup: Egypt vs IR Iran
+    kickoff_et: "23:00"
+    candidates:
+      - label: Egypt wins
+        ticker: KXWCGAME-26JUN26EGYIRI-EGY
+        side: "yes"
+        kalshi_ask_probability: 0.40
+        fair_probability: 0.4410
+        estimation_method: independent_model_probability
+        independent_reference: "Opta via Al Jazeera: Egypt 44.1%, Iran 24.6%, draw 31.3%."
+        gross_edge: 0.0410
+        estimated_taker_fee_load: 0.0168
+        fee_adjusted_edge: 0.0242
+        max_ask_to_clear_normal_gate_cents: 39
+        classification: watch_below_gate
+        conclusion: "Best late-game watch candidate, one cent above the normal gate target."
+      - label: Over 2.5 total goals
+        ticker: KXWCTOTAL-26JUN26EGYIRI-3
+        side: "yes"
+        kalshi_ask_probability: 0.33
+        fair_probability: 0.3704
+        estimation_method: one_sided_quote_upper_bound
+        independent_reference: "Covers top pick over 2.5 +170, playable to +150; paired independent under not available."
+        gross_edge: 0.0404
+        estimated_taker_fee_load: 0.0155
+        fee_adjusted_edge: 0.0249
+        max_ask_to_clear_normal_gate_cents: 32
+        classification: edge_unverified_below_gate
+        conclusion: "Interesting number, but not verified enough to override the edge gate."
+
+sources:
+  - https://kalshi.com/category/sports/soccer/fifa-world-cup
+  - https://www.sportsbettingdime.com/news/soccer/world-cup-picks-predictions-today-best-bets-for-all-6-games-on-june-26/
+  - https://www.foxsports.com/stories/soccer/2026-world-cup-france-norway-odds-prediction-picks
+  - https://www.foxsports.com/stories/soccer/2026-world-cup-senegal-iraq-odds-prediction-picks
+  - https://www.foxsports.com/stories/soccer/2026-world-cup-spain-uruguay-odds-prediction-picks
+  - https://www.foxsports.com/stories/soccer/2026-world-cup-saudi-arabia-cape-verde-odds-prediction-picks
+  - https://www.covers.com/world-cup/spain-vs-uruguay-prediction-picks-odds-friday-6-26-2026
+  - https://www.covers.com/world-cup/cape-verde-vs-saudi-arabia-prediction-picks-odds-friday-6-26-2026
+  - https://www.covers.com/world-cup/belgium-vs-new-zealand-prediction-picks-odds-friday-6-26-2026
+  - https://www.covers.com/world-cup/egypt-vs-iran-prediction-picks-odds-friday-6-26-2026
+  - https://www.aljazeera.com/sports/2026/6/26/egypt-vs-iran-world-cup-2026-prediction-kickoff-schedule-teams
+  - https://www.dimers.com/bet-hub/swc/schedule/2026_3_nzl_bel
