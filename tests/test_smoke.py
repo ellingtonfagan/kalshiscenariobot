@@ -20,6 +20,7 @@ from nbabot import (  # noqa: E402
     execution,
     guardrails,
     market_discovery,
+    orderbook,
     research,
     risk,
     scenarios,
@@ -27,8 +28,8 @@ from nbabot import (  # noqa: E402
     soccer_research,
     ui,
 )
-from nbabot.agents import PHASES, reconcile  # noqa: E402
-from nbabot.kalshi import Quote, _TITLE_RE  # noqa: E402
+from nbabot.agents import PHASES, book_watch, reconcile  # noqa: E402
+from nbabot.kalshi import KalshiClient, Quote, _TITLE_RE  # noqa: E402
 from nbabot.scores import GameState, PlayerLine  # noqa: E402
 
 
@@ -69,6 +70,48 @@ def test_quote_implied():
     q = Quote(bid=38, ask=39, ticker="X")
     assert q.mid == 39 or q.mid == 38 or q.mid == round((38 + 39) / 2)
     assert 0 <= q.implied <= 1
+
+
+def test_orderbook_derives_side_aware_prices_and_depth():
+    book = orderbook.OrderBook.from_snapshot("KXTEST", {
+        "yes": [[68, 100], [65, 300], [60, 200]],
+        "no": [[28, 50], [27, 150], [25, 200]],
+    })
+
+    assert book.best_bid("yes") == 68
+    assert book.best_ask("yes") == 72
+    assert book.spread("yes") == 4
+    assert book.depth_at_limit("yes", 73) == 200
+    assert book.vwap_to_buy("yes", 100, 73) == (72.5, 100)
+
+    book.apply_delta({"side": "yes", "price": 68, "delta": -100})
+    assert book.best_bid("yes") == 65
+
+
+def test_kalshi_orderbook_uses_rest_endpoint_without_network():
+    class DummyKalshi(KalshiClient):
+        path = None
+        params = None
+
+        def __init__(self):
+            pass
+
+        def _get(self, path, params=None):
+            self.path = path
+            self.params = params
+            return {
+                "orderbook": {
+                    "yes": [[68, 100]],
+                    "no": [[28, 50]],
+                }
+            }
+
+    client = DummyKalshi()
+    book = client.orderbook("KXTEST", depth=10)
+
+    assert client.path == "/trade-api/v2/markets/KXTEST/orderbook"
+    assert client.params == {"depth": 10}
+    assert book.best_ask("yes") == 72
 
 
 def test_discovery_catalog_maps_configured_lines():
@@ -543,10 +586,59 @@ def test_ui_renders_dashboard_without_server(tmp_path):
     assert "Guarded execution" in html
 
 
+def test_book_watch_captures_and_stores_orderbooks(tmp_path, monkeypatch):
+    class DummySettings:
+        game_id = "TEST-GAME"
+        deliver_to = "stdout"
+        research_db_path = tmp_path / "research.sqlite"
+        orderbook_depth = 10
+        book_watch_iterations = 1
+        book_watch_interval_seconds = 0
+
+        def data_path(self, suffix):
+            return tmp_path / f"{self.game_id}.{suffix}"
+
+    class DummyKalshi:
+        def orderbook(self, ticker, depth=None):
+            assert depth == 10
+            return orderbook.OrderBook.from_snapshot(ticker, {
+                "yes": [[68, 100]],
+                "no": [[28, 50]],
+            })
+
+    class DummyContext:
+        settings = DummySettings()
+        kalshi = DummyKalshi()
+        game_tag = "TESTTAG"
+
+        def read_json(self, suffix):
+            if suffix == "market_snapshot.json":
+                return {"rows": [{"ticker": "KXTEST"}]}
+            return None
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    monkeypatch.setattr(book_watch, "deliver", lambda *args, **kwargs: None)
+
+    result = book_watch.run(DummyContext())
+    rows = research.ResearchStore(DummySettings.research_db_path).latest_rows(
+        "orderbook_snapshots", 5,
+    )
+
+    assert result["tickers"] == ["KXTEST"]
+    assert result["snapshots"][0]["metrics"]["KXTEST"]["yes"]["best_ask_cents"] == 72
+    assert len(rows) == 1
+    assert rows[0]["ticker"] == "KXTEST"
+
+
 def test_new_automation_phases_registered():
     assert "discover-markets" in PHASES
     assert "autopilot" in PHASES
     assert "live-execute" in PHASES
+    assert "book-watch" in PHASES
 
 
 def test_june_24_world_cup_slate_defers_line_analysis():

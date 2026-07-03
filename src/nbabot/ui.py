@@ -23,6 +23,7 @@ def _load_artifacts(ctx: Context) -> dict[str, Any]:
         "heartbeat": ctx.read_json("hb_state.json") or {},
         "market": ctx.read_json("market_snapshot.json") or {},
         "catalog": ctx.read_json("market_catalog.json") or {},
+        "book": ctx.read_json("book_watch.json") or {},
         "backtest": ctx.read_json("backtest.json") or {},
         "autopilot": ctx.read_json("autopilot.json") or {},
         "paper": ctx.read_json("paper.json") or {},
@@ -50,6 +51,7 @@ def render_dashboard(ctx: Context) -> str:
     board = artifacts["board"].get("board", {})
     market_rows = artifacts["market"].get("rows", [])
     catalog_rows = artifacts["catalog"].get("rows", [])
+    book_snapshots = artifacts["book"].get("snapshots", [])
     backtest = artifacts["backtest"]
     paper = artifacts["paper"].get("orders", [])
     live = artifacts["live"]
@@ -61,6 +63,7 @@ def render_dashboard(ctx: Context) -> str:
     cards.append(("Scenarios", str(len(board) or len(ctx.scenarios))))
     cards.append(("Market Rows", str(len(market_rows))))
     cards.append(("Discovered", str(len(catalog_rows))))
+    cards.append(("Book Tickers", str(len(artifacts["book"].get("tickers", [])))))
     cards.append(("Paper Orders", str(len(paper))))
     cards.append(("Execution Mode", ctx.settings.execution_mode))
     cards.append(("Dry Run", str(ctx.settings.dry_run)))
@@ -99,6 +102,19 @@ def render_dashboard(ctx: Context) -> str:
         }
         for r in catalog_rows[:25]
     ]
+
+    latest_books = []
+    if book_snapshots:
+        for ticker, sides in book_snapshots[-1].get("metrics", {}).items():
+            yes = sides.get("yes", {})
+            latest_books.append({
+                "ticker": ticker,
+                "bid": yes.get("best_bid_cents"),
+                "ask": yes.get("best_ask_cents"),
+                "spread": yes.get("spread_cents"),
+                "ask_depth": yes.get("top_ask_contracts"),
+                "captured": yes.get("captured_at"),
+            })
 
     card_html = "".join(
         f"<section class='metric'><span>{html.escape(k)}</span><strong>{html.escape(v)}</strong></section>"
@@ -151,6 +167,7 @@ def render_dashboard(ctx: Context) -> str:
       <button formaction="/action/autopilot" class="secondary">Autopilot</button>
       <button formaction="/action/discover-markets" class="secondary">Discover Markets</button>
       <button formaction="/action/snapshot-market" class="secondary">Snapshot Market</button>
+      <button formaction="/action/book-watch" class="secondary">Book Watch</button>
       <button formaction="/action/paper" class="secondary">Paper</button>
       <button formaction="/action/demo-execute" class="secondary">Demo Execute</button>
       <button formaction="/action/live-execute" class="secondary">Live Execute</button>
@@ -162,6 +179,7 @@ def render_dashboard(ctx: Context) -> str:
     <section class="block"><h2>Scenarios</h2>{_table(scenario_rows, ["id","name","risk","legs"])}</section>
     <section class="block"><h2>Discovered Markets</h2>{_table(latest_catalog, ["status","series","ticker","player","stat","line","mapped"])}</section>
     <section class="block"><h2>Latest Market Snapshot</h2>{_table(latest_market, ["scenario","market","ticker","prior","implied","edge"])}</section>
+    <section class="block"><h2>Order Books</h2>{_table(latest_books, ["ticker","bid","ask","spread","ask_depth","captured"])}</section>
     <section class="block"><h2>Backtest</h2><pre>{backtest_json}</pre></section>
     <section class="block"><h2>Live Order</h2><pre>{live_json}</pre></section>
     <section class="block"><h2>Paper / Demo Orders</h2><pre>{paper_json}</pre></section>
@@ -192,13 +210,14 @@ def make_handler(ctx: Context):
             self._send(200, "text/html; charset=utf-8", render_dashboard(ctx))
 
         def do_POST(self) -> None:  # noqa: N802
-            from .agents import autopilot, backtest, demo_execute, discover_markets, live_execute, paper, snapshot_market
+            from .agents import autopilot, backtest, book_watch, demo_execute, discover_markets, live_execute, paper, snapshot_market
 
             actions = {
                 "/action/autopilot": autopilot.run,
                 "/action/backtest": backtest.run,
                 "/action/discover-markets": discover_markets.run,
                 "/action/snapshot-market": snapshot_market.run,
+                "/action/book-watch": book_watch.run,
                 "/action/paper": paper.run,
                 "/action/demo-execute": demo_execute.run,
                 "/action/live-execute": live_execute.run,

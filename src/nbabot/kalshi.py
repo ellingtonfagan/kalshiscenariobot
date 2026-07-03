@@ -17,6 +17,8 @@ import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
+from .orderbook import OrderBook
+
 # Map a Kalshi prop family to its series ticker prefix.
 STAT_SERIES = {
     "points": "KXNBAPTS",
@@ -209,6 +211,15 @@ class KalshiClient:
             team = m.get("ticker", "").split("-")[-1]
             out[team] = self._quote(m)
         return out
+
+    def orderbook(self, ticker: str, depth: int | None = None) -> OrderBook:
+        """Return a REST order book snapshot for one market ticker."""
+        params = {"depth": depth} if depth is not None else None
+        data = self._get(f"/trade-api/v2/markets/{ticker}/orderbook", params)
+        return OrderBook.from_kalshi_response(ticker, data)
+
+    def orderbooks(self, tickers: list[str], depth: int | None = None) -> dict[str, OrderBook]:
+        return {ticker: self.orderbook(ticker, depth) for ticker in tickers}
 
     # ── orders (live execution is gated in execution.py / agents/live_execute.py) ─
     def demo_place_order(self, demo_api_base: str, body: dict) -> dict:

@@ -52,6 +52,9 @@ class Settings:
     min_edge: float
     stale_market_seconds: int
     max_spread_cents: int
+    orderbook_depth: int | None
+    book_watch_iterations: int
+    book_watch_interval_seconds: float
     kill_switch_path: Path
     ui_host: str
     ui_port: int
@@ -141,6 +144,12 @@ def load_settings(game_id: str | None = None) -> Settings:
         min_edge=float(os.environ.get("NBABOT_MIN_EDGE", "0.05")),
         stale_market_seconds=int(os.environ.get("NBABOT_STALE_MARKET_SECONDS", "90")),
         max_spread_cents=int(os.environ.get("NBABOT_MAX_SPREAD_CENTS", "10")),
+        orderbook_depth=(
+            int(os.environ["NBABOT_ORDERBOOK_DEPTH"])
+            if os.environ.get("NBABOT_ORDERBOOK_DEPTH") else None
+        ),
+        book_watch_iterations=int(os.environ.get("NBABOT_BOOK_WATCH_ITERATIONS", "1")),
+        book_watch_interval_seconds=float(os.environ.get("NBABOT_BOOK_WATCH_INTERVAL_SECONDS", "0")),
         kill_switch_path=kill_switch_path,
         ui_host=os.environ.get("NBABOT_UI_HOST", "127.0.0.1"),
         ui_port=int(os.environ.get("NBABOT_UI_PORT", "8765")),

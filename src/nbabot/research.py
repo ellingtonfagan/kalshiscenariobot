@@ -108,8 +108,14 @@ class ResearchStore:
                     ticker TEXT NOT NULL,
                     yes_bids_json TEXT,
                     yes_asks_json TEXT,
+                    no_bids_json TEXT,
+                    metrics_json TEXT,
                     source TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS idx_orderbook_snapshots_game_time
+                    ON orderbook_snapshots(game_id, captured_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_orderbook_snapshots_game_ticker_time
+                    ON orderbook_snapshots(game_id, ticker, captured_at DESC);
                 CREATE TABLE IF NOT EXISTS edge_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     game_id TEXT NOT NULL,
@@ -240,6 +246,15 @@ class ResearchStore:
                 );
                 """
             )
+            self._ensure_column(db, "orderbook_snapshots", "no_bids_json", "TEXT")
+            self._ensure_column(db, "orderbook_snapshots", "metrics_json", "TEXT")
+
+    @staticmethod
+    def _ensure_column(db: sqlite3.Connection, table: str, column: str,
+                       ddl: str) -> None:
+        cols = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     def upsert_game(self, game_id: str, game_tag: str) -> None:
         self.init_schema()
@@ -307,6 +322,38 @@ class ResearchStore:
                         to_json(r),
                     )
                     for r in rows
+                ],
+            )
+        return len(rows)
+
+    def record_orderbook_snapshots(self, game_id: str, books: Iterable[Any],
+                                   metrics: dict[str, dict[str, Any]] | None = None) -> int:
+        self.init_schema()
+        rows = list(books)
+        if not rows:
+            return 0
+        metrics = metrics or {}
+        with self.connect() as db:
+            db.executemany(
+                """
+                INSERT INTO orderbook_snapshots(
+                    game_id, captured_at, ticker, yes_bids_json, yes_asks_json,
+                    no_bids_json, metrics_json, source
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        game_id,
+                        book.captured_at,
+                        book.ticker,
+                        to_json(book.bids("yes")),
+                        to_json(book.asks("yes")),
+                        to_json(book.bids("no")),
+                        to_json(metrics.get(book.ticker, {})),
+                        getattr(book, "source", "kalshi"),
+                    )
+                    for book in rows
                 ],
             )
         return len(rows)
@@ -528,7 +575,7 @@ class ResearchStore:
         allowed = {
             "market_snapshots", "edge_history", "backtest_runs", "paper_orders",
             "demo_orders", "live_orders", "risk_decisions", "risk_snapshots", "audit_events",
-            "dead_letter_queue", "market_catalog",
+            "dead_letter_queue", "market_catalog", "orderbook_snapshots",
         }
         if table not in allowed:
             raise ValueError(f"unsupported table: {table}")

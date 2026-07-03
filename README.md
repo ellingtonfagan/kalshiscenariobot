@@ -58,6 +58,7 @@ The bot also has a conservative research and paper/demo execution framework:
 nbabot backtest          # score local scenario history
 nbabot discover-markets  # catalog open Kalshi NBA markets for this game tag
 nbabot snapshot-market   # capture Kalshi quote snapshots for mapped legs
+nbabot book-watch        # capture side-aware order book depth for mapped tickers
 nbabot paper             # create local paper fills for approved single-leg intents
 nbabot demo-execute      # Kalshi demo only; requires NBABOT_EXECUTION_MODE=demo
 nbabot live-execute      # real-money Kalshi order; requires all live gates below
@@ -66,8 +67,8 @@ nbabot ui                # local dashboard
 ```
 
 Runtime data stays under `data/`: JSON artifacts remain append/read-friendly, while
-`data/research.sqlite` mirrors backtests, market snapshots, risk decisions, audit events,
-paper/demo orders, fills, and risk snapshots for analysis.
+`data/research.sqlite` mirrors backtests, market snapshots, order book snapshots, risk
+decisions, audit events, paper/demo/live orders, fills, and risk snapshots for analysis.
 
 Safety gates are always enforced before paper/demo orders: SGP-adjusted scenario context,
 stake `<= 5 units`, minimum edge, stale quote rejection, per-game exposure cap, daily-loss
@@ -107,6 +108,9 @@ NBABOT_MAX_GAME_EXPOSURE_UNITS=5
 NBABOT_MIN_EDGE=0.05
 NBABOT_STALE_MARKET_SECONDS=90
 NBABOT_MAX_SPREAD_CENTS=10
+NBABOT_ORDERBOOK_DEPTH=
+NBABOT_BOOK_WATCH_ITERATIONS=1
+NBABOT_BOOK_WATCH_INTERVAL_SECONDS=0
 NBABOT_KILL_SWITCH=data/KILL_SWITCH
 NBABOT_CALIBRATION_OVERRIDES=data/calibration_overrides.json
 NBABOT_UI_PORT=8765
