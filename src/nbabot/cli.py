@@ -1,15 +1,20 @@
-"""CLI entrypoint:  nbabot <phase>  /  python -m nbabot <phase>."""
+"""CLI entrypoint:  ksobot <phase>  /  nbabot <phase>  /  python -m nbabot <phase>."""
 from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from .agents import PHASES
 from .agents.base import load_context
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="nbabot", description=__doc__)
+    prog = Path(sys.argv[0]).name if argv is None else "ksobot"
+    parser = argparse.ArgumentParser(
+        prog=prog,
+        description="Kalshi Sports Orderbook Engine CLI. nbabot remains a compatibility alias.",
+    )
     parser.add_argument("phase", choices=sorted(PHASES.keys()),
                         help="game phase to run")
     parser.add_argument("--game-id", default=None,

@@ -26,9 +26,10 @@ from nbabot import (  # noqa: E402
     scenarios,
     sizing,
     soccer_research,
+    sports,
     ui,
 )
-from nbabot.agents import PHASES, book_watch, reconcile  # noqa: E402
+from nbabot.agents import PHASES, book_watch, ports, reconcile  # noqa: E402
 from nbabot.kalshi import KalshiClient, Quote, _TITLE_RE  # noqa: E402
 from nbabot.scores import GameState, PlayerLine  # noqa: E402
 
@@ -582,7 +583,7 @@ def test_ui_renders_dashboard_without_server(tmp_path):
 
     html = ui.render_dashboard(DummyContext())
 
-    assert "NBA Scenario Bot" in html
+    assert "Kalshi Sports Orderbook Engine" in html
     assert "Guarded execution" in html
 
 
@@ -634,11 +635,48 @@ def test_book_watch_captures_and_stores_orderbooks(tmp_path, monkeypatch):
     assert rows[0]["ticker"] == "KXTEST"
 
 
+def test_sports_port_registry_lists_core_ports():
+    registry = {port["key"]: port for port in sports.list_ports()}
+
+    assert {"nba", "soccer", "mlb", "nfl", "nhl", "cbb", "tennis"} <= registry.keys()
+    assert registry["nba"]["status"] == "active-runtime"
+    assert registry["soccer"]["status"] == "research-only"
+    assert "orderbook.py" not in registry["nba"]["modules"]
+    assert any("starting pitcher" in blocker for blocker in registry["mlb"]["blockers"])
+
+
+def test_ports_phase_writes_registry(tmp_path, monkeypatch):
+    class DummySettings:
+        game_id = "TEST-GAME"
+        deliver_to = "stdout"
+
+        def data_path(self, suffix):
+            return tmp_path / f"{self.game_id}.{suffix}"
+
+    class DummyContext:
+        settings = DummySettings()
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    monkeypatch.setattr(ports, "deliver", lambda *args, **kwargs: None)
+
+    result = ports.run(DummyContext())
+    written = json.loads((tmp_path / "TEST-GAME.sports_ports.json").read_text())
+
+    assert result["preferred_cli"] == "ksobot"
+    assert written["compatibility_package"] == "nbabot"
+    assert any(port["key"] == "nba" for port in written["ports"])
+
+
 def test_new_automation_phases_registered():
     assert "discover-markets" in PHASES
     assert "autopilot" in PHASES
     assert "live-execute" in PHASES
     assert "book-watch" in PHASES
+    assert "ports" in PHASES
 
 
 def test_june_24_world_cup_slate_defers_line_analysis():

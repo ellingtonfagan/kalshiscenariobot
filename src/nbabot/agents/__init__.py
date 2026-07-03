@@ -12,6 +12,7 @@ from . import (  # noqa: F401
     live_execute,
     lock,
     paper,
+    ports,
     reconcile,
     snapshot_market,
     ui,
@@ -30,6 +31,7 @@ PHASES = {
     "heartbeat": heartbeat.run,
     "live": heartbeat.run,      # alias so a plain crontab can drive the live loop
     "paper": paper.run,
+    "ports": ports.run,
     "reconcile": reconcile.run,
     "snapshot-market": snapshot_market.run,
     "ui": ui.run,

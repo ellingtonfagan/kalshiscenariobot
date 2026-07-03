@@ -1,6 +1,13 @@
-# nba-scenario-bot
+# Kalshi Sports Orderbook Engine
 
-A self-improving, single-game NBA **scenario-parlay monitor** for Kalshi.
+A Kalshi sports order book and scenario engine. It started as `nba-scenario-bot`;
+the existing `nbabot` command and Python package remain as compatibility aliases while
+the broader platform grows under the preferred `ksobot` command.
+
+Current runtime support is NBA-first: single-game scenario monitoring, Kalshi market
+discovery, quote snapshots, side-aware order book snapshots, risk-gated execution, and
+postgame learning. Future sport ports are tracked in `docs/platform-roadmap.md` and
+exported by `ksobot ports`.
 
 > **It reports which game-script is becoming true. It does not chase bets.** Same-game
 > parlay legs are correlated, so it always shows the SGP-adjusted joint probability, caps
@@ -25,15 +32,18 @@ pip install -e .
 cp .env.example .env          # paste your NEW Kalshi key id
 # put the RSA private key at secrets/kalshi-private-key.pem
 
-nbabot baseline
-nbabot lineups
-nbabot lock
-nbabot heartbeat              # loop this every ~10 min during the game
-nbabot reconcile
-nbabot backtest               # local no-network replay from the learning log
-nbabot autopilot              # safe repeated orchestration for cron/launchd
-nbabot ui                     # local browser UI at http://127.0.0.1:8765
+ksobot baseline
+ksobot lineups
+ksobot lock
+ksobot heartbeat              # loop this every ~10 min during the game
+ksobot reconcile
+ksobot backtest               # local no-network replay from the learning log
+ksobot ports                  # write the current sport-port registry
+ksobot autopilot              # safe repeated orchestration for cron/launchd
+ksobot ui                     # local browser UI at http://127.0.0.1:8765
 ```
+
+`nbabot` remains valid for existing scripts.
 
 Drive the live loop from cron — see `scheduler/crontab.txt`.
 
@@ -59,6 +69,7 @@ nbabot backtest          # score local scenario history
 nbabot discover-markets  # catalog open Kalshi NBA markets for this game tag
 nbabot snapshot-market   # capture Kalshi quote snapshots for mapped legs
 nbabot book-watch        # capture side-aware order book depth for mapped tickers
+nbabot ports             # export planned sport adapters and blockers
 nbabot paper             # create local paper fills for approved single-leg intents
 nbabot demo-execute      # Kalshi demo only; requires NBABOT_EXECUTION_MODE=demo
 nbabot live-execute      # real-money Kalshi order; requires all live gates below
@@ -115,6 +126,20 @@ NBABOT_KILL_SWITCH=data/KILL_SWITCH
 NBABOT_CALIBRATION_OVERRIDES=data/calibration_overrides.json
 NBABOT_UI_PORT=8765
 ```
+
+## Sport ports
+
+The broader platform keeps sport-specific work behind adapters. NBA remains the active
+runtime adapter, soccer is research-only from the existing World Cup artifacts, and MLB,
+NFL, NHL, college basketball, and tennis are registered as planned ports.
+
+```bash
+ksobot ports
+```
+
+This writes `data/<GAME_ID>.sports_ports.json` with each port's first markets, data needs,
+blockers, and current status. The detailed expansion plan lives in
+`docs/platform-roadmap.md`.
 
 ### Research override
 

@@ -1,7 +1,9 @@
-"""nba-scenario-bot — single-game NBA scenario-parlay monitor for Kalshi.
+"""Kalshi Sports Orderbook Engine compatibility package.
 
-It reports which game-script is becoming true; it does not chase bets.
-See AGENTS.md for the honesty contract and data contracts.
+The import package remains ``nbabot`` while the runtime grows from an NBA scenario
+monitor into a broader Kalshi sports order book engine. It reports which game-script is
+becoming true; it does not chase bets. See AGENTS.md for the honesty contract and data
+contracts.
 """
 
 __version__ = "1.0.0"

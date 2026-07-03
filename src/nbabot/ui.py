@@ -24,6 +24,7 @@ def _load_artifacts(ctx: Context) -> dict[str, Any]:
         "market": ctx.read_json("market_snapshot.json") or {},
         "catalog": ctx.read_json("market_catalog.json") or {},
         "book": ctx.read_json("book_watch.json") or {},
+        "ports": ctx.read_json("sports_ports.json") or {},
         "backtest": ctx.read_json("backtest.json") or {},
         "autopilot": ctx.read_json("autopilot.json") or {},
         "paper": ctx.read_json("paper.json") or {},
@@ -64,6 +65,7 @@ def render_dashboard(ctx: Context) -> str:
     cards.append(("Market Rows", str(len(market_rows))))
     cards.append(("Discovered", str(len(catalog_rows))))
     cards.append(("Book Tickers", str(len(artifacts["book"].get("tickers", [])))))
+    cards.append(("Sport Ports", str(len(artifacts["ports"].get("ports", [])))))
     cards.append(("Paper Orders", str(len(paper))))
     cards.append(("Execution Mode", ctx.settings.execution_mode))
     cards.append(("Dry Run", str(ctx.settings.dry_run)))
@@ -129,7 +131,7 @@ def render_dashboard(ctx: Context) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NBA Scenario Bot</title>
+  <title>Kalshi Sports Orderbook Engine</title>
   <style>
     :root {{ color-scheme: light; --ink:#17202a; --muted:#65717d; --line:#d8dee4;
       --bg:#f7f9fb; --panel:#ffffff; --accent:#0b6b57; --warn:#9a5b00; }}
@@ -161,13 +163,14 @@ def render_dashboard(ctx: Context) -> str:
 </head>
 <body>
   <header>
-    <h1>NBA Scenario Bot</h1>
+    <h1>Kalshi Sports Orderbook Engine</h1>
     <form class="actions" method="post">
       <button formaction="/action/backtest">Backtest</button>
       <button formaction="/action/autopilot" class="secondary">Autopilot</button>
       <button formaction="/action/discover-markets" class="secondary">Discover Markets</button>
       <button formaction="/action/snapshot-market" class="secondary">Snapshot Market</button>
       <button formaction="/action/book-watch" class="secondary">Book Watch</button>
+      <button formaction="/action/ports" class="secondary">Ports</button>
       <button formaction="/action/paper" class="secondary">Paper</button>
       <button formaction="/action/demo-execute" class="secondary">Demo Execute</button>
       <button formaction="/action/live-execute" class="secondary">Live Execute</button>
@@ -210,7 +213,7 @@ def make_handler(ctx: Context):
             self._send(200, "text/html; charset=utf-8", render_dashboard(ctx))
 
         def do_POST(self) -> None:  # noqa: N802
-            from .agents import autopilot, backtest, book_watch, demo_execute, discover_markets, live_execute, paper, snapshot_market
+            from .agents import autopilot, backtest, book_watch, demo_execute, discover_markets, live_execute, paper, ports, snapshot_market
 
             actions = {
                 "/action/autopilot": autopilot.run,
@@ -218,6 +221,7 @@ def make_handler(ctx: Context):
                 "/action/discover-markets": discover_markets.run,
                 "/action/snapshot-market": snapshot_market.run,
                 "/action/book-watch": book_watch.run,
+                "/action/ports": ports.run,
                 "/action/paper": paper.run,
                 "/action/demo-execute": demo_execute.run,
                 "/action/live-execute": live_execute.run,
