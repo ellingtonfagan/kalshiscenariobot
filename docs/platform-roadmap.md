@@ -30,6 +30,7 @@ These modules should become sport-agnostic:
 - `orderbook.py`: YES/NO ladder normalization, derived asks, VWAP, depth, slippage.
 - `adapters/base.py`: sport adapter contract used by runtime phases.
 - `agents/book_watch.py`: order book capture from generic candidate artifacts.
+- `market_matcher.py`: Kalshi-first order-book deltas and execution-review slate.
 - `research.py`: SQLite mirror for snapshots, orders, fills, risk, calibration.
 - `risk.py`: execution gate, kill switch, exposure, liquidity, staleness, approvals.
 - `execution.py`: paper/demo/live order request and audit recording.

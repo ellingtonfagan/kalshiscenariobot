@@ -10,7 +10,7 @@ from ..execution import execute_demo
 from ..research import ResearchStore
 from ..risk import RiskContext, evaluate_trade_intent
 from .base import Context, load_context
-from .paper import _candidate_intents
+from .paper import _candidate_intents, refresh_research_for_execution
 
 
 def run(ctx: Context | None = None) -> dict:
@@ -22,6 +22,7 @@ def run(ctx: Context | None = None) -> dict:
 
     store = ResearchStore(ctx.settings.research_db_path)
     audit = AuditTrail(ctx.settings.data_dir, store)
+    refresh_research_for_execution(ctx)
     intents = _candidate_intents(ctx)
     if not intents:
         audit.log("DEMO_NO_CANDIDATES", {"game_id": ctx.settings.game_id}, ctx.settings.game_id)

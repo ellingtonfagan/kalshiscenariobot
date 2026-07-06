@@ -58,6 +58,9 @@ src/nbabot/
   backtesting.py   Local scenario replay metrics from the learning log.
   marketdata.py    Compatibility wrapper for adapters/nba/marketdata.py.
   sports.py        Sport-port registry for active/research/planned adapters.
+  slate.py         Slate discovery, verification, and research-candidate helpers.
+  market_matcher.py Match Kalshi slate markets to books, external lines, and deltas.
+  odds_refresh.py  Shared artifact freshness checks and live refresh helpers.
   sources/         Source registry + readiness checks for slate/research inputs.
   ui.py            Dependency-free local dashboard served by `nbabot ui`.
   alerts.py        Compact-block formatter + delivery (stdout or webhook).
@@ -71,10 +74,14 @@ src/nbabot/
     backtest.py     No-network local replay from data/<GAME_ID>.log.jsonl.
     snapshot_market.py Capture mapped Kalshi quote snapshots.
     book_watch.py   Capture side-aware order book depth from generic candidate artifacts.
+    market_matcher.py Build market_matches.json and execution_slate.json.
     status.py       Summarize mode, live blockers, artifacts, risk, and orders.
     portfolio_sync.py Mirror Kalshi balance + positions into local state.
     daily_cycle.py  Autonomous discover/snapshot/book/execution/backtest/status loop.
     source_check.py  Secret-safe readiness report for external source feeds.
+    slate_discovery.py Find candidate events/lines from structured sports feeds.
+    slate_verify.py  Verify slate identity/source coverage before research.
+    research_agent.py Produce trade-eligible research handoff artifacts.
     paper.py        Local paper fills only after risk gate approval.
     demo_execute.py Kalshi demo only after risk gate approval.
     ports.py        Export active/research/planned sport adapter registry.
@@ -88,9 +95,15 @@ scheduler/         Portable crontab + the original OpenClaw cron file (reference
 The original game agents map 1:1 to the live-game phases. `cli.py phase=live` is an
 alias for one `heartbeat` tick so a plain crontab can drive the live loop. The research,
 paper/demo execution, and UI agents are explicit opt-in phases.
-For autonomous operation, prefer `ksobot daily-cycle` under cron/launchd/systemd. It
-does not paper trade by default; live execution still requires the explicit live gates
-and risk approval.
+For autonomous operation, prefer `ksobot daily-cycle` under cron/launchd/systemd. It is
+the agent activation chain: each phase records which prior phase activated it and which
+next phase it makes eligible. It does not paper trade by default; live execution still
+requires the explicit live gates and risk approval.
+The current chain is `source-check -> slate-discovery -> slate-verify ->
+portfolio-sync -> discover-markets -> snapshot-market -> book-watch -> market-matcher
+-> research-agent -> execution gate -> backtest -> status`. Slate verification,
+market matching, research, and execution refresh stale odds/order-book handoff artifacts
+before consuming them. `NBABOT_STALE_MARKET_SECONDS` controls those freshness checks.
 
 ## 2. How to run
 
@@ -108,6 +121,10 @@ nbabot reconcile      # after the buzzer
 nbabot backtest       # no-network local replay
 nbabot snapshot-market # capture mapped Kalshi quote snapshots
 nbabot source-check  # verify external source readiness without exposing secrets
+nbabot slate-discovery # discover candidate sports events/lines
+nbabot slate-verify  # reject social/ESPN-only slate candidates
+nbabot market-matcher # match open Kalshi slate, order-book deltas, and execution review rows
+nbabot research-agent # produce research_bundle + trade-eligible market_candidates
 nbabot paper          # local paper fills only
 nbabot demo-execute   # Kalshi demo only; requires NBABOT_EXECUTION_MODE=demo
 nbabot live-execute   # real-money Kalshi; requires live gates + risk approval

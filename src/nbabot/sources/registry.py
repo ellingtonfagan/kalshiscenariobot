@@ -159,4 +159,15 @@ def format_source_report(report: dict[str, Any]) -> str:
         )
     if not report.get("policy", {}).get("social_may_trigger_execution", False):
         lines.append("  policy: social/opinion sources are context-only, never execution triggers")
+    scope = report.get("kalshi_scope_probe") or {}
+    if scope.get("attempted"):
+        if scope.get("ok"):
+            lines.append(
+                "  kalshi-scope: "
+                f"in_scope={scope.get('in_scope_markets', 0)} "
+                f"nonzero_quotes={scope.get('nonzero_quote_markets', 0)} "
+                f"scanned={scope.get('open_markets_scanned', 0)}"
+            )
+        else:
+            lines.append(f"  kalshi-scope: failed {scope.get('reason', 'unknown')}")
     return "\n".join(lines)

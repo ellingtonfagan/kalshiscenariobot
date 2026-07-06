@@ -20,12 +20,15 @@ from nbabot import (  # noqa: E402
     calibration,
     execution,
     guardrails,
+    market_matcher as market_matcher_core,
     market_discovery,
     orderbook,
+    odds_refresh,
     research,
     risk,
     scenarios,
     sizing,
+    slate,
     soccer_research,
     sports,
     ui,
@@ -36,9 +39,14 @@ from nbabot.agents import (  # noqa: E402
     book_watch,
     daily_cycle,
     discover_markets,
+    market_matcher,
+    paper,
     portfolio_sync,
     ports,
     reconcile,
+    research_agent,
+    slate_discovery,
+    slate_verify,
     snapshot_market,
     source_check,
     status,
@@ -175,6 +183,24 @@ def test_kalshi_orderbook_uses_rest_endpoint_without_network():
     assert client.path == "/trade-api/v2/markets/KXTEST/orderbook"
     assert client.params == {"depth": 10}
     assert book.best_ask("yes") == 72
+
+
+def test_kalshi_open_market_scan_does_not_require_series():
+    class DummyKalshi(KalshiClient):
+        params = None
+
+        def __init__(self):
+            pass
+
+        def _get(self, path, params=None):
+            self.params = params
+            return {"markets": [{"ticker": "KXOPEN"}]}
+
+    client = DummyKalshi()
+    rows = client.list_open_markets(max_pages=1)
+
+    assert rows == [{"ticker": "KXOPEN"}]
+    assert client.params == {"limit": 500, "status": "open"}
 
 
 def test_discovery_catalog_maps_configured_lines():
@@ -709,6 +735,173 @@ def test_book_watch_captures_and_stores_orderbooks(tmp_path, monkeypatch):
     assert rows[0]["ticker"] == "KXTEST"
 
 
+def test_odds_refresh_marks_stale_and_fresh_artifacts(tmp_path):
+    now = datetime.now(timezone.utc)
+
+    class DummySettings(_ExecSettings):
+        stale_market_seconds = 90
+
+    class DummyContext:
+        settings = DummySettings(tmp_path)
+        payload = {
+            "generated_at": (now - timedelta(minutes=5)).isoformat(),
+        }
+
+        def read_json(self, suffix):
+            return self.payload
+
+    ctx = DummyContext()
+    stale_report = odds_refresh.freshness_report(ctx, "slate_candidates.json")
+    assert stale_report["fresh"] is False
+    assert stale_report["reason"] == "stale > 90s"
+
+    ctx.payload = {"generated_at": now.isoformat()}
+    fresh_report = odds_refresh.freshness_report(ctx, "slate_candidates.json")
+    assert fresh_report["fresh"] is True
+
+
+def test_market_matcher_builds_orderbook_delta_execution_slate(tmp_path):
+    now = datetime.now(timezone.utc).isoformat()
+    settings = _ExecSettings(tmp_path)
+    store = research.ResearchStore(settings.research_db_path)
+    previous_book = orderbook.OrderBook.from_snapshot("KXTEST", {
+        "yes": [[50, 100]],
+        "no": [[45, 50]],
+    })
+    current_book = orderbook.OrderBook.from_snapshot("KXTEST", {
+        "yes": [[52, 125]],
+        "no": [[46, 80]],
+    })
+    previous_metrics = {
+        "KXTEST": {
+            "yes": previous_book.metrics("yes"),
+            "no": previous_book.metrics("no"),
+        }
+    }
+    current_metrics = {
+        "KXTEST": {
+            "yes": current_book.metrics("yes"),
+            "no": current_book.metrics("no"),
+        }
+    }
+    store.record_orderbook_snapshots(settings.game_id, [previous_book], previous_metrics)
+    store.record_orderbook_snapshots(settings.game_id, [current_book], current_metrics)
+
+    slate_payload = {
+        "generated_at": now,
+        "candidates": [
+            {
+                "candidate_id": "kalshi:KXTEST",
+                "sport": "soccer_world_cup",
+                "sources": ["kalshi", "kalshi-open-markets"],
+                "structured_sources": ["kalshi"],
+                "kalshi_markets": [
+                    {
+                        "ticker": "KXTEST",
+                        "title": "Spain advances, Reg Time: Over 2.5 goals scored",
+                        "components": ["Spain advances", "Reg Time: Over 2.5 goals scored"],
+                        "bid": 52,
+                        "ask": 54,
+                        "mid": 53,
+                        "implied": 0.53,
+                        "spread_cents": 2,
+                        "captured_at": now,
+                    }
+                ],
+            },
+            {
+                "candidate_id": "soccer:spain:portugal",
+                "sport": "soccer_world_cup",
+                "sources": ["the_odds_api"],
+                "structured_sources": ["the_odds_api"],
+                "away_team": "Spain",
+                "home_team": "Portugal",
+                "line_markets": [
+                    {"provider": "the_odds_api", "market": "totals", "name": "Over", "point": 2.5}
+                ],
+            },
+        ],
+    }
+    sport_handoff = {
+        "generated_at": now,
+        "rows": [
+            {
+                "ticker": "KXTEST",
+                "candidate_id": "kalshi:KXTEST",
+                "sport": "soccer_world_cup",
+                "title": "Spain advances, Reg Time: Over 2.5 goals scored",
+                "bid": 52,
+                "ask": 54,
+                "implied": 0.53,
+                "spread_cents": 2,
+                "captured_at": now,
+            }
+        ],
+    }
+    book_payload = {
+        "generated_at": now,
+        "snapshots": [
+            {
+                "captured_at": now,
+                "books": [current_book.as_dict()],
+                "metrics": current_metrics,
+            }
+        ],
+    }
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+        def read_json(self, suffix):
+            return {
+                "slate_candidates.json": slate_payload,
+                "sport_market_candidates.json": sport_handoff,
+                "book_watch.json": book_payload,
+            }.get(suffix)
+
+    payload = market_matcher_core.build_market_matches(DummyContext())
+    row = payload["rows"][0]
+
+    assert payload["execution_review_count"] == 1
+    assert payload["trade_eligible_count"] == 0
+    assert row["execution_review"] is True
+    assert row["trade_eligible"] is False
+    assert "bid_rising" in row["orderbook_delta"]["signals"]
+    assert "spread_tightening" in row["orderbook_delta"]["signals"]
+    assert row["external_matches"]
+    assert "missing model probability" in row["blockers"]
+
+
+def test_market_matcher_phase_writes_execution_slate(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc).isoformat()
+    settings = _ExecSettings(tmp_path)
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+        def read_json(self, suffix):
+            return {
+                "slate_candidates.json": {"generated_at": now, "candidates": []},
+                "sport_market_candidates.json": {"generated_at": now, "rows": []},
+                "book_watch.json": {"generated_at": now, "snapshots": []},
+            }.get(suffix)
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    monkeypatch.setattr(market_matcher, "deliver", lambda *args, **kwargs: None)
+
+    result = market_matcher.run(DummyContext())
+
+    assert result["candidate_count"] == 0
+    assert (tmp_path / "TEST-GAME.market_matches.json").exists()
+    assert (tmp_path / "TEST-GAME.execution_slate.json").exists()
+
+
 def test_status_reports_live_blockers(tmp_path, monkeypatch):
     class DummyContext:
         def __init__(self, settings):
@@ -771,10 +964,100 @@ def test_source_registry_keeps_social_out_of_execution():
     assert providers["the_odds_api"]["role"] == "secondary_structured_odds"
     assert providers["espn_public_site_api"]["role"] == "fallback_schedule_score_news"
     assert config["policy"]["social_may_trigger_execution"] is False
+    assert config["policy"]["hidden_api_may_trigger_execution"] is False
+    assert config["policy"]["execution_allowed_from"] == ["kalshi", "risk_gate"]
+    assert providers["espn_public_site_api"]["live_execution_allowed"] is False
+    assert "execution" not in providers["espn_public_site_api"]["allowed_for"]
 
     for key in config["policy"]["opinion_only_sources"]:
         assert providers[key]["live_execution_allowed"] is False
         assert "execution" not in providers[key]["allowed_for"]
+
+
+def test_slate_defaults_to_broad_daily_sports(monkeypatch):
+    monkeypatch.delenv("NBABOT_SLATE_SPORTS", raising=False)
+    settings = _ExecSettings(Path("/tmp"))
+
+    sports_list = slate.configured_sports(settings)
+
+    assert "soccer_world_cup" in sports_list
+    assert "mlb" in sports_list
+    assert "nba_summer_league" in sports_list
+    assert "nba" not in sports_list
+
+
+def test_broad_kalshi_open_markets_become_research_watchlist(tmp_path, monkeypatch):
+    class DummySettings(_ExecSettings):
+        game = {"game": {}, "sources": {}}
+        sport = "nba"
+        kalshi_game_tag = "TESTTAG"
+
+    class DummyKalshi:
+        def list_open_markets(self, max_pages=3):
+            return [
+                {
+                    "ticker": "KXSOCCER",
+                    "event_ticker": "KXSOCCER-EVENT",
+                    "title": "yes Spain advances,yes Reg Time: Over 2.5 goals scored",
+                    "yes_bid_dollars": "0.20",
+                    "yes_ask_dollars": "0.24",
+                    "close_time": "2026-07-07T00:00:00Z",
+                    "status": "active",
+                    "market_type": "binary",
+                }
+            ]
+
+    class DummyAdapter:
+        def discovery_series(self, settings):
+            return []
+
+        def fetch_raw_markets(self, kalshi, game_tag, series):
+            return []
+
+        def build_catalog(self, game_id, game_tag, raw, scenarios):
+            return []
+
+    class DummyContext:
+        settings = DummySettings(tmp_path)
+        kalshi = DummyKalshi()
+        adapter = DummyAdapter()
+        game_tag = "TESTTAG"
+        scenarios = []
+
+        def read_json(self, suffix):
+            return None
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    monkeypatch.setenv("NBABOT_SLATE_SPORTS", "soccer_world_cup")
+    monkeypatch.setattr(
+        slate,
+        "fetch_structured_events",
+        lambda sports, source_config: (
+            {"sportsgameodds": [], "the_odds_api": [], "espn_public_site_api": []},
+            [],
+        ),
+    )
+    payload = slate.discover_slate(DummyContext())
+    candidate = payload["candidates"][0]
+
+    assert candidate["candidate_id"].startswith("kalshi:KXSOCCER")
+    assert candidate["kalshi_markets"][0]["bid"] == 20
+    assert candidate["kalshi_markets"][0]["ask"] == 24
+
+    research_payload = slate.research_bundle(
+        DummyContext(),
+        payload,
+        {"rows": []},
+    )
+
+    assert research_payload["candidate_count"] == 1
+    assert research_payload["market_candidates"][0]["ticker"] == "KXSOCCER"
+    assert research_payload["market_candidates"][0]["trade_eligible"] is False
+    assert "missing model-vs-market edge" in research_payload["market_candidates"][0]["blockers"]
 
 
 def test_source_check_reports_config_without_leaking_values(tmp_path, monkeypatch):
@@ -812,6 +1095,174 @@ def test_source_check_reports_config_without_leaking_values(tmp_path, monkeypatc
     assert (tmp_path / "TEST-GAME.source_check.json").exists()
 
 
+def test_slate_verify_rejects_espn_or_social_only_candidates(tmp_path):
+    class DummyContext:
+        settings = _ExecSettings(tmp_path)
+
+    payload = {
+        "candidates": [
+            {
+                "candidate_id": "nba:espn-only",
+                "structured_sources": [],
+                "fallback_sources": ["espn_public_site_api"],
+                "kalshi_markets": [],
+                "mapped_kalshi_markets": [],
+            },
+            {
+                "candidate_id": "nba:social-only",
+                "structured_sources": [],
+                "fallback_sources": ["reddit"],
+                "kalshi_markets": [],
+                "mapped_kalshi_markets": [],
+            },
+        ],
+    }
+
+    result = slate.verify_slate(DummyContext(), payload)
+
+    assert result["verified_count"] == 0
+    assert all(not row["approved_for_research"] for row in result["rows"])
+    assert all(not row["approved_for_execution"] for row in result["rows"])
+
+
+def test_research_bundle_marks_trade_eligible_only_after_verified_slate_and_book(tmp_path):
+    now = datetime.now(timezone.utc).isoformat()
+
+    class DummyContext:
+        settings = _ExecSettings(tmp_path)
+
+        def read_json(self, suffix):
+            if suffix == "market_snapshot.json":
+                return {
+                    "generated_at": now,
+                    "rows": [
+                        {
+                            "ticker": "KXTEST",
+                            "captured_at": now,
+                            "scenario_id": "S1",
+                            "market": "brunson_points",
+                            "label": "Brunson points",
+                            "side": "yes",
+                            "entry_price_cents": 45,
+                            "bid": 43,
+                            "ask": 45,
+                            "implied": 0.45,
+                            "prior_p": 0.55,
+                            "sgp_adjusted_prob": 0.22,
+                            "risk": 3,
+                        }
+                    ]
+                }
+            if suffix == "book_watch.json":
+                return {
+                    "generated_at": now,
+                    "snapshots": [
+                        {
+                            "captured_at": now,
+                            "metrics": {
+                                "KXTEST": {
+                                    "yes": {
+                                        "captured_at": now,
+                                        "fillable_contracts": 10,
+                                        "spread_cents": 2,
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            if suffix == "slate_candidates.json":
+                return {"generated_at": now, "candidates": []}
+            if suffix == "slate_verification.json":
+                return {"verified_at": now, "rows": []}
+            if suffix == "market_matches.json":
+                return {
+                    "generated_at": now,
+                    "rows": [
+                        {
+                            "ticker": "KXTEST",
+                            "orderbook_delta": {"signals": ["spread_tightening"]},
+                            "external_matches": [{"candidate_id": "nba:verified", "score": 0.5}],
+                            "freshness": {},
+                        }
+                    ],
+                }
+            return None
+
+    slate_payload = {
+        "candidates": [
+            {
+                "candidate_id": "nba:verified",
+                "structured_sources": ["kalshi", "sportsgameodds"],
+            }
+        ]
+    }
+    verification = {
+        "rows": [
+            {
+                "candidate_id": "nba:verified",
+                "approved_for_research": True,
+            }
+        ]
+    }
+
+    bundle = slate.research_bundle(DummyContext(), slate_payload, verification)
+
+    assert bundle["trade_eligible_count"] == 1
+    candidate = bundle["market_candidates"][0]
+    assert candidate["trade_eligible"] is True
+    assert candidate["edge"] == 0.1
+    assert "kalshi" in candidate["structured_sources"]
+
+
+def test_paper_execution_uses_research_bundle_filter(tmp_path):
+    class DummyContext:
+        settings = _ExecSettings(tmp_path)
+        empty_bundle = False
+
+        def read_json(self, suffix):
+            if suffix == "market_snapshot.json":
+                return {
+                    "rows": [
+                        {
+                            "game_id": "TEST-GAME",
+                            "captured_at": datetime.now(timezone.utc).isoformat(),
+                            "scenario_id": "S1",
+                            "market": "brunson_points",
+                            "label": "Brunson points",
+                            "ticker": "KXTEST",
+                            "bid": 40,
+                            "ask": 45,
+                            "implied": 0.45,
+                            "prior_p": 0.60,
+                            "risk": 3,
+                            "side": "yes",
+                            "entry_price_cents": 45,
+                            "sgp_adjusted_prob": 0.22,
+                        }
+                    ]
+                }
+            if suffix == "research_bundle.json":
+                if self.empty_bundle:
+                    return {"market_candidates": []}
+                return {
+                    "market_candidates": [
+                        {
+                            "ticker": "KXTEST",
+                            "scenario_id": "S1",
+                            "market": "brunson_points",
+                            "trade_eligible": False,
+                        }
+                    ]
+                }
+            return None
+
+    ctx = DummyContext()
+    assert paper._candidate_intents(ctx) == []
+    ctx.empty_bundle = True
+    assert paper._candidate_intents(ctx) == []
+
+
 def test_daily_cycle_skips_paper_execution_by_default(tmp_path, monkeypatch):
     calls = []
 
@@ -831,25 +1282,40 @@ def test_daily_cycle_skips_paper_execution_by_default(tmp_path, monkeypatch):
         return run
 
     monkeypatch.setattr(portfolio_sync, "run", step("portfolio-sync"))
+    monkeypatch.setattr(source_check, "run", step("source-check"))
+    monkeypatch.setattr(slate_discovery, "run", step("slate-discovery"))
+    monkeypatch.setattr(slate_verify, "run", step("slate-verify"))
     monkeypatch.setattr(discover_markets, "run", step("discover-markets"))
     monkeypatch.setattr(snapshot_market, "run", step("snapshot-market"))
     monkeypatch.setattr(book_watch, "run", step("book-watch"))
+    monkeypatch.setattr(market_matcher, "run", step("market-matcher"))
+    monkeypatch.setattr(research_agent, "run", step("research-agent"))
     monkeypatch.setattr(status, "run", step("status"))
     monkeypatch.setattr(daily_cycle, "deliver", lambda *args, **kwargs: None)
 
     result = daily_cycle.run(DummyContext(_ExecSettings(tmp_path)))
 
     assert calls == [
+        "source-check",
+        "slate-discovery",
+        "slate-verify",
         "portfolio-sync",
         "discover-markets",
         "snapshot-market",
         "book-watch",
+        "market-matcher",
+        "research-agent",
         "status",
     ]
     assert any(
         step["name"] == "execution" and step["status"] == "skipped"
         for step in result["steps"]
     )
+    assert result["steps"][0]["activates"] == ["slate-discovery"]
+    assert result["steps"][1]["activated_by"] == "source-check"
+    assert {"from": "book-watch", "to": "market-matcher", "status": "ok"} in result["activation_edges"]
+    assert {"from": "market-matcher", "to": "research-agent", "status": "ok"} in result["activation_edges"]
+    assert {"from": "research-agent", "to": "execution", "status": "skipped"} in result["activation_edges"]
     assert (tmp_path / "TEST-GAME.daily_cycle.json").exists()
 
 
@@ -895,7 +1361,12 @@ def test_new_automation_phases_registered():
     assert "daily-cycle" in PHASES
     assert "live-execute" in PHASES
     assert "book-watch" in PHASES
+    assert "market-matcher" in PHASES
     assert "portfolio-sync" in PHASES
+    assert "source-check" in PHASES
+    assert "slate-discovery" in PHASES
+    assert "slate-verify" in PHASES
+    assert "research-agent" in PHASES
     assert "ports" in PHASES
     assert "status" in PHASES
     assert "telegram-test" in PHASES

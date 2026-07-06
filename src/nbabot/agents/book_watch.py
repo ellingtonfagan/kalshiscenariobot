@@ -6,7 +6,7 @@ from typing import Any
 
 from ..alerts import deliver
 from ..orderbook import OrderBook
-from ..research import ResearchStore
+from ..research import ResearchStore, utc_now
 from .base import Context, load_context
 
 
@@ -84,6 +84,7 @@ def run(ctx: Context | None = None) -> dict:
         stored = store.record_orderbook_snapshots(ctx.settings.game_id, books, metrics)
         snapshots.append({
             "iteration": i + 1,
+            "captured_at": utc_now(),
             "stored": stored,
             "books": [book.as_dict() for book in books],
             "metrics": metrics,
@@ -94,6 +95,7 @@ def run(ctx: Context | None = None) -> dict:
     payload = {
         "game_id": ctx.settings.game_id,
         "game_tag": ctx.game_tag,
+        "generated_at": utc_now(),
         "tickers": tickers,
         "snapshots": snapshots,
     }

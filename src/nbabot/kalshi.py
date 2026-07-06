@@ -160,11 +160,13 @@ class KalshiClient:
         return out
 
     # ── markets ──────────────────────────────────────────────────────────────────
-    def list_markets(self, series: str, game_tag: str | None = None,
+    def list_markets(self, series: str | None = None, game_tag: str | None = None,
                      status: str = "open", max_pages: int = 6) -> list[dict]:
         markets, cursor = [], None
         for _ in range(max_pages):
-            params = {"limit": 500, "status": status, "series_ticker": series}
+            params = {"limit": 500, "status": status}
+            if series:
+                params["series_ticker"] = series
             if cursor:
                 params["cursor"] = cursor
             resp = self._get("/trade-api/v2/markets", params)
@@ -175,6 +177,10 @@ class KalshiClient:
             if not cursor:
                 break
         return markets
+
+    def list_open_markets(self, max_pages: int = 3) -> list[dict]:
+        """Return broad open markets without filtering to one sport series."""
+        return self.list_markets(None, None, "open", max_pages=max_pages)
 
     def _list_series(self, series: str, game_tag: str) -> list[dict]:
         return self.list_markets(series, game_tag)

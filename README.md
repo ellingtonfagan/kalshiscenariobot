@@ -44,9 +44,13 @@ ksobot backtest               # local no-network replay from the learning log
 ksobot ports                  # write the current sport-port registry
 ksobot status                 # summarize mode, live blockers, artifacts, risk, orders
 ksobot portfolio-sync         # mirror Kalshi balance + positions into local state
-ksobot daily-cycle            # autonomous discover/snapshot/book/backtest/status loop
+ksobot daily-cycle            # autonomous discover/snapshot/book/match/backtest/status loop
 ksobot telegram-test          # verify Telegram delivery after .env is configured
 ksobot source-check           # verify external source readiness without exposing keys
+ksobot slate-discovery        # discover candidate sports events/lines
+ksobot slate-verify           # verify slate findings before research
+ksobot market-matcher         # build orderbook delta + execution-review slate
+ksobot research-agent         # write research_bundle + trade-eligible candidates
 ksobot autopilot              # safe repeated orchestration for cron/launchd
 ksobot ui                     # local browser UI at http://127.0.0.1:8765
 ```
@@ -78,6 +82,10 @@ nbabot discover-markets  # catalog open Kalshi NBA markets for this game tag
 nbabot snapshot-market   # capture Kalshi quote snapshots for mapped legs
 nbabot book-watch        # capture side-aware order book depth for mapped tickers
 nbabot source-check      # verify external source readiness; network probes are opt-in
+nbabot slate-discovery   # SportsGameOdds + The Odds API + ESPN fallback + Kalshi map
+nbabot slate-verify      # reject social-only / ESPN-only / unmapped findings
+nbabot market-matcher    # build orderbook delta + execution-review slate artifacts
+nbabot research-agent    # build evidence bundle and trade-eligible handoff rows
 nbabot status            # summarize current operating state
 nbabot portfolio-sync    # mirror Kalshi balance + positions into local state
 nbabot daily-cycle       # autonomous control loop; execution only in explicit live/demo mode
@@ -140,6 +148,7 @@ NBABOT_UI_PORT=8765
 SPORTSGAMEODDS_API_KEY=
 THE_ODDS_API_KEY=
 NBABOT_SOURCE_CHECK_NETWORK=0
+NBABOT_SLATE_SPORTS=
 ```
 
 ## Sport ports
@@ -191,6 +200,26 @@ The autonomous runtime is documented in `docs/autonomous-infrastructure.md`. Use
 `ksobot daily-cycle` under cron/launchd/systemd for repeated operation. Cursor, Codex, and
 other IDEs are development tools; the actual autonomy lives in the CLI phases, scheduler,
 SQLite/audit state, and risk gates.
+
+`daily-cycle` is the agent activation chain: `source-check` activates slate discovery,
+slate verification, portfolio sync, market discovery, quote snapshotting, order-book
+watch, market matching, research, the explicit execution gate, backtesting, and status.
+The run artifact includes `activation_edges` so the automation trail is inspectable after
+every cycle.
+
+`market-matcher` writes `market_matches.json` and `execution_slate.json`. It compares the
+current Kalshi order book with the previous stored book, records deltas such as spread
+tightening or bid movement, and marks rows for `execution_review` only when the input
+artifacts are fresh. That is still not approval to trade.
+
+`research-agent` writes `research_bundle.json` for the full evidence trail and
+`market_candidates.json` for only rows marked `trade_eligible`. If a research bundle
+exists, execution candidate generation only considers those eligible rows; `risk.py`
+still makes the final decision.
+
+Slate verification, market matching, research, and execution all refresh stale handoff
+artifacts before consuming them. `NBABOT_STALE_MARKET_SECONDS` controls the freshness
+budget used for those agent handoffs and for the final risk gate.
 
 External source routing is documented in `docs/source-plan.md` and declared in
 `config/sources.yaml`. `ksobot source-check` writes

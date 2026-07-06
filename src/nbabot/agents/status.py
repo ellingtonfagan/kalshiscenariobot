@@ -54,8 +54,15 @@ def build_status(ctx: Context) -> dict[str, Any]:
         name: _artifact_summary(ctx, name)
         for name in (
             "market_catalog.json",
+            "slate_candidates.json",
+            "slate_verification.json",
             "market_snapshot.json",
             "book_watch.json",
+            "market_matches.json",
+            "execution_slate.json",
+            "research_bundle.json",
+            "market_candidates.json",
+            "sport_market_candidates.json",
             "autopilot.json",
             "daily_cycle.json",
             "portfolio_sync.json",

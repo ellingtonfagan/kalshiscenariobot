@@ -16,6 +16,14 @@ from .base import Context, load_context
 def _candidate_intents(ctx: Context) -> list[TradeIntent]:
     snap = ctx.read_json("market_snapshot.json") or {}
     rows = snap.get("rows", [])
+    research = ctx.read_json("research_bundle.json") or {}
+    research_gate_active = "market_candidates" in research
+    research_candidates = research.get("market_candidates") or []
+    allowed = {
+        (row.get("ticker"), row.get("scenario_id"), row.get("market"))
+        for row in research_candidates
+        if row.get("trade_eligible")
+    }
     intents: list[TradeIntent] = []
     unit_cents = int(round(ctx.settings.unit_usd * 100))
     for row in rows:
@@ -23,6 +31,8 @@ def _candidate_intents(ctx: Context) -> list[TradeIntent]:
         ticker = row.get("ticker")
         entry = row.get("entry_price_cents")
         if implied is None or not ticker or not entry:
+            continue
+        if research_gate_active and (ticker, row.get("scenario_id"), row.get("market")) not in allowed:
             continue
         edge = float(row["prior_p"]) - float(implied)
         research_override = bool(row.get("research_override", False))
@@ -88,10 +98,17 @@ def _candidate_intents(ctx: Context) -> list[TradeIntent]:
     return intents
 
 
+def refresh_research_for_execution(ctx: Context) -> dict:
+    from . import research_agent
+
+    return research_agent.run(ctx)
+
+
 def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
     store = ResearchStore(ctx.settings.research_db_path)
     audit = AuditTrail(ctx.settings.data_dir, store)
+    refresh_research_for_execution(ctx)
     intents = _candidate_intents(ctx)
     if not intents:
         msg = "[paper] no approved candidates; run snapshot-market or lower NBABOT_MIN_EDGE after research"
