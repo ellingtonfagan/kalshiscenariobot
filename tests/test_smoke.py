@@ -31,7 +31,7 @@ from nbabot import (  # noqa: E402
     ui,
 )
 from nbabot.adapters import get_adapter  # noqa: E402
-from nbabot.agents import PHASES, book_watch, ports, reconcile  # noqa: E402
+from nbabot.agents import PHASES, book_watch, ports, reconcile, telegram_test  # noqa: E402
 from nbabot.config import load_settings  # noqa: E402
 from nbabot.kalshi import KalshiClient, Quote, _TITLE_RE  # noqa: E402
 from nbabot.scores import GameState, PlayerLine  # noqa: E402
@@ -77,6 +77,24 @@ def test_telegram_delivery_uses_bot_api_without_network(monkeypatch):
     assert calls[0][0] == "https://api.telegram.org/botTOKEN/sendMessage"
     assert calls[0][1]["chat_id"] == "123"
     assert calls[0][1]["text"] == "hello"
+
+
+def test_telegram_test_phase_requires_telegram_target(monkeypatch):
+    class DummySettings:
+        game_id = "TEST-GAME"
+        deliver_to = "stdout"
+
+    class DummyContext:
+        settings = DummySettings()
+
+    messages = []
+    monkeypatch.setattr(telegram_test, "deliver", lambda text, to="stdout": messages.append((text, to)))
+
+    result = telegram_test.run(DummyContext())
+
+    assert result["ok"] is False
+    assert result["reason"] == "deliver-target-not-telegram"
+    assert "NBABOT_DELIVER_TO" in messages[0][0]
 
 
 # ── kalshi title parsing ────────────────────────────────────────────────────────
@@ -719,6 +737,7 @@ def test_new_automation_phases_registered():
     assert "live-execute" in PHASES
     assert "book-watch" in PHASES
     assert "ports" in PHASES
+    assert "telegram-test" in PHASES
 
 
 def test_june_24_world_cup_slate_defers_line_analysis():

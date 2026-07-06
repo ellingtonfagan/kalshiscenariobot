@@ -15,6 +15,7 @@ from . import (  # noqa: F401
     ports,
     reconcile,
     snapshot_market,
+    telegram_test,
     ui,
 )
 
@@ -34,5 +35,6 @@ PHASES = {
     "ports": ports.run,
     "reconcile": reconcile.run,
     "snapshot-market": snapshot_market.run,
+    "telegram-test": telegram_test.run,
     "ui": ui.run,
 }

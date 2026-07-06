@@ -47,6 +47,12 @@ NBABOT_TELEGRAM_CHAT_ID=REPLACE_WITH_CHAT_ID
 You can also set `NBABOT_DELIVER_TO=telegram:<chat_id>` and keep the token in
 `NBABOT_TELEGRAM_BOT_TOKEN`.
 
+Then verify delivery:
+
+```bash
+ksobot telegram-test
+```
+
 ## Operating Model
 
 - **Terminal/cron/launchd:** owns the bot process, data directory, audit log, kill switch,

@@ -42,6 +42,7 @@ ksobot heartbeat              # loop this every ~10 min during the game
 ksobot reconcile
 ksobot backtest               # local no-network replay from the learning log
 ksobot ports                  # write the current sport-port registry
+ksobot telegram-test          # verify Telegram delivery after .env is configured
 ksobot autopilot              # safe repeated orchestration for cron/launchd
 ksobot ui                     # local browser UI at http://127.0.0.1:8765
 ```
