@@ -9,25 +9,24 @@ import json
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from .. import calibration, scores
+from .. import calibration
 from ..alerts import deliver
 from ..calibration import LegResult, LogEntry, ScenarioResult
 from ..research import ResearchStore
-from ..scenarios import price_leg, resolve_leg
-from .base import Context, load_context, resolve_event_id
+from .base import Context, adapter_for, load_context, resolve_event_id
 
 
 def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
+    adapter = adapter_for(ctx)
     event_id = resolve_event_id(ctx)
-    gs = scores.get_game_state(event_id) if event_id else scores.GameState()
+    gs = adapter.get_live_state(event_id) if event_id else adapter.empty_game_state()
 
     locked = (ctx.read_json("locked_board.json") or {}).get("legs", {})
     voids = set((ctx.read_json("lineups.json") or {}).get("void_scenarios", {}))
 
     # current prices only used to backfill entry prob if lock didn't capture it
-    props = ctx.kalshi.prop_prices(ctx.game_tag) if gs.is_final else {}
-    winners = ctx.kalshi.winner_prices(ctx.game_tag) if gs.is_final else {}
+    quotes = adapter.market_quotes(ctx.kalshi, ctx.game_tag) if gs.is_final else None
 
     entry = LogEntry(
         game_id=ctx.settings.game_id,
@@ -45,10 +44,10 @@ def run(ctx: Context | None = None) -> dict:
         joint_prior = 1.0
         leg_outcomes = []
         for leg in sc.legs:
-            outcome = resolve_leg(leg, gs)
+            outcome = adapter.resolve_leg(leg, gs)
             entry_p = locked_legs.get(leg.market, {}).get("locked_implied_p")
-            if entry_p is None:
-                entry_p = price_leg(leg, props, winners)
+            if entry_p is None and quotes is not None:
+                entry_p = adapter.price_leg(leg, quotes)
             entry.legs.append(LegResult(
                 market=leg.market, line=leg.line, prior_p=leg.prior_p,
                 entry_implied_p=entry_p, outcome=outcome))

@@ -29,7 +29,9 @@ from nbabot import (  # noqa: E402
     sports,
     ui,
 )
+from nbabot.adapters import get_adapter  # noqa: E402
 from nbabot.agents import PHASES, book_watch, ports, reconcile  # noqa: E402
+from nbabot.config import load_settings  # noqa: E402
 from nbabot.kalshi import KalshiClient, Quote, _TITLE_RE  # noqa: E402
 from nbabot.scores import GameState, PlayerLine  # noqa: E402
 
@@ -71,6 +73,13 @@ def test_quote_implied():
     q = Quote(bid=38, ask=39, ticker="X")
     assert q.mid == 39 or q.mid == 38 or q.mid == round((38 + 39) / 2)
     assert 0 <= q.implied <= 1
+
+
+def test_settings_selects_nba_adapter_from_config():
+    settings = load_settings("NBA-2026-FINALS-G3")
+
+    assert settings.sport == "nba"
+    assert get_adapter(settings.sport).key == "nba"
 
 
 def test_orderbook_derives_side_aware_prices_and_depth():
@@ -258,16 +267,28 @@ def test_reconcile_excludes_unresolved_leg_from_scenario_prior(tmp_path, monkeyp
         def data_path(self, suffix):
             return tmp_path / f"{self.game_id}.{suffix}"
 
-    class DummyKalshi:
-        def prop_prices(self, game_tag):
-            return {}
+    class DummyAdapter:
+        label = "NBA"
 
-        def winner_prices(self, game_tag):
-            return {}
+        def get_live_state(self, event_id):
+            return gs
+
+        def empty_game_state(self):
+            return GameState()
+
+        def market_quotes(self, kalshi, game_tag):
+            return None
+
+        def price_leg(self, leg, quotes):
+            return None
+
+        def resolve_leg(self, leg, game_state):
+            return scenarios.resolve_leg(leg, game_state)
 
     class DummyContext:
         settings = DummySettings()
-        kalshi = DummyKalshi()
+        kalshi = object()
+        adapter = DummyAdapter()
         scenarios = [s7]
         game_tag = "TEST-GAME"
 
@@ -280,7 +301,6 @@ def test_reconcile_excludes_unresolved_leg_from_scenario_prior(tmp_path, monkeyp
             return path
 
     monkeypatch.setattr(reconcile, "resolve_event_id", lambda ctx: "event-id")
-    monkeypatch.setattr(reconcile.scores, "get_game_state", lambda event_id: gs)
     monkeypatch.setattr(reconcile, "deliver", lambda *args, **kwargs: None)
 
     result = reconcile.run(DummyContext())
@@ -613,7 +633,7 @@ def test_book_watch_captures_and_stores_orderbooks(tmp_path, monkeypatch):
         game_tag = "TESTTAG"
 
         def read_json(self, suffix):
-            if suffix == "market_snapshot.json":
+            if suffix == "market_candidates.json":
                 return {"rows": [{"ticker": "KXTEST"}]}
             return None
 

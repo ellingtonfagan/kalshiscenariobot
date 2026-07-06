@@ -37,6 +37,7 @@ class Settings:
     kalshi_private_key_path: Path
     kalshi_api_base: str
     game_id: str
+    sport: str
     deliver_to: str
     dry_run: bool
     data_dir: Path
@@ -93,6 +94,7 @@ def load_settings(game_id: str | None = None) -> Settings:
 
     game = yaml.safe_load((CONFIG_DIR / f"{gid}.game.yaml").read_text())
     scen = yaml.safe_load((CONFIG_DIR / f"{gid}.scenarios.yaml").read_text())
+    sport = str(game.get("sport") or game.get("game", {}).get("sport") or "nba").lower()
 
     pk_path = Path(os.environ.get("KALSHI_PRIVATE_KEY_PATH", "./secrets/kalshi-private-key.pem"))
     if not pk_path.is_absolute():
@@ -121,6 +123,7 @@ def load_settings(game_id: str | None = None) -> Settings:
         kalshi_private_key_path=pk_path,
         kalshi_api_base=os.environ.get("KALSHI_API_BASE", "https://api.elections.kalshi.com"),
         game_id=gid,
+        sport=sport,
         deliver_to=os.environ.get("NBABOT_DELIVER_TO", "stdout"),
         dry_run=os.environ.get("NBABOT_DRY_RUN", "1") not in ("0", "false", "False", ""),
         data_dir=data_dir,

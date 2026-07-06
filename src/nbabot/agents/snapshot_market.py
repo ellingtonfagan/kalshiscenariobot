@@ -2,16 +2,15 @@
 from __future__ import annotations
 
 from ..alerts import deliver
-from ..marketdata import snapshot_rows
 from ..research import ResearchStore
-from .base import Context, load_context
+from .base import Context, adapter_for, load_context
 
 
 def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
-    props = ctx.kalshi.prop_prices(ctx.game_tag)
-    winners = ctx.kalshi.winner_prices(ctx.game_tag)
-    rows = snapshot_rows(ctx.settings.game_id, ctx.scenarios, props, winners, ctx.haircut)
+    adapter = adapter_for(ctx)
+    quotes = adapter.market_quotes(ctx.kalshi, ctx.game_tag)
+    rows = adapter.snapshot_rows(ctx.settings.game_id, ctx.scenarios, quotes, ctx.haircut)
 
     store = ResearchStore(ctx.settings.research_db_path)
     store.upsert_game(ctx.settings.game_id, ctx.game_tag)

@@ -10,14 +10,33 @@ from ..research import ResearchStore
 from .base import Context, load_context
 
 
+GENERIC_TICKER_ARTIFACTS = (
+    ("market_candidates.json", "rows"),
+    ("candidate_markets.json", "rows"),
+    ("sport_market_candidates.json", "rows"),
+)
+
+
+def _collect_tickers(rows: list[dict[str, Any]], require_mapped: bool = False) -> set[str]:
+    tickers: set[str] = set()
+    for row in rows:
+        if require_mapped and row.get("mapping_status") != "mapped":
+            continue
+        ticker = row.get("ticker")
+        if ticker:
+            tickers.add(str(ticker))
+    return tickers
+
+
 def _artifact_tickers(ctx: Context) -> list[str]:
     tickers: set[str] = set()
-    for row in (ctx.read_json("market_snapshot.json") or {}).get("rows", []):
-        if row.get("ticker"):
-            tickers.add(row["ticker"])
-    for row in (ctx.read_json("market_catalog.json") or {}).get("rows", []):
-        if row.get("ticker") and row.get("mapping_status") == "mapped":
-            tickers.add(row["ticker"])
+    for suffix, key in GENERIC_TICKER_ARTIFACTS:
+        tickers.update(_collect_tickers((ctx.read_json(suffix) or {}).get(key, [])))
+    tickers.update(_collect_tickers((ctx.read_json("market_snapshot.json") or {}).get("rows", [])))
+    tickers.update(_collect_tickers(
+        (ctx.read_json("market_catalog.json") or {}).get("rows", []),
+        require_mapped=True,
+    ))
     return sorted(tickers)
 
 

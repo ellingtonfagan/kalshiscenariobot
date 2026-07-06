@@ -8,10 +8,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .. import scores, triggers
 from ..alerts import deliver, format_block
-from ..scenarios import ScenarioState, evaluate
-from .base import Context, load_context, resolve_event_id
+from ..scenarios import ScenarioState
+from .base import Context, adapter_for, load_context, resolve_event_id
 
 
 def _state_signature(scen_states: list[ScenarioState]) -> dict[str, str]:
@@ -20,12 +19,13 @@ def _state_signature(scen_states: list[ScenarioState]) -> dict[str, str]:
 
 def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
+    adapter = adapter_for(ctx)
     event_id = resolve_event_id(ctx)
     if not event_id:
-        deliver("[heartbeat] skip: no ESPN event id (pre-listing?)", ctx.settings.deliver_to)
+        deliver(f"[heartbeat] skip: no {adapter.label} event id (pre-listing?)", ctx.settings.deliver_to)
         return {"reason": "no-event"}
 
-    gs = scores.get_game_state(event_id)
+    gs = adapter.get_live_state(event_id)
 
     # Skip conditions ----------------------------------------------------------------
     if gs.state == "pre":
@@ -39,11 +39,10 @@ def run(ctx: Context | None = None) -> dict:
         return {"reason": "final", "event_id": event_id}
 
     voids = set((ctx.read_json("lineups.json") or {}).get("void_scenarios", {}))
-    props = ctx.kalshi.prop_prices(ctx.game_tag)
-    winners = ctx.kalshi.winner_prices(ctx.game_tag)
+    quotes = adapter.market_quotes(ctx.kalshi, ctx.game_tag)
 
     halftime_total = gs.total if gs.period == 2 else None
-    trigger_hits = triggers.evaluate(gs, halftime_total)
+    trigger_hits = adapter.evaluate_triggers(gs, halftime_total)
     override = {t.scenario_id: t.override_state for t in trigger_hits if t.override_state}
 
     scen_states: list[ScenarioState] = []
@@ -53,7 +52,7 @@ def run(ctx: Context | None = None) -> dict:
                                              note="key player out"))
             continue
         hc = float(ctx.haircut.get(sc.id, 1.0))
-        ss = evaluate(sc, props, winners, gs, hc)
+        ss = adapter.evaluate_scenario(sc, quotes, gs, hc)
         if sc.id in override and ss.state not in ("DEAD",):
             ss.state = override[sc.id]
             ss.note = (ss.note + "; trigger override").strip("; ")

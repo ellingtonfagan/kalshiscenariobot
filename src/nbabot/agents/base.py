@@ -7,15 +7,17 @@ from pathlib import Path
 from typing import Any
 
 from .. import calibration
+from ..adapters import SportAdapter, get_adapter
 from ..config import Settings, load_settings
 from ..kalshi import KalshiClient
-from ..scenarios import Scenario, load_scenarios
+from ..scenarios import Scenario
 
 
 @dataclass
 class Context:
     settings: Settings
     kalshi: KalshiClient
+    adapter: SportAdapter
     scenarios: list[Scenario]
     market_map: dict[str, Any]
     haircut: dict[str, float]
@@ -37,18 +39,26 @@ class Context:
 
 def load_context(game_id: str | None = None) -> Context:
     settings = load_settings(game_id)
+    adapter = get_adapter(settings.sport)
     kalshi = KalshiClient(
         settings.kalshi_api_key,
         settings.kalshi_private_key_path,
         settings.kalshi_api_base,
     )
-    scen, mm, hc = load_scenarios(settings.scenarios_doc)
+    scen, mm, hc = adapter.load_scenarios(settings.scenarios_doc)
     overrides = calibration.load_overrides(settings.calibration_overrides_path)
     scen, hc = calibration.apply_overrides(scen, hc, overrides)
-    return Context(settings, kalshi, scen, mm, hc, overrides)
+    return Context(settings, kalshi, adapter, scen, mm, hc, overrides)
+
+
+def adapter_for(ctx: Context) -> SportAdapter:
+    adapter = getattr(ctx, "adapter", None)
+    if adapter is not None:
+        return adapter
+    settings = getattr(ctx, "settings", None)
+    return get_adapter(getattr(settings, "sport", "nba"))
 
 
 def resolve_event_id(ctx: Context) -> str | None:
-    """Prefer the configured ESPN event id; else resolve by matchup keyword."""
-    from .. import scores
-    return ctx.settings.espn_event_id or scores.find_event(ctx.settings.espn_keywords)
+    """Resolve the configured event id through the active sport adapter."""
+    return adapter_for(ctx).find_event(ctx.settings)

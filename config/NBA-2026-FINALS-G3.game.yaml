@@ -1,4 +1,6 @@
 # Game snapshot (template instance). One file per game id.
+sport: nba
+
 game:
   id: NBA-2026-FINALS-G3
   matchup: "Knicks (home) vs Spurs"

@@ -9,16 +9,15 @@ from datetime import datetime, timezone
 
 from .. import guardrails
 from ..alerts import deliver
-from ..scenarios import price_leg
-from .base import Context, load_context
+from .base import Context, adapter_for, load_context
 
 EDGE_THRESHOLD = 0.10
 
 
 def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
-    props = ctx.kalshi.prop_prices(ctx.game_tag)
-    winners = ctx.kalshi.winner_prices(ctx.game_tag)
+    adapter = adapter_for(ctx)
+    quotes = adapter.market_quotes(ctx.kalshi, ctx.game_tag)
 
     board: dict[str, dict] = {}
     lines_out: list[str] = [f"[baseline] {ctx.settings.game_id}  game_tag={ctx.game_tag}"]
@@ -27,7 +26,7 @@ def run(ctx: Context | None = None) -> dict:
         leg_records = []
         flags = []
         for leg in sc.legs:
-            implied = price_leg(leg, props, winners)
+            implied = adapter.price_leg(leg, quotes)
             edge = None
             if implied is not None:
                 edge = round(leg.prior_p - implied, 3)

@@ -4,11 +4,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from .. import scores
 from ..alerts import deliver
 from ..audit import AuditTrail
 from ..research import ResearchStore
-from .base import Context, load_context, resolve_event_id
+from .base import Context, adapter_for, load_context, resolve_event_id
 
 StepFn = Callable[[Context], dict]
 
@@ -60,6 +59,7 @@ def _execution_fn(ctx: Context) -> tuple[str, StepFn]:
 
 def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
+    adapter = adapter_for(ctx)
     store = ResearchStore(ctx.settings.research_db_path)
     audit = AuditTrail(ctx.settings.data_dir, store)
     steps: list[dict[str, Any]] = []
@@ -68,7 +68,7 @@ def run(ctx: Context | None = None) -> dict:
     from . import reconcile, snapshot_market
 
     event_id = resolve_event_id(ctx)
-    game_state = scores.get_game_state(event_id) if event_id else scores.GameState()
+    game_state = adapter.get_live_state(event_id) if event_id else adapter.empty_game_state()
     minutes_to_tip = _minutes_to_tip(ctx)
 
     _run_step(ctx, "discover-markets", discover_markets.run, steps, audit)

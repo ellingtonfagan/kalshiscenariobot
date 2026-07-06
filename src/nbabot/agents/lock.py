@@ -8,20 +8,19 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from ..alerts import deliver
-from ..scenarios import price_leg
-from .base import Context, load_context
+from .base import Context, adapter_for, load_context
 
 
 def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
-    props = ctx.kalshi.prop_prices(ctx.game_tag)
-    winners = ctx.kalshi.winner_prices(ctx.game_tag)
+    adapter = adapter_for(ctx)
+    quotes = adapter.market_quotes(ctx.kalshi, ctx.game_tag)
 
     locked: dict[str, list[dict]] = {}
     for sc in ctx.scenarios:
         rows = []
         for leg in sc.legs:
-            implied = price_leg(leg, props, winners)
+            implied = adapter.price_leg(leg, quotes)
             rows.append({"market": leg.market, "label": leg.label(),
                          "prior_p": leg.prior_p, "locked_implied_p": implied})
         locked[sc.id] = rows

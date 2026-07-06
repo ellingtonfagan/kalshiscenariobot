@@ -14,9 +14,11 @@ compatibility package while adding the broader `ksobot` command alias.
 
 Recommended migration order:
 
-1. Rebrand README, docs, package metadata, and UI copy.
-2. Add `ksobot` as the preferred CLI while keeping `nbabot`.
-3. Move NBA-specific code behind adapter boundaries.
+1. Rebrand README, docs, package metadata, and UI copy. **Done.**
+2. Add `ksobot` as the preferred CLI while keeping `nbabot`. **Done.**
+3. Move NBA-specific code behind adapter boundaries. **Started:** runtime phases load
+   `ctx.adapter`, and NBA scores/scenarios/triggers/market parsing live under
+   `src/nbabot/adapters/nba/` with compatibility wrappers at the old import paths.
 4. After adapters are stable, optionally migrate package imports from `nbabot` to a
    broader package name with a compatibility shim.
 
@@ -26,7 +28,8 @@ These modules should become sport-agnostic:
 
 - `kalshi.py`: signed REST client, market discovery, order books, portfolio/order state.
 - `orderbook.py`: YES/NO ladder normalization, derived asks, VWAP, depth, slippage.
-- `market_discovery.py`: ticker cataloging and mapping.
+- `adapters/base.py`: sport adapter contract used by runtime phases.
+- `agents/book_watch.py`: order book capture from generic candidate artifacts.
 - `research.py`: SQLite mirror for snapshots, orders, fills, risk, calibration.
 - `risk.py`: execution gate, kill switch, exposure, liquidity, staleness, approvals.
 - `execution.py`: paper/demo/live order request and audit recording.

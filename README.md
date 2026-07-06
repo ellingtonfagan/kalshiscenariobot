@@ -141,6 +141,11 @@ This writes `data/<GAME_ID>.sports_ports.json` with each port's first markets, d
 blockers, and current status. The detailed expansion plan lives in
 `docs/platform-roadmap.md`.
 
+Runtime phases load `ctx.adapter` from `sport:` in the game config. The NBA adapter now
+lives under `src/nbabot/adapters/nba/`; old imports like `nbabot.scenarios` and
+`nbabot.scores` remain compatibility wrappers. Future sports should implement the
+`SportAdapter` interface instead of adding sport-specific logic directly to `agents/`.
+
 ### Research override
 
 The minimum-edge check has a narrow, audit-friendly override for a human-approved

@@ -37,7 +37,11 @@ SPORT_PORTS: dict[str, SportPort] = {
             "game_total and spread resolver wiring",
             "lineups feed is still a stub unless manually configured",
         ),
-        modules=("scores.py", "scenarios.py", "triggers.py"),
+        modules=(
+            "adapters/nba/scores.py",
+            "adapters/nba/scenarios.py",
+            "adapters/nba/triggers.py",
+        ),
     ),
     "soccer": SportPort(
         key="soccer",

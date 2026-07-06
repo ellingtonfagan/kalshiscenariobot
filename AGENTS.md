@@ -1,8 +1,10 @@
 # AGENTS.md — instructions for Codex (and any coding agent)
 
-This repo is a **single-game NBA scenario-parlay monitor for Kalshi**. It encodes
-game-script "scenarios", polls live prices + box score, detects which script is
-becoming true, and logs outcomes to recalibrate its own probability priors over time.
+This repo is a **Kalshi sports order book and scenario engine**. It started as a
+single-game NBA scenario-parlay monitor and now keeps the NBA runtime behind a sport
+adapter so other sports can be added later. It encodes game-script "scenarios", polls
+live prices + box score, detects which script is becoming true, and logs outcomes to
+recalibrate its own probability priors over time.
 
 You (the agent) are continuing this project. Read this whole file before editing.
 
@@ -39,10 +41,13 @@ and every approved use must be written to the audit log.
 src/nbabot/
   config.py        Load .env + config/<GAME_ID>.{game,scenarios}.yaml
   kalshi.py        Signed Kalshi REST client (RSA-PSS). Prices + positions + balance.
-  scores.py        ESPN box score + win-probability. Live game state per player.
+  adapters/
+    base.py        SportAdapter interface + MarketQuotes shared by runtime phases.
+    nba/           NBA implementation: scores, scenarios, triggers, market parsing.
+  scores.py        Compatibility wrapper for adapters/nba/scores.py.
   news.py          Lineups / inactives interface (stub — wire a real source).
-  scenarios.py     Scenario model + the live state engine (ON_TRACK/DRIFTING/AT_RISK/DEAD).
-  triggers.py      §5 live triggers (Towns foul math, pace, Wemby passivity, …).
+  scenarios.py     Compatibility wrapper for adapters/nba/scenarios.py.
+  triggers.py      Compatibility wrapper for adapters/nba/triggers.py.
   calibration.py   Brier score, sgp_haircut, the JSONL learning log.
   guardrails.py    §7 standing orders + footer. DO NOT WEAKEN.
   research.py      SQLite mirror for snapshots, backtests, audit, risk, orders.
@@ -51,11 +56,12 @@ src/nbabot/
   sizing.py        Capped Kelly helpers; still capped by the 5-unit rule.
   execution.py     Paper/demo/live execution records. Live orders require explicit gates.
   backtesting.py   Local scenario replay metrics from the learning log.
-  marketdata.py    Scenario-leg quote snapshot helpers.
+  marketdata.py    Compatibility wrapper for adapters/nba/marketdata.py.
+  sports.py        Sport-port registry for active/research/planned adapters.
   ui.py            Dependency-free local dashboard served by `nbabot ui`.
   alerts.py        Compact-block formatter + delivery (stdout or webhook).
   agents/
-    base.py        load_context(game_id) → Context shared by all agents.
+    base.py        load_context(game_id) → Context with ctx.adapter shared by agents.
     baseline.py    T-4h: pull prices, set entry_implied_p, flag market-vs-prior edges.
     lineups.py     T-90m: confirm starters/inactives, void scenarios on key scratch.
     lock.py        T-30m: re-pull, freeze the live board.
@@ -63,10 +69,12 @@ src/nbabot/
     reconcile.py   T+30m: resolve legs to 1/0, append log, recompute calibration.
     backtest.py     No-network local replay from data/<GAME_ID>.log.jsonl.
     snapshot_market.py Capture mapped Kalshi quote snapshots.
+    book_watch.py   Capture side-aware order book depth from generic candidate artifacts.
     paper.py        Local paper fills only after risk gate approval.
     demo_execute.py Kalshi demo only after risk gate approval.
+    ports.py        Export active/research/planned sport adapter registry.
     ui.py           Serve the local browser UI.
-cli.py             `nbabot <phase>` dispatch.
+cli.py             `ksobot <phase>` dispatch; `nbabot <phase>` remains compatible.
 config/            Per-game YAML (game snapshot + scenario library + market_map).
 data/              Runtime artifacts: board snapshots, hb state, log.jsonl (gitignored).
 scheduler/         Portable crontab + the original OpenClaw cron file (reference).
@@ -99,7 +107,8 @@ nbabot ui             # local dashboard on 127.0.0.1:8765
 pytest                # smoke tests (no network; everything is mockable)
 ```
 
-Every phase also runs as `python -m nbabot <phase>`.
+Every phase also runs as `python -m nbabot <phase>`. `ksobot` is the preferred CLI;
+`nbabot` remains valid for existing scripts.
 
 ## 3. Data contracts (keep these stable — agents depend on them)
 
@@ -111,6 +120,9 @@ Every phase also runs as `python -m nbabot <phase>`.
   (`min pts reb ast threes fouls`). Names are full display names.
 - **`scenarios.evaluate(scenario, prices, game_state)`** → `ScenarioState` with `.state`,
   `.legs_live` (per-leg implied + on/off track), `.live_payout_x` (haircut-applied).
+- **`agents.base.Context.adapter`** → active `SportAdapter`. Runtime phases should call
+  this adapter for event lookup, live state, market discovery, pricing, scenario
+  evaluation, trigger evaluation, snapshots, and final resolution.
 - **Learning log** (`data/<GAME_ID>.log.jsonl`): one JSON object per reconcile, shape in
   `calibration.LogEntry`. Append-only. `calibration.recompute()` reads the whole file.
 
@@ -121,19 +133,22 @@ If you change a contract, update every caller AND `tests/test_smoke.py` in the s
 - `news.py` is a stub: wire a real inactives/lineups source (official injury feed or a
   licensed sports API). Return `Inactives(out=[...], questionable=[...])`. **Do not scrape
   paywalled/ToS-restricted feeds.**
-- `scenarios.py` market_map covers player props + game winner. `game_total` and
+- `adapters/nba/scenarios.py` market_map covers player props + game winner. `game_total` and
   `spurs_cover` are marked `resolvable=False` (no clean single Kalshi market wired) — add
   the correct series tickers and flip them on.
-- `scores.find_event()` resolves the ESPN event id by matchup keyword; if ESPN changes
+- `adapters/nba/scores.find_event()` resolves the ESPN event id by matchup keyword; if ESPN changes
   shape, fix the parser there (single choke-point).
+- New sports should implement `SportAdapter` first, then register in `adapters/__init__.py`
+  and `sports.py`. Do not add new sport logic directly to `agents/`.
 - `alerts.deliver()` supports stdout + generic webhook POST. Add Slack/Telegram block
   formatting if the human wants richer alerts.
 
 ## 5. Conventions
 
 - Pure-stdlib + the 3 deps in `pyproject.toml`. No heavy frameworks.
-- Network calls only in `kalshi.py`, `scores.py`, `news.py`, `alerts.py`. Everything else
-  is pure and unit-testable.
+- Network calls only in `kalshi.py`, sport-adapter live data modules such as
+  `adapters/nba/scores.py`, `news.py`, and `alerts.py`. Everything else is pure and
+  unit-testable.
 - Fail soft on live data: a missing player or a reshaped ESPN payload must downgrade a
   scenario to `AT_RISK`/`void` with a logged reason, never crash the heartbeat.
 - Times are `America/New_York`. Money is integer cents internally; format to dollars only
