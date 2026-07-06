@@ -31,10 +31,23 @@ from nbabot import (  # noqa: E402
     ui,
 )
 from nbabot.adapters import get_adapter  # noqa: E402
-from nbabot.agents import PHASES, book_watch, ports, reconcile, telegram_test  # noqa: E402
+from nbabot.agents import (  # noqa: E402
+    PHASES,
+    book_watch,
+    daily_cycle,
+    discover_markets,
+    portfolio_sync,
+    ports,
+    reconcile,
+    snapshot_market,
+    source_check,
+    status,
+    telegram_test,
+)
 from nbabot.config import load_settings  # noqa: E402
 from nbabot.kalshi import KalshiClient, Quote, _TITLE_RE  # noqa: E402
 from nbabot.scores import GameState, PlayerLine  # noqa: E402
+from nbabot.sources import registry as source_registry  # noqa: E402
 
 
 # ── guardrails (the contract) ───────────────────────────────────────────────────
@@ -358,6 +371,7 @@ def test_reconcile_excludes_unresolved_leg_from_scenario_prior(tmp_path, monkeyp
 # ── research / execution framework ──────────────────────────────────────────────
 class _ExecSettings:
     game_id = "TEST-GAME"
+    sport = "nba"
     execution_mode = "paper"
     live_trading_ack = ""
     research_override_ack = ""
@@ -695,6 +709,150 @@ def test_book_watch_captures_and_stores_orderbooks(tmp_path, monkeypatch):
     assert rows[0]["ticker"] == "KXTEST"
 
 
+def test_status_reports_live_blockers(tmp_path, monkeypatch):
+    class DummyContext:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    monkeypatch.setattr(status, "deliver", lambda *args, **kwargs: None)
+
+    result = status.run(DummyContext(_ExecSettings(tmp_path)))
+
+    assert result["live_ready"] is False
+    assert "NBABOT_EXECUTION_MODE=live" in result["live_blockers"]
+    assert (tmp_path / "TEST-GAME.status.json").exists()
+
+
+def test_portfolio_sync_records_balance_and_positions(tmp_path, monkeypatch):
+    class DummySettings(_ExecSettings):
+        kalshi_game_tag = "TESTTAG"
+
+    class DummyKalshi:
+        def balance_cents(self):
+            return 10000
+
+        def positions(self):
+            return {"KXTEST": 2}
+
+    class DummyContext:
+        settings = DummySettings(tmp_path)
+        kalshi = DummyKalshi()
+        game_tag = "TESTTAG"
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    monkeypatch.setattr(portfolio_sync, "deliver", lambda *args, **kwargs: None)
+
+    result = portfolio_sync.run(DummyContext())
+    risk_rows = research.ResearchStore(DummyContext.settings.research_db_path).latest_rows(
+        "risk_snapshots", 1,
+    )
+
+    assert result["ok"] is True
+    assert result["balance_usd"] == 100.0
+    assert result["positions"] == {"KXTEST": 2}
+    assert risk_rows[0]["open_positions"] == 1
+
+
+def test_source_registry_keeps_social_out_of_execution():
+    config = source_registry.load_source_config()
+    providers = config["providers"]
+
+    assert "sportsgameodds" in providers
+    assert providers["sportsgameodds"]["role"] == "primary_structured_odds"
+    assert providers["the_odds_api"]["role"] == "secondary_structured_odds"
+    assert providers["espn_public_site_api"]["role"] == "fallback_schedule_score_news"
+    assert config["policy"]["social_may_trigger_execution"] is False
+
+    for key in config["policy"]["opinion_only_sources"]:
+        assert providers[key]["live_execution_allowed"] is False
+        assert "execution" not in providers[key]["allowed_for"]
+
+
+def test_source_check_reports_config_without_leaking_values(tmp_path, monkeypatch):
+    monkeypatch.delenv("NBABOT_SOURCE_CHECK_NETWORK", raising=False)
+    monkeypatch.setenv("SPORTSGAMEODDS_API_KEY", "SECRET-SGO")
+    monkeypatch.setenv("THE_ODDS_API_KEY", "SECRET-ODDS")
+
+    report = source_registry.build_source_report(
+        env={
+            "SPORTSGAMEODDS_API_KEY": "SECRET-SGO",
+            "THE_ODDS_API_KEY": "SECRET-ODDS",
+            "NBABOT_SOURCE_CHECK_NETWORK": "0",
+        }
+    )
+    serialized = json.dumps(report)
+
+    assert report["network_enabled"] is False
+    assert "SECRET-SGO" not in serialized
+    assert "SECRET-ODDS" not in serialized
+    assert next(p for p in report["providers"] if p["key"] == "sportsgameodds")["configured"]
+    assert next(p for p in report["providers"] if p["key"] == "the_odds_api")["configured"]
+
+    class DummyContext:
+        settings = _ExecSettings(tmp_path)
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    monkeypatch.setattr(source_check, "deliver", lambda *args, **kwargs: None)
+    result = source_check.run(DummyContext())
+
+    assert result["network_enabled"] is False
+    assert (tmp_path / "TEST-GAME.source_check.json").exists()
+
+
+def test_daily_cycle_skips_paper_execution_by_default(tmp_path, monkeypatch):
+    calls = []
+
+    class DummyContext:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    def step(name):
+        def run(ctx):
+            calls.append(name)
+            return {"step": name}
+        return run
+
+    monkeypatch.setattr(portfolio_sync, "run", step("portfolio-sync"))
+    monkeypatch.setattr(discover_markets, "run", step("discover-markets"))
+    monkeypatch.setattr(snapshot_market, "run", step("snapshot-market"))
+    monkeypatch.setattr(book_watch, "run", step("book-watch"))
+    monkeypatch.setattr(status, "run", step("status"))
+    monkeypatch.setattr(daily_cycle, "deliver", lambda *args, **kwargs: None)
+
+    result = daily_cycle.run(DummyContext(_ExecSettings(tmp_path)))
+
+    assert calls == [
+        "portfolio-sync",
+        "discover-markets",
+        "snapshot-market",
+        "book-watch",
+        "status",
+    ]
+    assert any(
+        step["name"] == "execution" and step["status"] == "skipped"
+        for step in result["steps"]
+    )
+    assert (tmp_path / "TEST-GAME.daily_cycle.json").exists()
+
+
 def test_sports_port_registry_lists_core_ports():
     registry = {port["key"]: port for port in sports.list_ports()}
 
@@ -734,9 +892,12 @@ def test_ports_phase_writes_registry(tmp_path, monkeypatch):
 def test_new_automation_phases_registered():
     assert "discover-markets" in PHASES
     assert "autopilot" in PHASES
+    assert "daily-cycle" in PHASES
     assert "live-execute" in PHASES
     assert "book-watch" in PHASES
+    assert "portfolio-sync" in PHASES
     assert "ports" in PHASES
+    assert "status" in PHASES
     assert "telegram-test" in PHASES
 
 

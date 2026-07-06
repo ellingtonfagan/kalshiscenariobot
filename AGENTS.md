@@ -58,6 +58,7 @@ src/nbabot/
   backtesting.py   Local scenario replay metrics from the learning log.
   marketdata.py    Compatibility wrapper for adapters/nba/marketdata.py.
   sports.py        Sport-port registry for active/research/planned adapters.
+  sources/         Source registry + readiness checks for slate/research inputs.
   ui.py            Dependency-free local dashboard served by `nbabot ui`.
   alerts.py        Compact-block formatter + delivery (stdout or webhook).
   agents/
@@ -70,6 +71,10 @@ src/nbabot/
     backtest.py     No-network local replay from data/<GAME_ID>.log.jsonl.
     snapshot_market.py Capture mapped Kalshi quote snapshots.
     book_watch.py   Capture side-aware order book depth from generic candidate artifacts.
+    status.py       Summarize mode, live blockers, artifacts, risk, and orders.
+    portfolio_sync.py Mirror Kalshi balance + positions into local state.
+    daily_cycle.py  Autonomous discover/snapshot/book/execution/backtest/status loop.
+    source_check.py  Secret-safe readiness report for external source feeds.
     paper.py        Local paper fills only after risk gate approval.
     demo_execute.py Kalshi demo only after risk gate approval.
     ports.py        Export active/research/planned sport adapter registry.
@@ -83,6 +88,9 @@ scheduler/         Portable crontab + the original OpenClaw cron file (reference
 The original game agents map 1:1 to the live-game phases. `cli.py phase=live` is an
 alias for one `heartbeat` tick so a plain crontab can drive the live loop. The research,
 paper/demo execution, and UI agents are explicit opt-in phases.
+For autonomous operation, prefer `ksobot daily-cycle` under cron/launchd/systemd. It
+does not paper trade by default; live execution still requires the explicit live gates
+and risk approval.
 
 ## 2. How to run
 
@@ -99,6 +107,7 @@ nbabot heartbeat      # one live tick (loop this every ~10m during the game)
 nbabot reconcile      # after the buzzer
 nbabot backtest       # no-network local replay
 nbabot snapshot-market # capture mapped Kalshi quote snapshots
+nbabot source-check  # verify external source readiness without exposing secrets
 nbabot paper          # local paper fills only
 nbabot demo-execute   # Kalshi demo only; requires NBABOT_EXECUTION_MODE=demo
 nbabot live-execute   # real-money Kalshi; requires live gates + risk approval
@@ -142,13 +151,16 @@ If you change a contract, update every caller AND `tests/test_smoke.py` in the s
   and `sports.py`. Do not add new sport logic directly to `agents/`.
 - `alerts.deliver()` supports stdout + generic webhook POST. Add Slack/Telegram block
   formatting if the human wants richer alerts.
+- External slate/research sources are declared in `config/sources.yaml`. Structured odds
+  feeds should drive discovery; ESPN hidden endpoints are fallback only; social/opinion
+  feeds are context only and must never trigger execution by themselves.
 
 ## 5. Conventions
 
 - Pure-stdlib + the 3 deps in `pyproject.toml`. No heavy frameworks.
 - Network calls only in `kalshi.py`, sport-adapter live data modules such as
-  `adapters/nba/scores.py`, `news.py`, and `alerts.py`. Everything else is pure and
-  unit-testable.
+  `adapters/nba/scores.py`, `news.py`, `alerts.py`, and explicit source health/feed
+  modules. Everything else is pure and unit-testable.
 - Fail soft on live data: a missing player or a reshaped ESPN payload must downgrade a
   scenario to `AT_RISK`/`void` with a logged reason, never crash the heartbeat.
 - Times are `America/New_York`. Money is integer cents internally; format to dollars only

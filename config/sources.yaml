@@ -1,0 +1,257 @@
+version: 1
+
+policy:
+  execution_allowed_from:
+    - kalshi
+    - risk_gate
+  opinion_only_sources:
+    - reddit
+    - youtube
+    - x
+    - bluesky
+  social_may_trigger_execution: false
+  hidden_api_may_trigger_execution: false
+  minimum_structured_sources_for_research_candidate: 2
+  notes:
+    - Kalshi order books and risk.py remain the only execution boundary.
+    - Sports/opinion sources may support a thesis, but cannot bypass SGP, liquidity, exposure, stale-data, or live-trading gates.
+
+providers:
+  kalshi:
+    label: Kalshi
+    tier: 0
+    role: exchange_orderbook_execution
+    required_env:
+      - KALSHI_API_KEY
+      - KALSHI_PRIVATE_KEY_PATH
+    docs_url: https://docs.kalshi.com/
+    base_url_env: KALSHI_API_BASE
+    allowed_for:
+      - market_discovery
+      - orderbook_depth
+      - quote_snapshot
+      - execution
+      - portfolio_sync
+      - settlement_audit
+    live_execution_allowed: true
+    confidence: canonical
+
+  sportsgameodds:
+    label: SportsGameOdds
+    tier: 1
+    role: primary_structured_odds
+    required_env:
+      - SPORTSGAMEODDS_API_KEY
+    docs_url: https://sportsgameodds.com/docs/reference
+    base_url: https://api.sportsgameodds.com/v2
+    auth:
+      type: api_key
+      env: SPORTSGAMEODDS_API_KEY
+      header: x-api-key
+    endpoints:
+      events: /events
+    default_params:
+      events:
+        oddsAvailable: "true"
+        limit: "100"
+    probe:
+      method: GET
+      path: /events
+      params:
+        oddsAvailable: "true"
+        limit: "1"
+      auth:
+        type: api_key
+        env: SPORTSGAMEODDS_API_KEY
+        header: x-api-key
+    allowed_for:
+      - slate_discovery
+      - odds_consensus
+      - line_movement
+      - player_props
+      - research_context
+    live_execution_allowed: false
+    confidence: high
+
+  the_odds_api:
+    label: The Odds API
+    tier: 2
+    role: secondary_structured_odds
+    required_env:
+      - THE_ODDS_API_KEY
+    docs_url: https://the-odds-api.com/liveapi/guides/v4/
+    base_url: https://api.the-odds-api.com/v4
+    auth:
+      type: api_key
+      env: THE_ODDS_API_KEY
+      query_param: apiKey
+    endpoints:
+      sports: /sports/
+      odds: /sports/{sport}/odds/
+      event_odds: /sports/{sport}/events/{event_id}/odds/
+    default_params:
+      odds:
+        regions: us
+        markets: h2h,spreads,totals
+        oddsFormat: american
+    probe:
+      method: GET
+      path: /sports/
+      auth:
+        type: api_key
+        env: THE_ODDS_API_KEY
+        query_param: apiKey
+    allowed_for:
+      - slate_discovery
+      - odds_consensus
+      - line_movement_backup
+      - research_context
+    live_execution_allowed: false
+    confidence: high
+
+  espn_public_site_api:
+    label: ESPN public site API
+    tier: 3
+    role: fallback_schedule_score_news
+    required_env: []
+    docs_url: https://gist.github.com/bhaidar/b2fdd34004250932a4a354a2cc15ddd4
+    base_url: https://site.api.espn.com/apis/site/v2/sports
+    endpoints:
+      nba_scoreboard: /basketball/nba/scoreboard
+      nba_news: /basketball/nba/news
+      mlb_scoreboard: /baseball/mlb/scoreboard
+      nhl_scoreboard: /hockey/nhl/scoreboard
+      soccer_scoreboard: /soccer/{league}/scoreboard
+    probe:
+      method: GET
+      path: /basketball/nba/scoreboard
+    allowed_for:
+      - schedule_fallback
+      - score_fallback
+      - news_fallback
+      - injury_context
+    live_execution_allowed: false
+    confidence: medium_low
+    constraints:
+      - Undocumented endpoint; treat as lower-confidence fallback.
+      - Do not use as primary odds or execution signal.
+
+  reddit:
+    label: Reddit API
+    tier: 4
+    role: opinion_sentiment_context
+    required_env:
+      - REDDIT_CLIENT_ID
+      - REDDIT_CLIENT_SECRET
+      - REDDIT_USER_AGENT
+    docs_url: https://developers.reddit.com/docs/capabilities/server/reddit-api
+    allowed_for:
+      - sentiment_context
+      - crowd_disagreement
+      - narrative_watch
+    live_execution_allowed: false
+    confidence: low
+    constraints:
+      - Use official API access only.
+      - Do not scrape private, paywalled, or restricted communities.
+      - Do not treat posts or comments as verified news.
+
+  youtube:
+    label: YouTube Data API
+    tier: 4
+    role: opinion_video_context
+    required_env:
+      - YOUTUBE_API_KEY
+    docs_url: https://developers.google.com/youtube/v3
+    allowed_for:
+      - opinion_context
+      - market_narrative
+    live_execution_allowed: false
+    confidence: low
+
+  x:
+    label: X API
+    tier: 4
+    role: opinion_social_context
+    required_env:
+      - X_BEARER_TOKEN
+    docs_url: https://docs.x.com/
+    allowed_for:
+      - breaking_context
+      - beat_reporter_watch
+      - market_narrative
+    live_execution_allowed: false
+    confidence: low
+
+  bluesky:
+    label: Bluesky
+    tier: 4
+    role: opinion_social_context
+    required_env:
+      - BLUESKY_HANDLE
+      - BLUESKY_APP_PASSWORD
+    docs_url: https://docs.bsky.app/
+    allowed_for:
+      - beat_reporter_watch
+      - market_narrative
+    live_execution_allowed: false
+    confidence: low
+
+sports:
+  nba:
+    sportsgameodds_league_id: NBA
+    odds_api_sport_key: basketball_nba
+    espn_path: basketball/nba
+    first_markets:
+      - h2h
+      - spreads
+      - totals
+      - player_points
+      - player_rebounds
+      - player_assists
+  nfl:
+    sportsgameodds_league_id: NFL
+    odds_api_sport_key: americanfootball_nfl
+    espn_path: football/nfl
+    first_markets:
+      - h2h
+      - spreads
+      - totals
+      - player_passing_yards
+      - player_rushing_yards
+      - player_receiving_yards
+  mlb:
+    sportsgameodds_league_id: MLB
+    odds_api_sport_key: baseball_mlb
+    espn_path: baseball/mlb
+    first_markets:
+      - h2h
+      - spreads
+      - totals
+      - player_hits
+      - player_home_runs
+      - pitcher_strikeouts
+  nhl:
+    sportsgameodds_league_id: NHL
+    odds_api_sport_key: icehockey_nhl
+    espn_path: hockey/nhl
+    first_markets:
+      - h2h
+      - spreads
+      - totals
+      - player_points
+      - goalie_saves
+
+agent_contracts:
+  source_check:
+    phase: source-check
+    output: data/<GAME_ID>.source_check.json
+    purpose: Verify configured source credentials and optional health probes without exposing secrets.
+  slate_discovery:
+    phase: slate-discovery
+    output: data/<DATE>.slate_candidates.json
+    purpose: Select candidate events and mapped Kalshi markets across sports.
+  research_agent:
+    phase: research-agent
+    output: data/<EVENT_ID>.research_bundle.json
+    purpose: Produce evidence-backed candidate theses with source confidence and disagreement notes.

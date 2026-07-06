@@ -42,7 +42,11 @@ ksobot heartbeat              # loop this every ~10 min during the game
 ksobot reconcile
 ksobot backtest               # local no-network replay from the learning log
 ksobot ports                  # write the current sport-port registry
+ksobot status                 # summarize mode, live blockers, artifacts, risk, orders
+ksobot portfolio-sync         # mirror Kalshi balance + positions into local state
+ksobot daily-cycle            # autonomous discover/snapshot/book/backtest/status loop
 ksobot telegram-test          # verify Telegram delivery after .env is configured
+ksobot source-check           # verify external source readiness without exposing keys
 ksobot autopilot              # safe repeated orchestration for cron/launchd
 ksobot ui                     # local browser UI at http://127.0.0.1:8765
 ```
@@ -73,6 +77,10 @@ nbabot backtest          # score local scenario history
 nbabot discover-markets  # catalog open Kalshi NBA markets for this game tag
 nbabot snapshot-market   # capture Kalshi quote snapshots for mapped legs
 nbabot book-watch        # capture side-aware order book depth for mapped tickers
+nbabot source-check      # verify external source readiness; network probes are opt-in
+nbabot status            # summarize current operating state
+nbabot portfolio-sync    # mirror Kalshi balance + positions into local state
+nbabot daily-cycle       # autonomous control loop; execution only in explicit live/demo mode
 nbabot ports             # export planned sport adapters and blockers
 nbabot paper             # create local paper fills for approved single-leg intents
 nbabot demo-execute      # Kalshi demo only; requires NBABOT_EXECUTION_MODE=demo
@@ -129,6 +137,9 @@ NBABOT_BOOK_WATCH_INTERVAL_SECONDS=0
 NBABOT_KILL_SWITCH=data/KILL_SWITCH
 NBABOT_CALIBRATION_OVERRIDES=data/calibration_overrides.json
 NBABOT_UI_PORT=8765
+SPORTSGAMEODDS_API_KEY=
+THE_ODDS_API_KEY=
+NBABOT_SOURCE_CHECK_NETWORK=0
 ```
 
 ## Sport ports
@@ -173,6 +184,18 @@ rewrite scenario YAML or inflate a scenario's SGP probability above the configur
 
 Production live order placement is available only through `live-execute` with the live
 gates above.
+
+## Autonomous operation
+
+The autonomous runtime is documented in `docs/autonomous-infrastructure.md`. Use
+`ksobot daily-cycle` under cron/launchd/systemd for repeated operation. Cursor, Codex, and
+other IDEs are development tools; the actual autonomy lives in the CLI phases, scheduler,
+SQLite/audit state, and risk gates.
+
+External source routing is documented in `docs/source-plan.md` and declared in
+`config/sources.yaml`. `ksobot source-check` writes
+`data/<GAME_ID>.source_check.json`. It does not call provider endpoints unless
+`NBABOT_SOURCE_CHECK_NETWORK=1`.
 
 ## Configure a new game
 
