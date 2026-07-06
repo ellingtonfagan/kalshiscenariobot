@@ -15,6 +15,7 @@ os.environ.setdefault("KALSHI_API_KEY", "test")
 os.environ.setdefault("NBABOT_GAME_ID", "NBA-2026-FINALS-G3")
 
 from nbabot import (  # noqa: E402
+    alerts,
     backtesting,
     calibration,
     execution,
@@ -55,6 +56,27 @@ def test_with_footer_idempotent():
 def test_hope_bet_flag():
     assert guardrails.is_hope_bet(5)
     assert not guardrails.is_hope_bet(3)
+
+
+def test_telegram_delivery_uses_bot_api_without_network(monkeypatch):
+    calls = []
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        calls.append((url, json.loads(data), headers, timeout))
+
+        class Response:
+            pass
+
+        return Response()
+
+    monkeypatch.setenv("NBABOT_TELEGRAM_BOT_TOKEN", "TOKEN")
+    monkeypatch.setattr(alerts.requests, "post", fake_post)
+
+    alerts.deliver("hello", "telegram:123")
+
+    assert calls[0][0] == "https://api.telegram.org/botTOKEN/sendMessage"
+    assert calls[0][1]["chat_id"] == "123"
+    assert calls[0][1]["text"] == "hello"
 
 
 # ── kalshi title parsing ────────────────────────────────────────────────────────

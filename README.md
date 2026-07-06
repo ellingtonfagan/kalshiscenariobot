@@ -9,6 +9,9 @@ discovery, quote snapshots, side-aware order book snapshots, risk-gated executio
 postgame learning. Future sport ports are tracked in `docs/platform-roadmap.md` and
 exported by `ksobot ports`.
 
+To run and receive alerts without the Codex app, see `docs/operate-without-codex.md`.
+The Codex Desktop thread reference is recorded in `docs/codex-thread.md`.
+
 > **It reports which game-script is becoming true. It does not chase bets.** Same-game
 > parlay legs are correlated, so it always shows the SGP-adjusted joint probability, caps
 > stakes at 5 units, and requires explicit human approval plus a viable edge before any
