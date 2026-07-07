@@ -36,6 +36,8 @@ from nbabot import (  # noqa: E402
     odds_math,
     odds_refresh,
     performance_learner,
+    qual_learning,
+    qual_postmortem as qual_postmortem_core,
     qual_research as qual_research_core,
     research_news,
     news_watch as news_watch_core,
@@ -64,6 +66,7 @@ from nbabot.agents import (  # noqa: E402
     news_watch,
     paper,
     portfolio_sync,
+    qual_postmortem,
     ports,
     qual_research as qual_research_agent,
     reconcile,
@@ -541,6 +544,7 @@ class _ExecSettings:
     confluence_edge_bonus = 0.01
     confluence_veto_delta = 0.08
     qual_signal_max_age_hours = 12
+    qual_lessons_top_n = 5
     qual_llm_cmd = "/missing/codex exec"
     qual_llm_timeout_seconds = 600
     news_window_hours = 48
@@ -697,6 +701,23 @@ ATOM_FIXTURE = b"""<?xml version="1.0"?>
 </feed>"""
 
 
+RECAP_RSS_FIXTURE = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <item>
+    <title>Yankees beat Red Sox after late rally</title>
+    <link>https://example.com/yankees-recap</link>
+    <description>New York Yankees beat Boston 5-4 after the bullpen held late.</description>
+    <pubDate>Tue, 07 Jul 2026 05:00:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>Yankees starter returns to lineup</title>
+    <link>https://example.com/yankees-lineup-not-recap</link>
+    <description>New York Yankees get a key bat back.</description>
+    <pubDate>Tue, 07 Jul 2026 12:00:00 GMT</pubDate>
+  </item>
+</channel></rss>"""
+
+
 def test_news_ingest_parses_dedups_and_fails_soft(tmp_path):
     settings = _ExecSettings(tmp_path)
     store = research.ResearchStore(settings.research_db_path)
@@ -751,6 +772,68 @@ def test_news_ingest_parses_dedups_and_fails_soft(tmp_path):
         "https://example.com/yankees-lineup",
         "https://reddit.example/yankees-bullpen",
     }
+
+
+def test_recap_matching_uses_team_and_game_date():
+    teams = [
+        research_news.ResearchTeam(
+            key="yankees",
+            canonical_name="New York Yankees",
+            aliases=("New York Yankees", "Yankees", "NYY"),
+            rss_feeds=({"name": "mlb_yankees", "url": "https://example.com/rss"},),
+            subreddits=(),
+        )
+    ]
+    record = _settlement_fixture(
+        1,
+        ticker="KXMLBGAME-26JUL06NYYBOS-NYY",
+        outcome=1,
+        model_prob=0.60,
+    )
+
+    def fetcher(url, user_agent):
+        return 200, RECAP_RSS_FIXTURE
+
+    recap = qual_postmortem_core.fetch_recap_for_settlement(
+        record=record,
+        signal={"analysis": {"market": {"teams": ["yankees"]}}},
+        teams=teams,
+        user_agent="nbabot-test/0.1",
+        fetcher=fetcher,
+    )
+
+    assert recap["recap_status"] == "found"
+    assert recap["team"] == "yankees"
+    assert recap["item"]["url"] == "https://example.com/yankees-recap"
+    assert recap["game_date"] == "2026-07-06"
+
+
+def test_recap_matching_missing_path_is_honest():
+    teams = [
+        research_news.ResearchTeam(
+            key="yankees",
+            canonical_name="New York Yankees",
+            aliases=("New York Yankees", "Yankees", "NYY"),
+            rss_feeds=({"name": "mlb_yankees", "url": "https://example.com/rss"},),
+            subreddits=(),
+        )
+    ]
+    record = _settlement_fixture(1, ticker="KXMLBGAME-26JUL06NYYBOS-NYY")
+
+    def fetcher(url, user_agent):
+        return 200, RSS_FIXTURE
+
+    recap = qual_postmortem_core.fetch_recap_for_settlement(
+        record=record,
+        signal={"analysis": {"market": {"teams": ["yankees"]}}},
+        teams=teams,
+        user_agent="nbabot-test/0.1",
+        fetcher=fetcher,
+    )
+
+    assert recap["recap_status"] == "missing"
+    assert recap["reason"] == "no-matching-recap"
+    assert recap["source_status"][0]["status"] == "ok"
 
 
 def test_news_watch_keyword_matching_uses_word_boundaries():
@@ -917,30 +1000,58 @@ def test_qual_validation_clamps_and_discards_bad_entries():
         {
             "ticker": "KXQUAL1",
             "qual_prob": 1.20,
+            "base_rate": 0.50,
             "confidence": 0.70,
             "rationale": "Cited signal.",
             "citation_urls": ["https://example.com/a"],
+            "news_item_ids_used": ["news-a"],
+            "scenarios": [
+                {
+                    "event": "Lineup boost holds",
+                    "p_event": 0.50,
+                    "p_outcome_given_event": 0.98,
+                    "citations": ["https://example.com/a"],
+                },
+                {
+                    "event": "Market baseline remains right",
+                    "p_event": 0.50,
+                    "p_outcome_given_event": 0.98,
+                    "citations": ["https://example.com/a"],
+                },
+            ],
         },
         {
             "ticker": "KXQUAL2",
             "qual_prob": 0.60,
+            "base_rate": 0.50,
             "confidence": 0.54,
             "rationale": "Too weak.",
             "citation_urls": ["https://example.com/a"],
+            "scenarios": [
+                {"event": "A", "p_event": 1.0, "p_outcome_given_event": 0.60, "citations": ["https://example.com/a"]},
+            ],
         },
         {
             "ticker": "KXQUAL3",
             "qual_prob": 0.60,
+            "base_rate": 0.50,
             "confidence": 0.80,
             "rationale": "Hallucinated ticker.",
             "citation_urls": ["https://example.com/a"],
+            "scenarios": [
+                {"event": "A", "p_event": 1.0, "p_outcome_given_event": 0.60, "citations": ["https://example.com/a"]},
+            ],
         },
         {
             "ticker": "KXQUAL2",
             "qual_prob": 0.60,
+            "base_rate": 0.50,
             "confidence": 0.80,
             "rationale": "Missing valid cite.",
             "citation_urls": ["https://evil.example/x"],
+            "scenarios": [
+                {"event": "A", "p_event": 1.0, "p_outcome_given_event": 0.60, "citations": ["https://evil.example/x"]},
+            ],
         },
     ])
 
@@ -948,6 +1059,8 @@ def test_qual_validation_clamps_and_discards_bad_entries():
         raw,
         allowed_tickers={"KXQUAL1", "KXQUAL2"},
         allowed_urls={"https://example.com/a"},
+        allowed_news_item_ids={"news-a"},
+        url_to_news_item_ids={"https://example.com/a": ["news-a"]},
         model_run_id="run-1",
         created_at="2026-07-07T00:00:00+00:00",
     )
@@ -955,6 +1068,13 @@ def test_qual_validation_clamps_and_discards_bad_entries():
     assert len(result.accepted) == 1
     assert result.accepted[0]["ticker"] == "KXQUAL1"
     assert result.accepted[0]["qual_prob"] == 0.98
+    assert result.accepted[0]["base_rate"] == 0.50
+    assert result.accepted[0]["news_item_ids_used"] == ["news-a"]
+    assert result.accepted[0]["analysis"]["prompt_version"] == qual_research_core.QUAL_PROMPT_VERSION
+    assert sum(
+        branch["p_event"] * branch["p_outcome_given_event"]
+        for branch in result.accepted[0]["scenarios"]
+    ) == pytest.approx(result.accepted[0]["qual_prob"])
     assert {row["reason"] for row in result.discarded} == {
         "confidence below 0.55",
         "ticker not in provided set",
@@ -982,6 +1102,63 @@ def test_qual_model_malformed_retry_then_unavailable():
     assert result["reason"].startswith("malformed-json-after-retry")
 
 
+def test_qual_model_retries_non_reconciling_scenario_tree():
+    calls = []
+    bad = json.dumps([
+        {
+            "ticker": "KXQUAL1",
+            "base_rate": 0.50,
+            "qual_prob": 0.60,
+            "confidence": 0.70,
+            "rationale": "Bad tree.",
+            "citation_urls": ["https://example.com/a"],
+            "news_item_ids_used": ["news-a"],
+            "scenarios": [
+                {"event": "A", "p_event": 0.60, "p_outcome_given_event": 0.60, "citations": ["https://example.com/a"]},
+                {"event": "B", "p_event": 0.60, "p_outcome_given_event": 0.60, "citations": ["https://example.com/a"]},
+            ],
+        }
+    ])
+    good = json.dumps([
+        {
+            "ticker": "KXQUAL1",
+            "base_rate": 0.50,
+            "qual_prob": 0.60,
+            "confidence": 0.70,
+            "rationale": "Good tree.",
+            "citation_urls": ["https://example.com/a"],
+            "news_item_ids_used": ["news-a"],
+            "scenarios": [
+                {"event": "A", "p_event": 0.50, "p_outcome_given_event": 0.70, "citations": ["https://example.com/a"]},
+                {"event": "B", "p_event": 0.50, "p_outcome_given_event": 0.50, "citations": ["https://example.com/a"]},
+            ],
+        }
+    ])
+
+    def invoker(command, prompt, timeout_seconds):
+        calls.append(prompt)
+        return True, bad if len(calls) == 1 else good, ""
+
+    result = qual_research_core.run_qual_model(
+        command="/fake/codex exec",
+        news_items=[{
+            "id": "news-a",
+            "url": "https://example.com/a",
+            "title": "Yankees",
+            "summary": "news",
+        }],
+        markets=[{"ticker": "KXQUAL1", "title": "Yankees win"}],
+        timeout_seconds=1,
+        invoker=invoker,
+    )
+
+    assert len(calls) == 2
+    assert "Previous output was invalid" in calls[1]
+    assert result["status"] == "ok"
+    assert result["attempts"] == 2
+    assert result["signals"][0]["qual_prob"] == pytest.approx(0.60)
+
+
 def test_qual_model_cli_failure_is_unavailable():
     def invoker(command, prompt, timeout_seconds):
         return False, "", "command not found"
@@ -996,6 +1173,97 @@ def test_qual_model_cli_failure_is_unavailable():
 
     assert result["status"] == "unavailable"
     assert result["reason"] == "command not found"
+
+
+def test_qual_signal_full_analysis_persists_round_trip(tmp_path):
+    store = research.ResearchStore(tmp_path / "research.sqlite")
+    signal = {
+        "ticker": "KXQUAL1",
+        "base_rate": 0.50,
+        "qual_prob": 0.60,
+        "confidence": 0.70,
+        "rationale": "Good tree.",
+        "citation_urls": ["https://example.com/a"],
+        "news_item_ids_used": ["news-a"],
+        "scenarios": [
+            {"event": "A", "p_event": 0.50, "p_outcome_given_event": 0.70, "citations": ["https://example.com/a"]},
+            {"event": "B", "p_event": 0.50, "p_outcome_given_event": 0.50, "citations": ["https://example.com/a"]},
+        ],
+        "analysis": {
+            "ticker": "KXQUAL1",
+            "base_rate": 0.50,
+            "qual_prob": 0.60,
+            "confidence": 0.70,
+            "rationale": "Good tree.",
+            "citation_urls": ["https://example.com/a"],
+            "news_item_ids_used": ["news-a"],
+            "scenarios": [
+                {"event": "A", "p_event": 0.50, "p_outcome_given_event": 0.70, "citations": ["https://example.com/a"]},
+                {"event": "B", "p_event": 0.50, "p_outcome_given_event": 0.50, "citations": ["https://example.com/a"]},
+            ],
+            "model_run_id": "run-1",
+            "prompt_version": qual_research_core.QUAL_PROMPT_VERSION,
+        },
+        "created_at": "2026-07-07T00:00:00+00:00",
+        "model_run_id": "run-1",
+        "prompt_version": qual_research_core.QUAL_PROMPT_VERSION,
+        "signal_source": "qual",
+    }
+
+    assert store.record_qual_signals([signal]) == 1
+    latest = store.latest_qual_signals(max_age_hours=100000, tickers=["KXQUAL1"])
+    row = latest["KXQUAL1"]
+
+    assert row["id"] >= 1
+    assert row["base_rate"] == pytest.approx(0.50)
+    assert row["scenarios"][0]["event"] == "A"
+    assert row["analysis"]["prompt_version"] == qual_research_core.QUAL_PROMPT_VERSION
+    assert row["news_item_ids_used"] == ["news-a"]
+
+
+def test_qual_calibration_math_known_inputs():
+    stats = qual_learning.qual_calibration_stats([
+        {"confidence": 0.60, "prob": 0.60, "outcome": 1},
+        {"confidence": 0.62, "prob": 0.70, "outcome": 0},
+        {"confidence": 0.76, "prob": 0.80, "outcome": 1},
+    ])
+    bucket = next(row for row in stats if row["bucket"] == "0.55-0.65")
+    lines = qual_learning.format_calibration_lines(stats)
+
+    assert bucket["count"] == 2
+    assert bucket["correct"] == 1
+    assert bucket["correct_rate"] == pytest.approx(0.5)
+    assert bucket["observed_rate"] == pytest.approx(0.5)
+    assert bucket["mean_prob"] == pytest.approx(0.65)
+    assert bucket["brier"] == pytest.approx(0.325)
+    assert any("0.55-0.65" in line and "1/2" in line for line in lines)
+
+
+def test_qual_prompt_injects_lessons_and_calibration_lines():
+    prompt = qual_research_core.build_prompt(
+        news_items=[{
+            "id": "news-a",
+            "team": "yankees",
+            "title": "Yankees recap",
+            "summary": "Bullpen held late.",
+            "url": "https://example.com/a",
+        }],
+        markets=[{"ticker": "KXQUAL1", "teams": ["yankees"], "market_family": "mlb moneyline"}],
+        lessons=[{
+            "team": "yankees",
+            "market_family": "mlb moneyline",
+            "lesson": "Do not upgrade bullpen rest without late leverage evidence.",
+            "evidence_cite": "bullpen held late",
+            "hit_count": 2,
+        }],
+        calibration_lines=[
+            "your 0.55-0.65 confidence signals have resolved correctly 1/2 times (50%), Brier 0.325"
+        ],
+    )
+
+    assert "Do not upgrade bullpen rest without late leverage evidence." in prompt
+    assert "your 0.55-0.65 confidence signals have resolved correctly 1/2 times" in prompt
+    assert qual_research_core.QUAL_PROMPT_VERSION in prompt
 
 
 def _broad_execution_artifacts(now, learning, *, validated):
@@ -1424,6 +1692,244 @@ def test_confluence_verdict_persists_through_order_audit_and_settlement(tmp_path
         row["type"] == "PAPER_ORDER" and row["confluence_verdict"] == "agree"
         for row in audit_rows
     )
+
+
+def _scenario_signal(ticker="KXMLBGAME-26JUL06NYYBOS-NYY", *, model_run_id="qual-run"):
+    return {
+        "ticker": ticker,
+        "base_rate": 0.50,
+        "qual_prob": 0.60,
+        "confidence": 0.70,
+        "rationale": "Yankees bullpen is rested.",
+        "citation_urls": ["https://example.com/yankees-news"],
+        "news_item_ids_used": ["news-a"],
+        "scenarios": [
+            {
+                "event": "Starter exits with lead",
+                "p_event": 0.50,
+                "p_outcome_given_event": 0.70,
+                "citations": ["https://example.com/yankees-news"],
+            },
+            {
+                "event": "Bullpen game stays close",
+                "p_event": 0.50,
+                "p_outcome_given_event": 0.50,
+                "citations": ["https://example.com/yankees-news"],
+            },
+        ],
+        "analysis": {
+            "ticker": ticker,
+            "base_rate": 0.50,
+            "qual_prob": 0.60,
+            "confidence": 0.70,
+            "rationale": "Yankees bullpen is rested.",
+            "citation_urls": ["https://example.com/yankees-news"],
+            "news_item_ids_used": ["news-a"],
+            "scenarios": [
+                {
+                    "event": "Starter exits with lead",
+                    "p_event": 0.50,
+                    "p_outcome_given_event": 0.70,
+                    "citations": ["https://example.com/yankees-news"],
+                },
+                {
+                    "event": "Bullpen game stays close",
+                    "p_event": 0.50,
+                    "p_outcome_given_event": 0.50,
+                    "citations": ["https://example.com/yankees-news"],
+                },
+            ],
+            "model_run_id": model_run_id,
+            "prompt_version": qual_research_core.QUAL_PROMPT_VERSION,
+            "market": {"teams": ["yankees"], "market_family": "mlb moneyline"},
+        },
+        "created_at": "2026-07-06T20:00:00+00:00",
+        "model_run_id": model_run_id,
+        "prompt_version": qual_research_core.QUAL_PROMPT_VERSION,
+        "signal_source": "qual",
+    }
+
+
+def _recap_news_item():
+    return {
+        "id": "recap-news",
+        "team": "yankees",
+        "source": "mlb_yankees",
+        "title": "Yankees beat Red Sox after late rally",
+        "body": "New York Yankees beat Boston 5-4 after the bullpen held late.",
+        "url": "https://example.com/yankees-recap",
+        "published_at": "2026-07-07T05:00:00+00:00",
+        "fetched_at": "2026-07-07T06:00:00+00:00",
+        "content_hash": "recap-hash",
+    }
+
+
+def _postmortem_context(settings):
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    return DummyContext()
+
+
+def test_postmortem_strict_json_validation():
+    raw = json.dumps({
+        "which_scenario_occurred": 0,
+        "event_prediction_grade": "The main branch occurred.",
+        "conditional_grade": "Conditional probability was reasonable.",
+        "what_was_missed": "Nothing major was missed.",
+        "lessons": [
+            {
+                "lesson": "Treat bullpen rest as meaningful only when recap confirms late leverage usage.",
+                "evidence_cite": "bullpen held late",
+            }
+        ],
+    })
+
+    parsed = qual_postmortem_core.validate_postmortem_output(raw, scenario_count=2)
+
+    assert parsed["which_scenario_occurred"] == 0
+    assert parsed["lessons"][0]["evidence_cite"] == "bullpen held late"
+    with pytest.raises(ValueError, match="out of range"):
+        qual_postmortem_core.validate_postmortem_output(
+            json.dumps({**json.loads(raw), "which_scenario_occurred": 5}),
+            scenario_count=2,
+        )
+
+
+def test_qual_postmortem_queues_on_cli_failure_then_retries(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    settings.research_teams_path.write_text("""
+teams:
+  yankees:
+    canonical_name: New York Yankees
+    aliases: [New York Yankees, Yankees, NYY]
+    rss_feeds:
+      - name: mlb_yankees
+        url: https://example.com/rss
+""")
+    store = research.ResearchStore(settings.research_db_path)
+    store.record_qual_signals([_scenario_signal()])
+    settlement = _settlement_fixture(
+        1,
+        ticker="KXMLBGAME-26JUL06NYYBOS-NYY",
+        outcome=1,
+        model_prob=0.60,
+        market_prob=0.50,
+    )
+    settlement["signal_source"] = "qual"
+    store.record_settlement(settlement)
+    recap_item = _recap_news_item()
+
+    monkeypatch.setattr(qual_postmortem, "deliver", lambda *args, **kwargs: None)
+    monkeypatch.setattr(qual_postmortem, "fetch_recap_for_settlement", lambda **kwargs: {
+        "recap_status": "found",
+        "game_date": "2026-07-06",
+        "team": "yankees",
+        "source": "mlb_yankees",
+        "item": recap_item,
+        "source_status": [{"source": "mlb_yankees", "status": "ok", "matched": 1}],
+    })
+    monkeypatch.setattr(qual_postmortem, "run_postmortem_model", lambda **kwargs: {
+        "status": "unavailable",
+        "reason": "command not found",
+        "postmortem": None,
+    })
+
+    first = qual_postmortem.run(_postmortem_context(settings))
+
+    assert first["queued_count"] == 1
+    assert store.latest_rows("qual_postmortems", 5) == []
+    assert store.qual_recap_for_settlement("settled-1")["recap_status"] == "found"
+
+    monkeypatch.setattr(qual_postmortem, "run_postmortem_model", lambda **kwargs: {
+        "status": "ok",
+        "postmortem": {
+            "which_scenario_occurred": 0,
+            "event_prediction_grade": "The branch structure matched the recap.",
+            "conditional_grade": "The conditional was directionally reasonable.",
+            "what_was_missed": "The analysis underweighted late bullpen leverage.",
+            "lessons": [
+                {
+                    "lesson": "Do not upgrade a moneyline for bullpen rest unless the game context makes late leverage likely.",
+                    "evidence_cite": "bullpen held late",
+                }
+            ],
+            "created_at": "2026-07-07T10:00:00+00:00",
+        },
+    })
+
+    second = qual_postmortem.run(_postmortem_context(settings))
+    postmortems = store.latest_rows("qual_postmortems", 5)
+    lessons = store.top_qual_lessons(teams=["yankees"], market_family="mlb moneyline", limit=5)
+
+    assert second["completed_count"] == 1
+    assert postmortems[0]["client_order_id"] == "settled-1"
+    assert json.loads(postmortems[0]["postmortem_json"])["which_scenario_occurred"] == 0
+    assert lessons[0]["hit_count"] == 1
+    assert lessons[0]["evidence_cite"] == "bullpen held late"
+
+
+def test_qual_postmortem_records_missing_recap_and_skips(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    settings.research_teams_path.write_text("""
+teams:
+  yankees:
+    canonical_name: New York Yankees
+    aliases: [New York Yankees, Yankees, NYY]
+    rss_feeds:
+      - name: mlb_yankees
+        url: https://example.com/rss
+""")
+    store = research.ResearchStore(settings.research_db_path)
+    store.record_qual_signals([_scenario_signal()])
+    settlement = _settlement_fixture(1, ticker="KXMLBGAME-26JUL06NYYBOS-NYY")
+    settlement["signal_source"] = "qual"
+    store.record_settlement(settlement)
+
+    monkeypatch.setattr(qual_postmortem, "deliver", lambda *args, **kwargs: None)
+    monkeypatch.setattr(qual_postmortem, "fetch_recap_for_settlement", lambda **kwargs: {
+        "recap_status": "missing",
+        "reason": "no-matching-recap",
+        "game_date": "2026-07-06",
+        "team_keys": ["yankees"],
+        "source_status": [{"source": "mlb_yankees", "status": "ok", "matched": 0}],
+    })
+
+    result = qual_postmortem.run(_postmortem_context(settings))
+
+    assert result["missing_recap_count"] == 1
+    assert store.qual_recap_for_settlement("settled-1")["recap_status"] == "missing"
+    assert store.latest_rows("qual_postmortems", 5) == []
+
+
+def test_qual_lessons_dedup_and_hit_count(tmp_path):
+    store = research.ResearchStore(tmp_path / "research.sqlite")
+
+    assert store.upsert_qual_lesson(
+        team="yankees",
+        market_family="mlb moneyline",
+        lesson_text="Check bullpen rest before upgrading a moneyline.",
+        evidence_cite="first cite",
+        postmortem_id=1,
+    )
+    assert store.upsert_qual_lesson(
+        team="yankees",
+        market_family="mlb moneyline",
+        lesson_text="check bullpen rest before upgrading a moneyline!",
+        evidence_cite="second cite",
+        postmortem_id=2,
+    )
+    lessons = store.top_qual_lessons(teams=["yankees"], market_family="mlb moneyline", limit=5)
+
+    assert len(lessons) == 1
+    assert lessons[0]["hit_count"] == 2
+    assert lessons[0]["evidence_cite"] == "second cite"
 
 
 def test_performance_learner_does_not_validate_small_lucky_sample():
@@ -4883,9 +5389,15 @@ def test_scheduled_demo_cycle_reports_once_after_settlement_status(tmp_path, mon
         calls.append("status")
         return {"execution_mode": ctx.settings.execution_mode}
 
+    def fake_postmortem(ctx):
+        assert ctx.settings.deliver_to == "stdout"
+        calls.append("qual-postmortem")
+        return {"completed_count": 1, "queued_count": 0, "missing_recap_count": 0}
+
     messages = []
     monkeypatch.setattr(daily_cycle, "run", fake_daily)
     monkeypatch.setattr(settlement_audit, "run", fake_settlement)
+    monkeypatch.setattr(qual_postmortem, "run", fake_postmortem)
     monkeypatch.setattr(status, "run", fake_status)
     monkeypatch.setattr(
         scheduled_demo_cycle,
@@ -4895,7 +5407,7 @@ def test_scheduled_demo_cycle_reports_once_after_settlement_status(tmp_path, mon
 
     result = scheduled_demo_cycle.run(DummyContext())
 
-    assert calls == ["daily-cycle", "settlement-audit", "status"]
+    assert calls == ["daily-cycle", "settlement-audit", "qual-postmortem", "status"]
     assert settings.execution_mode == "demo"
     assert settings.deliver_to == "telegram:123"
     assert result["exit_code"] == 0
@@ -4909,6 +5421,7 @@ def test_scheduled_demo_cycle_reports_once_after_settlement_status(tmp_path, mon
     assert "candidates=10 edges_found=2 trade_eligible=1" in messages[0][0]
     assert "demo_orders=1 tickers=KXDEMO-YES" in messages[0][0]
     assert "settlement checked=1 settled=1 pending=0 errors=0" in messages[0][0]
+    assert "postmortems completed=1 queued=0 missing_recaps=0" in messages[0][0]
     assert (tmp_path / "TEST-GAME.scheduled_demo_cycle.json").exists()
 
 
@@ -4953,6 +5466,7 @@ def test_scheduled_demo_cycle_soft_reports_missing_demo_credentials(tmp_path, mo
     messages = []
     monkeypatch.setattr(daily_cycle, "run", fake_daily)
     monkeypatch.setattr(settlement_audit, "run", lambda ctx: {"summary": {}})
+    monkeypatch.setattr(qual_postmortem, "run", lambda ctx: {})
     monkeypatch.setattr(status, "run", lambda ctx: {})
     monkeypatch.setattr(
         scheduled_demo_cycle,
@@ -5043,6 +5557,7 @@ def test_new_automation_phases_registered():
     assert "slate-discovery" in PHASES
     assert "slate-verify" in PHASES
     assert "research-agent" in PHASES
+    assert "qual-postmortem" in PHASES
     assert "settlement-audit" in PHASES
     assert "ports" in PHASES
     assert "status" in PHASES

@@ -63,6 +63,7 @@ class Settings:
     confluence_edge_bonus: float
     confluence_veto_delta: float
     qual_signal_max_age_hours: float
+    qual_lessons_top_n: int
     qual_llm_cmd: str
     qual_llm_timeout_seconds: int
     research_teams_path: Path
@@ -198,6 +199,7 @@ def load_settings(game_id: str | None = None) -> Settings:
         confluence_edge_bonus=float(os.environ.get("NBABOT_CONFLUENCE_EDGE_BONUS", "0.01")),
         confluence_veto_delta=float(os.environ.get("NBABOT_CONFLUENCE_VETO_DELTA", "0.08")),
         qual_signal_max_age_hours=float(os.environ.get("NBABOT_QUAL_SIGNAL_MAX_AGE_HOURS", "12")),
+        qual_lessons_top_n=int(os.environ.get("NBABOT_QUAL_LESSONS_TOP_N", "5")),
         qual_llm_cmd=os.environ.get(
             "NBABOT_QUAL_LLM_CMD",
             "~/.codex/plugins/.plugin-appserver/codex exec",

@@ -10,18 +10,23 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .performance_learner import market_family
 from .research import utc_now
 from .research_news import ResearchTeam, item_matches_team
 
 
 MIN_CONFIDENCE = 0.55
 USAGE_LIMIT_RE = re.compile(r"(usage limit|quota|rate limit|limit reached|too many requests)", re.I)
+QUAL_PROMPT_VERSION = "qual-scenario-v1"
+SCENARIO_EVENT_SUM_TOLERANCE = 0.025
+SCENARIO_PROB_SUM_TOLERANCE = 0.015
 
 
 @dataclass(frozen=True)
 class QualValidationResult:
     accepted: list[dict[str, Any]]
     discarded: list[dict[str, Any]]
+    retry_error: str | None = None
 
 
 def _safe_float(raw: Any) -> float | None:
@@ -36,6 +41,13 @@ def _safe_float(raw: Any) -> float | None:
 
 def _clamp_prob(value: float) -> float:
     return round(min(max(value, 0.02), 0.98), 6)
+
+
+def _prob_or_none(raw: Any) -> float | None:
+    value = _safe_float(raw)
+    if value is None or value < 0 or value > 1:
+        return None
+    return round(value, 6)
 
 
 def _team_lookup(teams: list[ResearchTeam]) -> dict[str, ResearchTeam]:
@@ -98,6 +110,12 @@ def unpriced_team_market_rows(
             "ticker": row.get("ticker"),
             "candidate_id": row.get("candidate_id"),
             "teams": team_keys,
+            "market_family": market_family({
+                "ticker": row.get("ticker"),
+                "title": row.get("title"),
+                "market": row.get("title"),
+                "market_identity": row.get("market_identity"),
+            }),
             "title": row.get("title"),
             "close_time": row.get("close_time"),
             "kalshi_price_cents": price,
@@ -124,6 +142,7 @@ def news_for_prompt(news_items: list[dict[str, Any]], teams: list[ResearchTeam],
             if source.startswith("espn_") or source == "espn_mlb" or source.startswith("reddit_baseball"):
                 continue
         rows.append({
+            "id": item.get("id"),
             "team": team.key,
             "source": item.get("source"),
             "title": item.get("title"),
@@ -139,24 +158,39 @@ def build_prompt(
     *,
     news_items: list[dict[str, Any]],
     markets: list[dict[str, Any]],
+    lessons: list[dict[str, Any]] | None = None,
+    calibration_lines: list[str] | None = None,
     retry_error: str | None = None,
 ) -> str:
     schema = (
-        '[{"ticker":"...","qual_prob":0.50,"confidence":0.70,'
-        '"rationale":"One or two sentences.","citation_urls":["https://..."]}]'
+        '[{"ticker":"...","base_rate":0.50,"qual_prob":0.50,"confidence":0.70,'
+        '"rationale":"One or two sentences.",'
+        '"scenarios":[{"event":"short branch description","p_event":0.50,'
+        '"p_outcome_given_event":0.60,"citations":["https://..."]}],'
+        '"citation_urls":["https://..."],"news_item_ids_used":["..."]}]'
     )
     payload = {
         "news_items": news_items,
         "markets": markets,
         "allowed_tickers": [row["ticker"] for row in markets],
         "allowed_citation_urls": sorted({row["url"] for row in news_items if row.get("url")}),
+        "allowed_news_item_ids": sorted({row["id"] for row in news_items if row.get("id")}),
+        "lessons": lessons or [],
+        "calibration": calibration_lines or [],
+        "prompt_version": QUAL_PROMPT_VERSION,
     }
     retry_line = f"\nPrevious output was invalid: {retry_error}\n" if retry_error else ""
     return (
         "You are pricing Kalshi sports markets that lack sportsbook consensus. "
         "Use only the provided news/discussion items and market rows. "
+        "Decompose every forecast into 2-4 mutually exclusive, collectively exhaustive scenario branches. "
+        "The scenario p_event values must sum to about 1.0, and qual_prob must equal "
+        "sum(p_event * p_outcome_given_event) within rounding. "
+        "base_rate is your prior before the provided news; qual_prob is after applying the news. "
+        "Use the lessons and calibration lines to correct recurring bias without copying them blindly. "
         "Return STRICT JSON only, with no markdown, no prose wrapper, and no comments. "
         "Every citation_url must be copied from allowed_citation_urls. "
+        "Every scenario citation must also be copied from allowed_citation_urls. "
         "Do not invent tickers or citations. "
         "If evidence is too thin for a market, omit it. "
         "Use probabilities for YES contracts.\n"
@@ -211,20 +245,77 @@ def parse_strict_json(raw: str) -> Any:
     return value
 
 
+def _valid_citations(raw: Any, allowed_urls: set[str]) -> list[str]:
+    return [
+        str(url).strip()
+        for url in (raw or [])
+        if str(url).strip() in allowed_urls
+    ]
+
+
+def _validate_scenarios(
+    *,
+    row: dict[str, Any],
+    prob: float,
+    allowed_urls: set[str],
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    raw_scenarios = row.get("scenarios")
+    if not isinstance(raw_scenarios, list) or not 2 <= len(raw_scenarios) <= 4:
+        return None, "scenarios must contain 2-4 branches"
+    scenarios = []
+    p_event_sum = 0.0
+    point_sum = 0.0
+    for idx, branch in enumerate(raw_scenarios):
+        if not isinstance(branch, dict):
+            return None, f"scenario {idx} is not an object"
+        event = str(branch.get("event") or "").strip()
+        p_event = _prob_or_none(branch.get("p_event"))
+        conditional = _prob_or_none(branch.get("p_outcome_given_event"))
+        citations = _valid_citations(branch.get("citations"), allowed_urls)
+        if not event:
+            return None, f"scenario {idx} missing event"
+        if p_event is None:
+            return None, f"scenario {idx} invalid p_event"
+        if conditional is None:
+            return None, f"scenario {idx} invalid p_outcome_given_event"
+        if not citations:
+            return None, f"scenario {idx} missing valid citations"
+        p_event_sum += p_event
+        point_sum += p_event * conditional
+        scenarios.append({
+            "event": event[:220],
+            "p_event": p_event,
+            "p_outcome_given_event": conditional,
+            "citations": sorted(dict.fromkeys(citations)),
+        })
+    if abs(p_event_sum - 1.0) > SCENARIO_EVENT_SUM_TOLERANCE:
+        return None, f"scenario p_event sum {p_event_sum:.4f} != 1.0"
+    if abs(point_sum - prob) > SCENARIO_PROB_SUM_TOLERANCE:
+        return None, f"scenario weighted probability {point_sum:.4f} != qual_prob {prob:.4f}"
+    return scenarios, None
+
+
 def validate_qual_output(
     raw_output: str,
     *,
     allowed_tickers: set[str],
     allowed_urls: set[str],
     model_run_id: str,
+    allowed_news_item_ids: set[str] | None = None,
+    url_to_news_item_ids: dict[str, list[str]] | None = None,
+    market_by_ticker: dict[str, dict[str, Any]] | None = None,
     created_at: str | None = None,
 ) -> QualValidationResult:
     parsed = parse_strict_json(raw_output)
     if not isinstance(parsed, list):
         raise ValueError("top-level JSON must be an array")
     created_at = created_at or utc_now()
+    allowed_news_item_ids = allowed_news_item_ids or set()
+    url_to_news_item_ids = url_to_news_item_ids or {}
+    market_by_ticker = market_by_ticker or {}
     accepted = []
     discarded = []
+    retry_error = None
     for idx, row in enumerate(parsed):
         if not isinstance(row, dict):
             discarded.append({"index": idx, "reason": "entry is not an object"})
@@ -238,28 +329,66 @@ def validate_qual_output(
         if prob is None:
             discarded.append({"ticker": ticker, "reason": "missing qual_prob"})
             continue
+        prob = _clamp_prob(prob)
+        base_rate = _prob_or_none(row.get("base_rate"))
+        if base_rate is None:
+            discarded.append({"ticker": ticker, "reason": "missing base_rate"})
+            continue
         if confidence is None or confidence < MIN_CONFIDENCE:
             discarded.append({"ticker": ticker, "reason": f"confidence below {MIN_CONFIDENCE:.2f}"})
             continue
-        citations = [
-            str(url).strip()
-            for url in (row.get("citation_urls") or [])
-            if str(url).strip() in allowed_urls
-        ]
+        citations = _valid_citations(row.get("citation_urls"), allowed_urls)
         if not citations:
             discarded.append({"ticker": ticker, "reason": "no valid citation_urls"})
             continue
-        accepted.append({
+        scenarios, scenario_error = _validate_scenarios(
+            row=row,
+            prob=prob,
+            allowed_urls=allowed_urls,
+        )
+        if scenario_error:
+            retry_error = scenario_error
+            discarded.append({"ticker": ticker, "reason": scenario_error})
+            continue
+        news_item_ids = [
+            str(item_id).strip()
+            for item_id in (row.get("news_item_ids_used") or [])
+            if str(item_id).strip() in allowed_news_item_ids
+        ]
+        if not news_item_ids:
+            for url in citations:
+                news_item_ids.extend(url_to_news_item_ids.get(url, []))
+        news_item_ids = sorted(dict.fromkeys(news_item_ids))
+        analysis = {
             "ticker": ticker,
-            "qual_prob": _clamp_prob(prob),
+            "base_rate": round(base_rate, 6),
+            "qual_prob": prob,
             "confidence": round(min(max(confidence, 0.0), 1.0), 6),
             "rationale": str(row.get("rationale") or "")[:600],
             "citation_urls": sorted(dict.fromkeys(citations)),
+            "news_item_ids_used": news_item_ids,
+            "scenarios": scenarios or [],
+            "model_run_id": model_run_id,
+            "prompt_version": QUAL_PROMPT_VERSION,
+            "market": market_by_ticker.get(ticker, {}),
+            "created_at": created_at,
+        }
+        accepted.append({
+            "ticker": ticker,
+            "base_rate": analysis["base_rate"],
+            "qual_prob": prob,
+            "confidence": analysis["confidence"],
+            "rationale": analysis["rationale"],
+            "citation_urls": analysis["citation_urls"],
+            "news_item_ids_used": news_item_ids,
+            "scenarios": scenarios or [],
+            "analysis": analysis,
             "created_at": created_at,
             "model_run_id": model_run_id,
+            "prompt_version": QUAL_PROMPT_VERSION,
             "signal_source": "qual",
         })
-    return QualValidationResult(accepted=accepted, discarded=discarded)
+    return QualValidationResult(accepted=accepted, discarded=discarded, retry_error=retry_error)
 
 
 def run_qual_model(
@@ -268,11 +397,19 @@ def run_qual_model(
     news_items: list[dict[str, Any]],
     markets: list[dict[str, Any]],
     timeout_seconds: int,
+    lessons: list[dict[str, Any]] | None = None,
+    calibration_lines: list[str] | None = None,
     invoker: Any = invoke_codex_cli,
 ) -> dict[str, Any]:
     model_run_id = "qual-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     allowed_tickers = {str(row.get("ticker")) for row in markets if row.get("ticker")}
     allowed_urls = {str(row.get("url")) for row in news_items if row.get("url")}
+    allowed_news_item_ids = {str(row.get("id")) for row in news_items if row.get("id")}
+    url_to_news_item_ids: dict[str, list[str]] = {}
+    for item in news_items:
+        if item.get("url") and item.get("id"):
+            url_to_news_item_ids.setdefault(str(item["url"]), []).append(str(item["id"]))
+    market_by_ticker = {str(row["ticker"]): row for row in markets if row.get("ticker")}
     if not markets:
         return {
             "status": "ok",
@@ -294,7 +431,13 @@ def run_qual_model(
     last_reason = None
     last_output = ""
     for attempt in (1, 2):
-        prompt = build_prompt(news_items=news_items, markets=markets, retry_error=retry_error)
+        prompt = build_prompt(
+            news_items=news_items,
+            markets=markets,
+            lessons=lessons,
+            calibration_lines=calibration_lines,
+            retry_error=retry_error,
+        )
         ok, output, reason = invoker(command, prompt, timeout_seconds=timeout_seconds)
         last_output = output
         if not ok:
@@ -312,10 +455,17 @@ def run_qual_model(
                 allowed_tickers=allowed_tickers,
                 allowed_urls=allowed_urls,
                 model_run_id=model_run_id,
+                allowed_news_item_ids=allowed_news_item_ids,
+                url_to_news_item_ids=url_to_news_item_ids,
+                market_by_ticker=market_by_ticker,
             )
         except ValueError as exc:
             last_reason = str(exc)
             retry_error = last_reason
+            continue
+        if validation.retry_error and attempt == 1 and not validation.accepted:
+            last_reason = validation.retry_error
+            retry_error = validation.retry_error
             continue
         return {
             "status": "ok",

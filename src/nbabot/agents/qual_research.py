@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from ..alerts import deliver
+from ..qual_learning import format_calibration_lines
 from ..qual_research import news_for_prompt, run_qual_model, unpriced_team_market_rows
 from ..research import ResearchStore
 from ..research_news import load_research_teams
@@ -17,6 +18,37 @@ def _format(payload: dict) -> str:
         f"accepted={payload.get('accepted_count', 0)} produced={payload.get('produced_count', 0)}"
         f"{reason_text}"
     )
+
+
+def _learning_context(store: ResearchStore, markets: list[dict], *, top_n: int) -> dict:
+    lessons_by_key: dict[tuple[str, str, str], dict] = {}
+    for market in markets:
+        family = str(market.get("market_family") or "")
+        if not family:
+            continue
+        for lesson in store.top_qual_lessons(
+            teams=market.get("teams") or [],
+            market_family=family,
+            limit=top_n,
+        ):
+            key = (
+                str(lesson.get("team") or ""),
+                str(lesson.get("market_family") or ""),
+                str(lesson.get("lesson_norm") or ""),
+            )
+            lessons_by_key[key] = {
+                "team": lesson.get("team"),
+                "market_family": lesson.get("market_family"),
+                "lesson": lesson.get("lesson_text"),
+                "evidence_cite": lesson.get("evidence_cite"),
+                "hit_count": lesson.get("hit_count"),
+            }
+    calibration = store.qual_calibration_table()
+    return {
+        "lessons": list(lessons_by_key.values())[:top_n],
+        "calibration": calibration,
+        "calibration_lines": format_calibration_lines(calibration),
+    }
 
 
 def run(ctx: Context | None = None) -> dict:
@@ -47,10 +79,17 @@ def run(ctx: Context | None = None) -> dict:
         window_hours=ctx.settings.news_window_hours,
     )
     prompt_news = news_for_prompt(news_rows, teams)
+    learning = _learning_context(
+        store,
+        markets,
+        top_n=int(getattr(ctx.settings, "qual_lessons_top_n", 5)),
+    )
     result = run_qual_model(
         command=ctx.settings.qual_llm_cmd,
         news_items=prompt_news,
         markets=markets,
+        lessons=learning["lessons"],
+        calibration_lines=learning["calibration_lines"],
         timeout_seconds=ctx.settings.qual_llm_timeout_seconds,
     )
     accepted = result.get("signals") or []
@@ -68,6 +107,7 @@ def run(ctx: Context | None = None) -> dict:
         "signals": accepted,
         "discarded": result.get("discarded") or [],
         "markets": markets,
+        "learning_context": learning,
     }
     ctx.write_json("qual_signals.json", payload)
     deliver(_format(payload), ctx.settings.deliver_to)

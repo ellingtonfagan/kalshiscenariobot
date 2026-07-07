@@ -64,6 +64,7 @@ def build_status(ctx: Context) -> dict[str, Any]:
             "edge_candidates.json",
             "news_ingest.json",
             "qual_signals.json",
+            "qual_postmortem.json",
             "research_bundle.json",
             "market_candidates.json",
             "sport_market_candidates.json",
@@ -94,6 +95,7 @@ def build_status(ctx: Context) -> dict[str, Any]:
             "live": _count_orders(store, "live_orders"),
         },
         "signal_engines": store.signal_engine_summary(),
+        "qual_learning": store.qual_learning_summary(),
         "latest_risk_snapshot": latest_risk[0] if latest_risk else None,
         "latest_live_order": latest_live[0] if latest_live else None,
         "latest_audit_events": latest_audit,
@@ -109,6 +111,7 @@ def _format_status(status: dict[str, Any]) -> str:
     engines = status.get("signal_engines") or {}
     consensus = engines.get("consensus") or {}
     qual = engines.get("qual") or {}
+    learning = status.get("qual_learning") or {}
     exposure = risk.get("game_exposure_units")
     daily_pnl = risk.get("daily_pnl_units")
     exposure_label = f"{exposure}u" if exposure is not None else "n/a"
@@ -121,6 +124,13 @@ def _format_status(status: dict[str, Any]) -> str:
             "  signal_engines "
             f"consensus={consensus.get('trades_placed', 0)} placed/{consensus.get('settled', 0)} settled "
             f"qual={qual.get('trades_placed', 0)} placed/{qual.get('settled', 0)} settled"
+        ),
+        (
+            "  qual_learning "
+            f"postmortems={learning.get('postmortems_completed', 0)} "
+            f"lessons={learning.get('lessons_stored', 0)} "
+            f"recaps_found={learning.get('recaps_found', 0)} "
+            f"recaps_missing={learning.get('recaps_missing', 0)}"
         ),
         (
             "  risk "

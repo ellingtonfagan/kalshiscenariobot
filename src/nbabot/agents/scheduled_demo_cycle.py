@@ -177,6 +177,7 @@ def _format_report(payload: dict[str, Any]) -> str:
     hard_error = payload.get("hard_error") or "none"
     blocked = payload.get("blocked_reason") or "none"
     settlement = payload.get("settlement") or {}
+    postmortem = payload.get("qual_postmortem") or {}
     news_counts = payload.get("news_counts") or {}
     news_text = ",".join(f"{team}:{count}" for team, count in sorted(news_counts.items())) or "none"
     qual = payload.get("qual_engine") or {}
@@ -209,6 +210,11 @@ def _format_report(payload: dict[str, Any]) -> str:
             f"pending={settlement.get('pending_count', 0)} "
             f"errors={settlement.get('error_count', 0)}"
         ),
+        (
+            f"postmortems completed={postmortem.get('completed_count', 0)} "
+            f"queued={postmortem.get('queued_count', 0)} "
+            f"missing_recaps={postmortem.get('missing_recap_count', 0)}"
+        ),
         f"blocked={blocked}",
         f"hard_error={hard_error}",
     ])
@@ -219,11 +225,12 @@ def run(ctx: Context | None = None) -> dict:
     report_to = ctx.settings.deliver_to
     ctx.settings.execution_mode = "demo"
 
-    from . import daily_cycle, settlement_audit, status
+    from . import daily_cycle, qual_postmortem, settlement_audit, status
 
     hard_errors: list[str] = []
     cycle: dict[str, Any] = {}
     settlement: dict[str, Any] = {}
+    postmortem: dict[str, Any] = {}
     final_status: dict[str, Any] = {}
 
     try:
@@ -235,6 +242,11 @@ def run(ctx: Context | None = None) -> dict:
         settlement = _run_muted(ctx, settlement_audit.run)
     except Exception as exc:
         hard_errors.append(f"settlement-audit: {exc}")
+
+    try:
+        postmortem = _run_muted(ctx, qual_postmortem.run)
+    except Exception as exc:
+        hard_errors.append(f"qual-postmortem: {exc}")
 
     try:
         final_status = _run_muted(ctx, status.run)
@@ -276,6 +288,13 @@ def run(ctx: Context | None = None) -> dict:
             "pending_count": _count(settlement, "pending_count"),
             "error_count": _count(settlement, "error_count"),
             "settled_count": _count(summary, "settled_count"),
+        },
+        "qual_postmortem": {
+            "checked_count": _count(postmortem, "checked_count"),
+            "completed_count": _count(postmortem, "completed_count"),
+            "queued_count": _count(postmortem, "queued_count"),
+            "missing_recap_count": _count(postmortem, "missing_recap_count"),
+            "lessons_upserted": _count(postmortem, "lessons_upserted"),
         },
         "status": final_status,
     }

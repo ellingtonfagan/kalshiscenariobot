@@ -1411,3 +1411,69 @@ were changed, and no scheduler or cron work was added.
   qual signal, and `0` fresh qual/consensus overlaps. Delta distribution was empty
   because there was no overlap fresh enough to combine.
 - No live execution env vars were set to live values and no live orders were placed.
+
+---
+
+## Round 19 - 2026-07-07 - Phase 15 scenario qual learning loop
+
+### What changed in code
+
+- Upgraded `qual-research` from point-only qualitative probabilities to a
+  scenario-structured schema. Accepted signals now persist `base_rate`, 2-4
+  scenario branches, news item ids, full analysis JSON, `model_run_id`, and
+  prompt version.
+- Added scenario reconciliation validation: branch `p_event` values must sum to
+  about 1.0 and the weighted branch probability must match `qual_prob`. Bad
+  scenario trees are rejected and retried once under the same strict-JSON,
+  citation, confidence, clamping, and hallucinated-ticker rules.
+- Added `qual_learning.py` for pure lesson normalization and per-confidence-bucket
+  calibration math.
+- Added `qual_postmortem.py` plus the `qual-postmortem` phase. It selects newly
+  settled qual/confluence records, fetches MLB/ESPN recap RSS by team/date,
+  records found/missing recap status, invokes the same qual CLI with the saved
+  original analysis plus recap/outcome, validates strict JSON, stores linked
+  postmortems, and upserts recurring lessons by team and market family.
+- Added SQLite stores for `qual_recaps`, `qual_postmortems`, and `qual_lessons`,
+  with additive `qual_signals` columns for full scenario analysis.
+- Future qual prompts now include top stored lessons and calibration lines such as
+  per-bucket hit counts/Brier stats. `NBABOT_QUAL_LESSONS_TOP_N` defaults to 5.
+- `scheduled-demo-cycle` now runs `qual-postmortem` after `settlement-audit`, and
+  status/dashboard views include compact qual-learning counts and calibration
+  tables.
+
+### Tests
+
+- Added coverage for scenario-tree reconciliation, retry on non-reconciling
+  output, full analysis persistence, recap matching/missing paths, strict
+  postmortem JSON validation, CLI-down queue/retry behavior, lesson dedup/hit
+  counts, prompt injection, and calibration math.
+- Full suite: `139 passed in 1.64s`.
+- Compile pass: `.venv/bin/python -m compileall src`.
+
+### Real behavior check
+
+- Real `qual-research` was run in monitor-only settings
+  (`NBABOT_EXECUTION_MODE=paper`, `NBABOT_DRY_RUN=1`, blank live ack vars). The
+  configured qual CLI returned the existing fail-soft usage-limit condition:
+  `status=unavailable`, `reason=usage-limit`, `markets=28`, `news=60`,
+  `accepted=0`. No real scenario-structured signal was produced because the real
+  CLI was unavailable.
+- To verify the actual scenario schema path despite that external limit, an
+  isolated temp synthetic qual run used a local strict-JSON command and temp DB.
+  It produced one accepted signal:
+  `KXMLBGAME-26JUL06NYYBOS-NYY`, `base_rate=0.52`, `qual_prob=0.60`,
+  `confidence=0.71`, branch `p_event` sum `1.0`, weighted sum `0.60`, cited to
+  `https://example.com/yankees-news`.
+- Real `settlement-audit` was run read-only. It checked one current demo order and
+  skipped it because there was no filled exposure or missing ticker/side data;
+  no new settled qual/confluence trade was available. Existing settlement records
+  had `0` qual/confluence rows.
+- Real `qual-postmortem` was run against the workspace and correctly no-opped:
+  `checked=0`, `completed=0`, `queued=0`, `missing_recaps=0`.
+- Because no real settled qual/confluence record with saved scenario analysis was
+  available, the postmortem path was verified against an isolated synthetic
+  settlement in `/tmp`. That run completed `checked=1`, `completed=1`,
+  `queued=0`, `missing_recaps=0`, `lessons_upserted=1`; it stored a postmortem
+  choosing scenario `0` and a Yankees / MLB moneyline lesson with hit count `1`.
+- No live execution env vars were set to live values and no live orders were
+  placed.

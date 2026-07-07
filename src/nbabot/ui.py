@@ -56,6 +56,7 @@ def _load_artifacts(ctx: Context) -> dict[str, Any]:
         "slate_candidates.json",
         "source_check.json",
         "settlement_audit.json",
+        "qual_postmortem.json",
     ]
     artifacts: dict[str, Any] = {"_meta": {}}
     for suffix in suffixes:
@@ -365,6 +366,33 @@ def _signal_engine_rows(ctx: Context) -> list[dict[str, Any]]:
     return rows
 
 
+def _qual_learning(ctx: Context) -> dict[str, Any]:
+    try:
+        return ResearchStore(ctx.settings.research_db_path).qual_learning_summary()
+    except Exception:
+        return {
+            "postmortems_completed": 0,
+            "lessons_stored": 0,
+            "recaps_found": 0,
+            "recaps_missing": 0,
+            "calibration": [],
+        }
+
+
+def _qual_calibration_rows(learning: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for row in learning.get("calibration") or []:
+        rows.append({
+            "bucket": row.get("bucket"),
+            "count": row.get("count", 0),
+            "correct": row.get("correct", 0),
+            "correct_rate": "n/a" if row.get("correct_rate") is None else f"{float(row.get('correct_rate')) * 100:.1f}%",
+            "observed_rate": "n/a" if row.get("observed_rate") is None else f"{float(row.get('observed_rate')) * 100:.1f}%",
+            "brier": "n/a" if row.get("brier") is None else row.get("brier"),
+        })
+    return rows
+
+
 def _metric(label: str, value: str, note: str = "") -> str:
     note_html = f"<small>{html.escape(note)}</small>" if note else ""
     return (
@@ -382,6 +410,7 @@ def render_dashboard(ctx: Context) -> str:
     validated = _validated_families(learning)
     settlement_rows, settlement_count = _settlement_rows(ctx, artifacts)
     signal_engine_rows = _signal_engine_rows(ctx)
+    qual_learning = _qual_learning(ctx)
     candidates = _candidate_rows(ranker)
     total_candidates = int(ranker.get("candidate_count") or len(candidates))
     priced_count = sum(1 for row in candidates if _candidate_price(row) is not None)
@@ -402,6 +431,8 @@ def render_dashboard(ctx: Context) -> str:
         _metric("Flagged Suspect", f"{suspect_count:,}", "plausible-edge guard"),
         _metric("Validated Families", f"{len(validated):,}"),
         _metric("Settled Trades", f"{settlement_count:,}"),
+        _metric("Qual Postmortems", f"{int(qual_learning.get('postmortems_completed') or 0):,}"),
+        _metric("Qual Lessons", f"{int(qual_learning.get('lessons_stored') or 0):,}"),
     ])
     live_class = "ok" if exec_state["live_cleared"] else "blocked"
     live_text = "yes" if exec_state["live_cleared"] else "no"
@@ -480,6 +511,7 @@ def render_dashboard(ctx: Context) -> str:
     <div class="metrics">{metrics_html}</div>
     <section class="block"><h2>Edge Candidates</h2>{_render_edge_table(candidates)}</section>
     <section class="block"><h2>Signal Engines</h2>{_table(signal_engine_rows, ["engine","trades_placed","settled","brier","clv_beat_rate","clv_available"])}</section>
+    <section class="block"><h2>Qual Learning</h2>{_table(_qual_calibration_rows(qual_learning), ["bucket","count","correct","correct_rate","observed_rate","brier"])}</section>
     <section class="block"><h2>Data Source Health</h2>{_table(provider_rows, ["provider","configured","state","rows","remaining_credits","detail"])}</section>
     <section class="block"><h2>Recent Settlements</h2>{_render_settlements(settlement_rows)}</section>
     <p class="footnote">Artifacts are loaded from the newest matching files in {html.escape(str(ctx.settings.data_dir))}. No API keys or secret values are rendered.</p>

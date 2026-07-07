@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+from .qual_learning import normalize_lesson, qual_calibration_stats
+
 ORDER_TABLES = {"paper_orders", "demo_orders", "live_orders"}
 DEFAULT_RISK_TIMEZONE = "America/New_York"
 
@@ -328,17 +330,68 @@ class ResearchStore:
                 CREATE TABLE IF NOT EXISTS qual_signals (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ticker TEXT NOT NULL,
+                    base_rate REAL,
                     qual_prob REAL NOT NULL,
                     confidence REAL NOT NULL,
                     rationale TEXT,
                     citations_json TEXT NOT NULL,
+                    scenarios_json TEXT,
+                    analysis_json TEXT,
+                    news_item_ids_json TEXT,
                     created_at TEXT NOT NULL,
                     model_run_id TEXT NOT NULL,
+                    prompt_version TEXT,
                     signal_source TEXT NOT NULL DEFAULT 'qual',
                     UNIQUE(ticker, model_run_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_qual_signals_ticker_time
                     ON qual_signals(ticker, created_at DESC);
+                CREATE TABLE IF NOT EXISTS qual_recaps (
+                    client_order_id TEXT PRIMARY KEY,
+                    game_id TEXT NOT NULL,
+                    signal_id INTEGER,
+                    recap_status TEXT NOT NULL,
+                    news_item_id TEXT,
+                    team TEXT,
+                    source TEXT,
+                    recap_date TEXT,
+                    fetched_at TEXT NOT NULL,
+                    reason TEXT,
+                    source_status_json TEXT NOT NULL,
+                    settlement_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_qual_recaps_game
+                    ON qual_recaps(game_id, fetched_at DESC);
+                CREATE TABLE IF NOT EXISTS qual_postmortems (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_order_id TEXT NOT NULL UNIQUE,
+                    game_id TEXT NOT NULL,
+                    signal_id INTEGER NOT NULL,
+                    ticker TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    model_run_id TEXT,
+                    recap_news_item_id TEXT,
+                    outcome INTEGER NOT NULL,
+                    postmortem_json TEXT NOT NULL,
+                    lessons_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_qual_postmortems_game
+                    ON qual_postmortems(game_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS qual_lessons (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    team TEXT NOT NULL,
+                    market_family TEXT NOT NULL,
+                    lesson_norm TEXT NOT NULL,
+                    lesson_text TEXT NOT NULL,
+                    evidence_cite TEXT,
+                    hit_count INTEGER NOT NULL DEFAULT 1,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    source_postmortem_id INTEGER,
+                    UNIQUE(team, market_family, lesson_norm)
+                );
+                CREATE INDEX IF NOT EXISTS idx_qual_lessons_lookup
+                    ON qual_lessons(team, market_family, hit_count DESC, last_seen_at DESC);
                 CREATE TABLE IF NOT EXISTS confluence_records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     game_id TEXT NOT NULL,
@@ -395,6 +448,11 @@ class ResearchStore:
             self._ensure_column(db, "demo_orders", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
             self._ensure_column(db, "live_orders", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
             self._ensure_column(db, "settlement_records", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
+            self._ensure_column(db, "qual_signals", "base_rate", "REAL")
+            self._ensure_column(db, "qual_signals", "scenarios_json", "TEXT")
+            self._ensure_column(db, "qual_signals", "analysis_json", "TEXT")
+            self._ensure_column(db, "qual_signals", "news_item_ids_json", "TEXT")
+            self._ensure_column(db, "qual_signals", "prompt_version", "TEXT")
 
     @staticmethod
     def _ensure_column(db: sqlite3.Connection, table: str, column: str,
@@ -655,6 +713,15 @@ class ResearchStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def news_item_by_id(self, item_id: str) -> dict[str, Any] | None:
+        self.init_schema()
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM news_items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
     def record_qual_signals(self, rows: Iterable[dict[str, Any]]) -> int:
         self.init_schema()
         rows = list(rows)
@@ -664,20 +731,38 @@ class ResearchStore:
             cur = db.executemany(
                 """
                 INSERT OR IGNORE INTO qual_signals(
-                    ticker, qual_prob, confidence, rationale, citations_json,
-                    created_at, model_run_id, signal_source
+                    ticker, base_rate, qual_prob, confidence, rationale, citations_json,
+                    scenarios_json, analysis_json, news_item_ids_json,
+                    created_at, model_run_id, prompt_version, signal_source
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         r["ticker"],
+                        r.get("base_rate"),
                         r["qual_prob"],
                         r["confidence"],
                         r.get("rationale"),
                         to_json(r.get("citation_urls") or r.get("citations") or []),
+                        to_json(r.get("scenarios") or []),
+                        to_json(r.get("analysis") or {
+                            "ticker": r.get("ticker"),
+                            "base_rate": r.get("base_rate"),
+                            "qual_prob": r.get("qual_prob"),
+                            "confidence": r.get("confidence"),
+                            "rationale": r.get("rationale"),
+                            "citation_urls": r.get("citation_urls") or r.get("citations") or [],
+                            "news_item_ids_used": r.get("news_item_ids_used") or [],
+                            "scenarios": r.get("scenarios") or [],
+                            "model_run_id": r.get("model_run_id"),
+                            "prompt_version": r.get("prompt_version"),
+                            "created_at": r.get("created_at"),
+                        }),
+                        to_json(r.get("news_item_ids_used") or []),
                         r.get("created_at") or utc_now(),
                         r["model_run_id"],
+                        r.get("prompt_version"),
                         str(r.get("signal_source") or "qual"),
                     )
                     for r in rows
@@ -720,8 +805,288 @@ class ResearchStore:
                 item["citation_urls"] = json.loads(item.pop("citations_json") or "[]")
             except (TypeError, ValueError, json.JSONDecodeError):
                 item["citation_urls"] = []
+            try:
+                item["scenarios"] = json.loads(item.pop("scenarios_json") or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item["scenarios"] = []
+            try:
+                item["analysis"] = json.loads(item.pop("analysis_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item["analysis"] = {}
+            try:
+                item["news_item_ids_used"] = json.loads(item.pop("news_item_ids_json") or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item["news_item_ids_used"] = []
             latest[ticker] = item
         return latest
+
+    @staticmethod
+    def _decode_qual_signal_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        for source_key, target_key, default in (
+            ("citations_json", "citation_urls", []),
+            ("scenarios_json", "scenarios", []),
+            ("analysis_json", "analysis", {}),
+            ("news_item_ids_json", "news_item_ids_used", []),
+        ):
+            raw = item.pop(source_key, None)
+            try:
+                item[target_key] = json.loads(raw or to_json(default))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item[target_key] = default
+        return item
+
+    def latest_qual_signal_for_ticker(
+        self,
+        ticker: str,
+        *,
+        at_or_before: str | None = None,
+    ) -> dict[str, Any] | None:
+        self.init_schema()
+        params: list[Any] = [ticker]
+        where = "ticker = ?"
+        if at_or_before:
+            where += " AND created_at <= ?"
+            params.append(at_or_before)
+        with self.connect() as db:
+            row = db.execute(
+                f"""
+                SELECT *
+                FROM qual_signals
+                WHERE {where}
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+        if row is None and at_or_before:
+            return self.latest_qual_signal_for_ticker(ticker)
+        return None if row is None else self._decode_qual_signal_row(row)
+
+    def pending_qual_postmortem_settlements(self, limit: int | None = None) -> list[dict[str, Any]]:
+        self.init_schema()
+        query = """
+            SELECT sr.*
+            FROM settlement_records sr
+            LEFT JOIN qual_postmortems qp
+              ON qp.client_order_id = sr.client_order_id
+            WHERE qp.client_order_id IS NULL
+              AND (
+                sr.signal_source = 'qual'
+                OR (sr.confluence_verdict IS NOT NULL AND sr.confluence_verdict != 'none')
+              )
+            ORDER BY sr.audited_at ASC
+        """
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (int(limit),)
+        with self.connect() as db:
+            rows = db.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_qual_recap(self, record: dict[str, Any]) -> None:
+        self.init_schema()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT OR REPLACE INTO qual_recaps(
+                    client_order_id, game_id, signal_id, recap_status, news_item_id,
+                    team, source, recap_date, fetched_at, reason,
+                    source_status_json, settlement_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["client_order_id"],
+                    record["game_id"],
+                    record.get("signal_id"),
+                    record["recap_status"],
+                    record.get("news_item_id"),
+                    record.get("team"),
+                    record.get("source"),
+                    record.get("recap_date"),
+                    record.get("fetched_at") or utc_now(),
+                    record.get("reason"),
+                    to_json(record.get("source_status") or []),
+                    to_json(record.get("settlement") or {}),
+                ),
+            )
+
+    def qual_recap_for_settlement(self, client_order_id: str) -> dict[str, Any] | None:
+        self.init_schema()
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM qual_recaps WHERE client_order_id = ?",
+                (client_order_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            item["source_status"] = json.loads(item.pop("source_status_json") or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            item["source_status"] = []
+        try:
+            item["settlement"] = json.loads(item.pop("settlement_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            item["settlement"] = {}
+        return item
+
+    def record_qual_postmortem(self, row: dict[str, Any]) -> int | None:
+        self.init_schema()
+        with self.connect() as db:
+            cur = db.execute(
+                """
+                INSERT OR IGNORE INTO qual_postmortems(
+                    client_order_id, game_id, signal_id, ticker, created_at,
+                    model_run_id, recap_news_item_id, outcome,
+                    postmortem_json, lessons_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["client_order_id"],
+                    row["game_id"],
+                    row["signal_id"],
+                    row["ticker"],
+                    row.get("created_at") or utc_now(),
+                    row.get("model_run_id"),
+                    row.get("recap_news_item_id"),
+                    int(row["outcome"]),
+                    to_json(row.get("postmortem") or {}),
+                    to_json(row.get("lessons") or []),
+                ),
+            )
+            if cur.rowcount != 1:
+                existing = db.execute(
+                    "SELECT id FROM qual_postmortems WHERE client_order_id = ?",
+                    (row["client_order_id"],),
+                ).fetchone()
+                return int(existing["id"]) if existing else None
+            return int(cur.lastrowid)
+
+    def upsert_qual_lesson(
+        self,
+        *,
+        team: str,
+        market_family: str,
+        lesson_text: str,
+        evidence_cite: str,
+        postmortem_id: int | None,
+    ) -> bool:
+        self.init_schema()
+        norm = normalize_lesson(lesson_text)
+        if not norm:
+            return False
+        now = utc_now()
+        with self.connect() as db:
+            cur = db.execute(
+                """
+                INSERT INTO qual_lessons(
+                    team, market_family, lesson_norm, lesson_text, evidence_cite,
+                    hit_count, first_seen_at, last_seen_at, source_postmortem_id
+                )
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+                ON CONFLICT(team, market_family, lesson_norm) DO UPDATE SET
+                    hit_count = hit_count + 1,
+                    lesson_text = excluded.lesson_text,
+                    evidence_cite = excluded.evidence_cite,
+                    last_seen_at = excluded.last_seen_at,
+                    source_postmortem_id = excluded.source_postmortem_id
+                """,
+                (
+                    team,
+                    market_family,
+                    norm,
+                    lesson_text[:300],
+                    evidence_cite[:400],
+                    now,
+                    now,
+                    postmortem_id,
+                ),
+            )
+        return cur.rowcount is not None and cur.rowcount > 0
+
+    def top_qual_lessons(
+        self,
+        *,
+        teams: Iterable[str],
+        market_family: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        self.init_schema()
+        team_list = [str(team) for team in teams if str(team)]
+        if not team_list:
+            return []
+        placeholders = ",".join("?" for _ in team_list)
+        with self.connect() as db:
+            rows = db.execute(
+                f"""
+                SELECT *
+                FROM qual_lessons
+                WHERE team IN ({placeholders})
+                  AND market_family = ?
+                ORDER BY hit_count DESC, last_seen_at DESC
+                LIMIT ?
+                """,
+                (*team_list, market_family, int(limit)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def qual_calibration_rows(self) -> list[dict[str, Any]]:
+        self.init_schema()
+        with self.connect() as db:
+            settlements = db.execute(
+                """
+                SELECT *
+                FROM settlement_records
+                WHERE signal_source = 'qual'
+                   OR (confluence_verdict IS NOT NULL AND confluence_verdict != 'none')
+                ORDER BY audited_at ASC
+                """
+            ).fetchall()
+        rows = []
+        signal_cache: dict[str, dict[str, Any] | None] = {}
+        for settlement in settlements:
+            record = dict(settlement)
+            ticker = str(record.get("ticker") or "")
+            if ticker not in signal_cache:
+                signal_cache[ticker] = self.latest_qual_signal_for_ticker(
+                    ticker,
+                    at_or_before=record.get("audited_at"),
+                )
+            signal = signal_cache[ticker] or {}
+            rows.append({
+                "ticker": ticker,
+                "confidence": signal.get("confidence"),
+                "prob": record.get("entry_model_prob"),
+                "outcome": record.get("outcome"),
+                "client_order_id": record.get("client_order_id"),
+            })
+        return rows
+
+    def qual_calibration_table(self) -> list[dict[str, Any]]:
+        return qual_calibration_stats(self.qual_calibration_rows())
+
+    def qual_learning_summary(self) -> dict[str, Any]:
+        self.init_schema()
+        with self.connect() as db:
+            postmortems = int(db.execute("SELECT COUNT(*) FROM qual_postmortems").fetchone()[0])
+            lessons = int(db.execute("SELECT COUNT(*) FROM qual_lessons").fetchone()[0])
+            recap_found = int(
+                db.execute("SELECT COUNT(*) FROM qual_recaps WHERE recap_status = 'found'").fetchone()[0]
+            )
+            recap_missing = int(
+                db.execute("SELECT COUNT(*) FROM qual_recaps WHERE recap_status = 'missing'").fetchone()[0]
+            )
+        return {
+            "postmortems_completed": postmortems,
+            "lessons_stored": lessons,
+            "recaps_found": recap_found,
+            "recaps_missing": recap_missing,
+            "calibration": self.qual_calibration_table(),
+        }
 
     def record_order(self, table: str, game_id: str, intent: Any, decision: Any,
                      request: Any, receipt: Any) -> bool:
@@ -1268,6 +1633,7 @@ class ResearchStore:
             "demo_orders", "live_orders", "risk_decisions", "risk_snapshots", "audit_events",
             "dead_letter_queue", "market_catalog", "orderbook_snapshots",
             "settlement_records", "news_items", "qual_signals",
+            "qual_recaps", "qual_postmortems", "qual_lessons",
         }
         if table not in allowed:
             raise ValueError(f"unsupported table: {table}")
@@ -1281,6 +1647,9 @@ class ResearchStore:
             "settlement_records": "audited_at",
             "news_items": "fetched_at",
             "qual_signals": "created_at",
+            "qual_recaps": "fetched_at",
+            "qual_postmortems": "created_at",
+            "qual_lessons": "last_seen_at",
         }.get(table, "id")
         with self.connect() as db:
             rows = db.execute(
