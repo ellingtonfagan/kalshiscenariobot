@@ -50,6 +50,8 @@ ksobot source-check           # verify external source readiness without exposin
 ksobot slate-discovery        # discover candidate sports events/lines
 ksobot slate-verify           # verify slate findings before research
 ksobot market-matcher         # build orderbook delta + execution-review slate
+ksobot news-ingest            # fetch team-scoped RSS/Atom research items
+ksobot qual-research          # LLM qualitative probabilities for unpriced rows
 ksobot candidate-ranker       # compute de-vigged consensus probability + edge
 ksobot research-agent         # write research_bundle + trade-eligible candidates
 ksobot autopilot              # safe repeated orchestration for cron/launchd
@@ -86,6 +88,8 @@ nbabot source-check      # verify external source readiness; network probes are 
 nbabot slate-discovery   # SportsGameOdds + The Odds API + ESPN fallback + Kalshi map
 nbabot slate-verify      # reject social-only / ESPN-only / unmapped findings
 nbabot market-matcher    # build orderbook delta + execution-review slate artifacts
+nbabot news-ingest       # ingest configured team RSS/Atom and subreddit RSS
+nbabot qual-research     # produce cited qualitative signals for unpriced markets
 nbabot candidate-ranker  # score matched markets with sportsbook consensus edge
 nbabot research-agent    # build evidence bundle and trade-eligible handoff rows
 nbabot status            # summarize current operating state
@@ -141,6 +145,14 @@ NBABOT_MAX_DAILY_LOSS_UNITS=2
 NBABOT_MAX_GAME_EXPOSURE_UNITS=5
 NBABOT_MIN_EDGE=0.05
 NBABOT_DEMO_MIN_EDGE=0.03
+NBABOT_QUAL_MIN_EDGE=0.06
+NBABOT_QUAL_DAILY_TRADE_CAP=10
+NBABOT_QUAL_SIGNAL_MAX_AGE_HOURS=12
+NBABOT_QUAL_LLM_CMD="~/.codex/plugins/.plugin-appserver/codex exec"
+NBABOT_QUAL_LLM_TIMEOUT_SECONDS=600
+NBABOT_RESEARCH_TEAMS=config/research_teams.yaml
+NBABOT_NEWS_WINDOW_HOURS=48
+NBABOT_NEWS_USER_AGENT=nbabot-research/0.1
 NBABOT_STALE_MARKET_SECONDS=90
 NBABOT_MAX_SPREAD_CENTS=10
 NBABOT_ORDERBOOK_DEPTH=
@@ -228,10 +240,19 @@ current Kalshi order book with the previous stored book, records deltas such as 
 tightening or bid movement, and marks rows for `execution_review` only when the input
 artifacts are fresh. That is still not approval to trade.
 
+`news-ingest` writes `news_ingest.json` and stores recent team-scoped RSS/Atom rows in
+SQLite. `qual-research` writes `qual_signals.json` and, when the local Codex CLI is
+available, stores cited qualitative probabilities for configured-team markets that
+lack sportsbook consensus. If the CLI is missing, quota-blocked, malformed, or times
+out, the pass records `status=unavailable` and the cycle continues consensus-only.
+
 `candidate-ranker` writes `candidate_ranker.json` and `edge_candidates.json`. It maps
 Kalshi and sportsbook rows to deterministic market identities, de-vigs multi-book odds
 into a consensus model probability, adjusts the required edge for disagreement/book
-count/spread, and blocks fuzzy identity matches from passing. Kalshi multivariate
+count/spread, and blocks fuzzy identity matches from passing. Qualitative signals are
+used only where sportsbook consensus is absent; they never override consensus rows and
+they carry `signal_source=qual` end-to-end. Qual signals use the higher
+`NBABOT_QUAL_MIN_EDGE` floor and are hard-blocked from live execution. Kalshi multivariate
 markets are matched by their `mve_selected_legs`; a whole composite is exact only when
 all supported component legs match sportsbook lines and receive an SGP-adjusted joint
 probability.

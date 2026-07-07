@@ -5,6 +5,7 @@ from .. import guardrails
 from ..alerts import deliver
 from ..candidate_ranker import build_candidate_rankings
 from ..odds_refresh import artifact_freshness, refresh_if_stale
+from ..research import ResearchStore
 from .base import Context, load_context
 
 
@@ -34,12 +35,23 @@ def run(ctx: Context | None = None) -> dict:
     }
     slate = ctx.read_json("slate_candidates.json") or {"candidates": []}
     matches = ctx.read_json("market_matches.json") or {"rows": []}
-    payload = build_candidate_rankings(ctx, slate, matches)
+    tickers = [
+        str(row.get("ticker"))
+        for row in matches.get("rows", [])
+        if isinstance(row, dict) and row.get("ticker")
+    ]
+    qual_signals = ResearchStore(ctx.settings.research_db_path).latest_qual_signals(
+        max_age_hours=getattr(ctx.settings, "qual_signal_max_age_hours", 12),
+        tickers=tickers,
+    )
+    payload = build_candidate_rankings(ctx, slate, matches, qual_signals=qual_signals)
     payload["live_updates"] = live_updates
+    payload["qual_signal_count"] = len(qual_signals)
     payload["input_freshness"] = artifact_freshness(ctx, (
         "slate_candidates.json",
         "market_matches.json",
         "book_watch.json",
+        "qual_signals.json",
     ))
     ctx.write_json("candidate_ranker.json", payload)
     ctx.write_json("match_coverage.json", {

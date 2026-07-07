@@ -33,6 +33,24 @@ def _execution_min_edge(settings: Any) -> float:
     return float(getattr(settings, "min_edge", 0.05))
 
 
+def _qual_min_edge(settings: Any) -> float:
+    return float(getattr(settings, "qual_min_edge", 0.06))
+
+
+def _has_consensus(consensus: dict[str, Any]) -> bool:
+    return (
+        consensus.get("fair_prob") is not None
+        and int(consensus.get("book_count") or 0) >= 2
+    )
+
+
+def _qual_signal_for(row: dict[str, Any], qual_signals: dict[str, dict[str, Any]] | None) -> dict[str, Any] | None:
+    if not qual_signals:
+        return None
+    signal = qual_signals.get(str(row.get("ticker") or ""))
+    return signal if isinstance(signal, dict) else None
+
+
 def _candidate_by_id(slate: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {
         candidate.get("candidate_id"): candidate
@@ -380,6 +398,7 @@ def build_candidate_rankings(
     market_matches: dict[str, Any],
     *,
     now: datetime | None = None,
+    qual_signals: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     candidate_lookup = _candidate_by_id(slate)
     identity_pool = _line_identity_pool(slate)
@@ -487,17 +506,46 @@ def build_candidate_rankings(
             target = identity.side or identity.participant
             consensus = consensus_prob(consensus_rows, target_name=target)
         executable = ExecutablePrice.from_orderbook_metrics(row.get("orderbook") or {}, "yes")
+        signal_source = "consensus"
+        qual_signal = _qual_signal_for(row, qual_signals)
+        qual_delta = None
+        if qual_signal is not None and consensus.get("fair_prob") is not None:
+            try:
+                qual_delta = round(float(qual_signal["qual_prob"]) - float(consensus["fair_prob"]), 6)
+            except (TypeError, ValueError):
+                qual_delta = None
+        eval_consensus = consensus
+        eval_base_min_edge = base_min_edge
+        require_consensus = True
+        if not _has_consensus(consensus) and qual_signal is not None:
+            signal_source = "qual"
+            eval_base_min_edge = _qual_min_edge(ctx.settings)
+            eval_consensus = {
+                "fair_prob": qual_signal.get("qual_prob"),
+                "book_count": 0,
+                "sources": qual_signal.get("citation_urls") or [],
+                "providers": ["qual_research"],
+                "excluded_books": [],
+                "disagreement_std": None,
+                "qual_confidence": qual_signal.get("confidence"),
+                "qual_rationale": qual_signal.get("rationale"),
+                "qual_model_run_id": qual_signal.get("model_run_id"),
+                "qual_created_at": qual_signal.get("created_at"),
+            }
+            require_consensus = False
         edge = evaluate_market(
             {
                 **match,
                 "ticker": ticker,
                 "close_time": row.get("close_time"),
             },
-            consensus,
+            eval_consensus,
             executable,
             ctx.settings,
-            base_min_edge=base_min_edge,
+            base_min_edge=eval_base_min_edge,
             now=now,
+            require_consensus=require_consensus,
+            require_exact_match=signal_source != "qual",
         )
         payload = edge.as_dict()
         is_composite = composite is not None
@@ -516,6 +564,9 @@ def build_candidate_rankings(
             },
             "identity_diagnostics": row_diag,
             "consensus": consensus,
+            "qual_signal": qual_signal,
+            "qual_vs_consensus_delta": qual_delta,
+            "signal_source": signal_source,
             "sgp_adjusted_prob": consensus.get("sgp_adjusted_prob"),
             "raw_joint_prob": consensus.get("raw_joint_prob"),
             "sgp_haircut": consensus.get("sgp_haircut"),
@@ -525,6 +576,9 @@ def build_candidate_rankings(
             "trade_eligible": payload["passes_edge"],
             "source": "candidate-ranker",
         })
+        if signal_source == "qual":
+            payload["sgp_adjusted_prob"] = payload.get("model_prob")
+            payload["model_prob_sources"] = list((qual_signal or {}).get("citation_urls") or [])
         ranked.append(payload)
     ranked.sort(key=lambda item: (
         not item.get("passes_edge"),
@@ -537,6 +591,10 @@ def build_candidate_rankings(
         "candidate_count": len(ranked),
         "edge_pass_count": sum(1 for row in ranked if row.get("passes_edge")),
         "trade_eligible_count": sum(1 for row in ranked if row.get("trade_eligible")),
+        "signal_source_counts": {
+            "consensus": sum(1 for row in ranked if row.get("signal_source") == "consensus"),
+            "qual": sum(1 for row in ranked if row.get("signal_source") == "qual"),
+        },
         "diagnostics": diagnostics,
         "rows": ranked,
         "notes": [

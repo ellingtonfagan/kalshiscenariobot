@@ -251,6 +251,7 @@ def _render_edge_table(rows: list[dict[str, Any]]) -> str:
         cells = [
             _market_label(row),
             row.get("ticker", ""),
+            row.get("signal_source", "consensus"),
             _fmt_prob(row.get("model_prob")),
             _fmt_cents(_candidate_price(row)),
             _fmt_edge(row.get("edge")),
@@ -266,7 +267,7 @@ def _render_edge_table(rows: list[dict[str, Any]]) -> str:
         )
     head = "".join(
         f"<th>{html.escape(label)}</th>"
-        for label in ["Market", "Ticker", "Model Prob", "Kalshi Price", "Edge", "Books", "Providers", "Status", "Reason"]
+        for label in ["Market", "Ticker", "Signal", "Model Prob", "Kalshi Price", "Edge", "Books", "Providers", "Status", "Reason"]
     )
     return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
 
@@ -345,6 +346,25 @@ def _render_settlements(rows: list[dict[str, Any]]) -> str:
     return _table(rendered, ["ticker", "outcome", "entry_price", "closing_consensus", "clv"])
 
 
+def _signal_engine_rows(ctx: Context) -> list[dict[str, Any]]:
+    try:
+        summary = ResearchStore(ctx.settings.research_db_path).signal_engine_summary()
+    except Exception:
+        summary = {}
+    rows = []
+    for source in ("consensus", "qual"):
+        row = summary.get(source) or {}
+        rows.append({
+            "engine": source,
+            "trades_placed": row.get("trades_placed", 0),
+            "settled": row.get("settled", 0),
+            "brier": "n/a" if row.get("brier") is None else row.get("brier"),
+            "clv_beat_rate": "n/a" if row.get("clv_beat_rate") is None else row.get("clv_beat_rate"),
+            "clv_available": row.get("clv_available", 0),
+        })
+    return rows
+
+
 def _metric(label: str, value: str, note: str = "") -> str:
     note_html = f"<small>{html.escape(note)}</small>" if note else ""
     return (
@@ -361,6 +381,7 @@ def render_dashboard(ctx: Context) -> str:
     learning = _performance_learning(artifacts)
     validated = _validated_families(learning)
     settlement_rows, settlement_count = _settlement_rows(ctx, artifacts)
+    signal_engine_rows = _signal_engine_rows(ctx)
     candidates = _candidate_rows(ranker)
     total_candidates = int(ranker.get("candidate_count") or len(candidates))
     priced_count = sum(1 for row in candidates if _candidate_price(row) is not None)
@@ -434,9 +455,9 @@ def render_dashboard(ctx: Context) -> str:
     th,td {{ text-align:left; border-bottom:1px solid var(--line); padding:7px 8px; vertical-align:top; }}
     th {{ color:var(--muted); font-size:12px; }}
     .empty {{ color:var(--muted); }}
-    tr.eligible td:nth-child(8) {{ color:var(--good); font-weight:700; }}
-    tr.flagged td:nth-child(8) {{ color:var(--warn); font-weight:700; }}
-    tr.blocked td:nth-child(8) {{ color:var(--bad); font-weight:700; }}
+    tr.eligible td:nth-child(9) {{ color:var(--good); font-weight:700; }}
+    tr.flagged td:nth-child(9) {{ color:var(--warn); font-weight:700; }}
+    tr.blocked td:nth-child(9) {{ color:var(--bad); font-weight:700; }}
     .footnote {{ color:var(--muted); font-size:12px; margin-top:16px; }}
   </style>
 </head>
@@ -458,6 +479,7 @@ def render_dashboard(ctx: Context) -> str:
     {capacity_banner}
     <div class="metrics">{metrics_html}</div>
     <section class="block"><h2>Edge Candidates</h2>{_render_edge_table(candidates)}</section>
+    <section class="block"><h2>Signal Engines</h2>{_table(signal_engine_rows, ["engine","trades_placed","settled","brier","clv_beat_rate","clv_available"])}</section>
     <section class="block"><h2>Data Source Health</h2>{_table(provider_rows, ["provider","configured","state","rows","remaining_credits","detail"])}</section>
     <section class="block"><h2>Recent Settlements</h2>{_render_settlements(settlement_rows)}</section>
     <p class="footnote">Artifacts are loaded from the newest matching files in {html.escape(str(ctx.settings.data_dir))}. No API keys or secret values are rendered.</p>

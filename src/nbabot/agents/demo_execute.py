@@ -57,6 +57,8 @@ def run(ctx: Context | None = None) -> dict:
                     limits["paper_demo_broad_slate_trade_count"]
                 ),
                 paper_demo_daily_trade_cap=int(limits["paper_demo_daily_trade_cap"]),
+                qual_daily_trade_count=int(limits["qual_daily_trade_count"]),
+                qual_daily_trade_cap=int(limits["qual_daily_trade_cap"]),
             ),
         )
         receipt = execute_demo(intent, decision, ctx.settings, store, audit, ctx.kalshi)

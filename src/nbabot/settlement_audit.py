@@ -242,6 +242,7 @@ def normalized_order(order: dict[str, Any]) -> dict[str, Any] | None:
         "scenario_id": intent.get("scenario_id"),
         "entry_model_prob": _prob(intent.get("model_prob")),
         "entry_market_prob": _prob(intent.get("market_prob")),
+        "signal_source": str(intent.get("signal_source") or order.get("signal_source") or "consensus"),
         "intent": intent,
         "request": request,
     }
@@ -270,7 +271,10 @@ def _ranker_rows(path: Path) -> list[dict[str, Any]]:
 def _row_consensus_prob(row: dict[str, Any], side: str) -> float | None:
     consensus = row.get("consensus") if isinstance(row.get("consensus"), dict) else {}
     fair_prob = None
-    for raw in (consensus.get("fair_prob"), row.get("model_prob"), row.get("sgp_adjusted_prob")):
+    raws = [consensus.get("fair_prob")]
+    if str(row.get("signal_source") or "consensus") != "qual":
+        raws.extend([row.get("model_prob"), row.get("sgp_adjusted_prob")])
+    for raw in raws:
         fair_prob = _prob(raw)
         if fair_prob is not None:
             break
@@ -363,6 +367,7 @@ def settlement_record(
         "filled_at": order.get("filled_at"),
         "fill_source": order.get("fill_source"),
         "scenario_id": order.get("scenario_id"),
+        "signal_source": order.get("signal_source") or "consensus",
         "audited_at": utc_now(),
         "settled_at": resolution.get("settled_at"),
         "market_status": resolution.get("market_status"),

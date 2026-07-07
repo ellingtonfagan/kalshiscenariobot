@@ -1,0 +1,51 @@
+teams:
+  yankees:
+    canonical_name: New York Yankees
+    aliases:
+      - New York Yankees
+      - Yankees
+      - NY Yankees
+      - NYY
+      - New York Y
+    rss_feeds:
+      - name: mlb_yankees
+        url: https://www.mlb.com/yankees/feeds/news/rss.xml
+      - name: espn_mlb
+        url: https://www.espn.com/espn/rss/mlb/news
+        require_alias: true
+    subreddits:
+      - NYYankees
+      - baseball
+  mets:
+    canonical_name: New York Mets
+    aliases:
+      - New York Mets
+      - Mets
+      - NY Mets
+      - NYM
+      - New York M
+    rss_feeds:
+      - name: mlb_mets
+        url: https://www.mlb.com/mets/feeds/news/rss.xml
+      - name: espn_mlb
+        url: https://www.espn.com/espn/rss/mlb/news
+        require_alias: true
+    subreddits:
+      - NewYorkMets
+      - baseball
+  tigers:
+    canonical_name: Detroit Tigers
+    aliases:
+      - Detroit Tigers
+      - Tigers
+      - DET
+      - Detroit
+    rss_feeds:
+      - name: mlb_tigers
+        url: https://www.mlb.com/tigers/feeds/news/rss.xml
+      - name: espn_mlb
+        url: https://www.espn.com/espn/rss/mlb/news
+        require_alias: true
+    subreddits:
+      - MotorCityKitties
+      - baseball

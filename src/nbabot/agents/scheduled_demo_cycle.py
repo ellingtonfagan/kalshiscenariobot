@@ -106,6 +106,51 @@ def _demo_order_summary(cycle: dict[str, Any]) -> tuple[int, list[str], str | No
     return len(placed), placed, "; ".join(blocked) if blocked else None
 
 
+def _qual_order_count(cycle: dict[str, Any]) -> int:
+    demo_step = _step(cycle, "demo-execute")
+    result = demo_step.get("result") if isinstance(demo_step, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    count = 0
+    for item in _order_items(result):
+        receipt = item.get("receipt") if isinstance(item.get("receipt"), dict) else {}
+        intent = item.get("intent") if isinstance(item.get("intent"), dict) else {}
+        if str(intent.get("signal_source") or "consensus") != "qual":
+            continue
+        if str(receipt.get("status") or "") in {"submitted", "filled"}:
+            count += 1
+    return count
+
+
+def _news_counts(cycle: dict[str, Any]) -> dict[str, int]:
+    news = _step_result(cycle, "news-ingest")
+    counts = news.get("team_counts") if isinstance(news, dict) else {}
+    out: dict[str, int] = {}
+    if isinstance(counts, dict):
+        for team, row in counts.items():
+            if isinstance(row, dict):
+                out[str(team)] = _count(row, "inserted", "parsed")
+    return out
+
+
+def _qual_summary(cycle: dict[str, Any]) -> dict[str, Any]:
+    qual = _step_result(cycle, "qual-research")
+    if not qual:
+        return {
+            "status": "not-run",
+            "reason": "qual-research step missing",
+            "produced_count": 0,
+            "accepted_count": 0,
+        }
+    return {
+        "status": qual.get("status") or "unknown",
+        "reason": qual.get("reason"),
+        "produced_count": _count(qual, "produced_count"),
+        "accepted_count": _count(qual, "accepted_count"),
+        "market_count": _count(qual, "market_count"),
+        "news_count": _count(qual, "news_count"),
+    }
+
+
 def _hard_errors(cycle: dict[str, Any], extra_errors: list[str]) -> list[str]:
     errors = list(extra_errors)
     for item in _steps(cycle):
@@ -132,6 +177,10 @@ def _format_report(payload: dict[str, Any]) -> str:
     hard_error = payload.get("hard_error") or "none"
     blocked = payload.get("blocked_reason") or "none"
     settlement = payload.get("settlement") or {}
+    news_counts = payload.get("news_counts") or {}
+    news_text = ",".join(f"{team}:{count}" for team, count in sorted(news_counts.items())) or "none"
+    qual = payload.get("qual_engine") or {}
+    qual_reason = qual.get("reason") or "none"
     return "\n".join([
         f"[scheduled-demo-cycle] {payload['game_id']}",
         (
@@ -145,7 +194,14 @@ def _format_report(payload: dict[str, Any]) -> str:
         ),
         (
             f"demo_orders={payload['demo_orders_placed']} "
-            f"tickers={ticker_text}"
+            f"tickers={ticker_text} "
+            f"qual_orders={payload.get('qual_demo_orders_placed', 0)}"
+        ),
+        (
+            f"news_ingested={news_text} "
+            f"qual_status={qual.get('status', 'unknown')} "
+            f"qual_signals={qual.get('accepted_count', 0)}/{qual.get('produced_count', 0)} "
+            f"qual_reason={qual_reason}"
         ),
         (
             f"settlement checked={settlement.get('checked_count', 0)} "
@@ -188,6 +244,7 @@ def run(ctx: Context | None = None) -> dict:
     ranker = _step_result(cycle, "candidate-ranker")
     research = _step_result(cycle, "research-agent")
     orders_placed, tickers, blocked_reason = _demo_order_summary(cycle)
+    qual_summary = _qual_summary(cycle)
     hard_errors = _hard_errors(cycle, hard_errors)
     summary = settlement.get("summary") if isinstance(settlement.get("summary"), dict) else {}
     exit_code = 1 if hard_errors else 0
@@ -207,6 +264,9 @@ def run(ctx: Context | None = None) -> dict:
         ),
         "demo_orders_placed": orders_placed,
         "demo_order_tickers": tickers,
+        "qual_demo_orders_placed": _qual_order_count(cycle),
+        "news_counts": _news_counts(cycle),
+        "qual_engine": qual_summary,
         "blocked_reason": blocked_reason,
         "hard_error": "; ".join(hard_errors) if hard_errors else None,
         "exit_code": exit_code,

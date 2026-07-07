@@ -28,7 +28,7 @@ def run(ctx: Context | None = None) -> dict:
     audit = AuditTrail(ctx.settings.data_dir, store)
     steps: list[dict[str, Any]] = []
 
-    from . import backtest, book_watch, candidate_ranker, discover_markets, market_matcher, portfolio_sync, research_agent
+    from . import backtest, book_watch, candidate_ranker, discover_markets, market_matcher, news_ingest, portfolio_sync, qual_research, research_agent
     from . import slate_discovery, slate_verify, snapshot_market
     from . import source_check, status
 
@@ -39,7 +39,7 @@ def run(ctx: Context | None = None) -> dict:
         steps,
         audit,
         activated_by=None,
-        activates=("slate-discovery",),
+        activates=("news-ingest",),
         dlq_type="DAILY_CYCLE_STEP",
     )
     if source_report is None:
@@ -77,13 +77,24 @@ def run(ctx: Context | None = None) -> dict:
         )
         return payload
 
+    news = run_activated_step(
+        ctx,
+        "news-ingest",
+        news_ingest.run,
+        steps,
+        audit,
+        activated_by="source-check",
+        activates=("slate-discovery",),
+        dlq_type="DAILY_CYCLE_STEP",
+    )
+
     slate = run_activated_step(
         ctx,
         "slate-discovery",
         slate_discovery.run,
         steps,
         audit,
-        activated_by="source-check",
+        activated_by="news-ingest" if news is not None else "source-check",
         activates=("slate-verify",),
         dlq_type="DAILY_CYCLE_STEP",
     )
@@ -251,13 +262,23 @@ def run(ctx: Context | None = None) -> dict:
                 activates=("backtest",),
             )
         else:
+            qual = run_activated_step(
+                ctx,
+                "qual-research",
+                qual_research.run,
+                steps,
+                audit,
+                activated_by="market-matcher",
+                activates=("candidate-ranker",),
+                dlq_type="DAILY_CYCLE_STEP",
+            )
             ranked = run_activated_step(
                 ctx,
                 "candidate-ranker",
                 candidate_ranker.run,
                 steps,
                 audit,
-                activated_by="market-matcher",
+                activated_by="qual-research" if qual is not None else "market-matcher",
                 activates=("research-agent",),
                 dlq_type="DAILY_CYCLE_STEP",
             )

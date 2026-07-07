@@ -62,6 +62,8 @@ def build_status(ctx: Context) -> dict[str, Any]:
             "execution_slate.json",
             "candidate_ranker.json",
             "edge_candidates.json",
+            "news_ingest.json",
+            "qual_signals.json",
             "research_bundle.json",
             "market_candidates.json",
             "sport_market_candidates.json",
@@ -91,6 +93,7 @@ def build_status(ctx: Context) -> dict[str, Any]:
             "demo": _count_orders(store, "demo_orders"),
             "live": _count_orders(store, "live_orders"),
         },
+        "signal_engines": store.signal_engine_summary(),
         "latest_risk_snapshot": latest_risk[0] if latest_risk else None,
         "latest_live_order": latest_live[0] if latest_live else None,
         "latest_audit_events": latest_audit,
@@ -103,6 +106,9 @@ def _format_status(status: dict[str, Any]) -> str:
     live_line = "ready" if status["live_ready"] else "blocked: " + "; ".join(blockers)
     risk = status.get("latest_risk_snapshot") or {}
     orders = status["orders"]
+    engines = status.get("signal_engines") or {}
+    consensus = engines.get("consensus") or {}
+    qual = engines.get("qual") or {}
     exposure = risk.get("game_exposure_units")
     daily_pnl = risk.get("daily_pnl_units")
     exposure_label = f"{exposure}u" if exposure is not None else "n/a"
@@ -111,6 +117,11 @@ def _format_status(status: dict[str, Any]) -> str:
         f"[status] {status['game_id']} sport={status['sport']}",
         f"  mode={status['execution_mode']} dry_run={status['dry_run']} live={live_line}",
         f"  orders paper={orders['paper']} demo={orders['demo']} live={orders['live']}",
+        (
+            "  signal_engines "
+            f"consensus={consensus.get('trades_placed', 0)} placed/{consensus.get('settled', 0)} settled "
+            f"qual={qual.get('trades_placed', 0)} placed/{qual.get('settled', 0)} settled"
+        ),
         (
             "  risk "
             f"exposure={exposure_label} "

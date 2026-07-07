@@ -80,6 +80,8 @@ src/nbabot/
     book_watch.py   Capture side-aware order book depth from generic candidate artifacts.
     market_matcher.py Build market_matches.json and execution_slate.json.
     candidate_ranker.py Build candidate_ranker.json and edge_candidates.json.
+    news_ingest.py  Fetch configured team RSS/Atom research items into SQLite.
+    qual_research.py Run the local Codex CLI for cited qual probabilities.
     status.py       Summarize mode, live blockers, artifacts, risk, and orders.
     portfolio_sync.py Mirror Kalshi balance + positions into local state.
     daily_cycle.py  Autonomous discover/snapshot/book/execution/backtest/status loop.
@@ -104,9 +106,9 @@ For autonomous operation, prefer `ksobot daily-cycle` under cron/launchd/systemd
 the agent activation chain: each phase records which prior phase activated it and which
 next phase it makes eligible. It does not paper trade by default; live execution still
 requires the explicit live gates and risk approval.
-The current chain is `source-check -> slate-discovery -> slate-verify ->
+The current chain is `source-check -> news-ingest -> slate-discovery -> slate-verify ->
 portfolio-sync -> discover-markets -> snapshot-market -> book-watch -> market-matcher
--> candidate-ranker -> research-agent -> execution gate -> backtest -> status`. Slate verification,
+-> qual-research -> candidate-ranker -> research-agent -> execution gate -> backtest -> status`. Slate verification,
 market matching, research, and execution refresh stale odds/order-book handoff artifacts
 before consuming them. `NBABOT_STALE_MARKET_SECONDS` controls those freshness checks.
 
@@ -129,6 +131,8 @@ nbabot source-check  # verify external source readiness without exposing secrets
 nbabot slate-discovery # discover candidate sports events/lines
 nbabot slate-verify  # reject social/ESPN-only slate candidates
 nbabot market-matcher # match open Kalshi slate, order-book deltas, and execution review rows
+nbabot news-ingest  # fetch team-scoped RSS/Atom research items
+nbabot qual-research # produce cited qualitative probabilities for unpriced markets
 nbabot candidate-ranker # compute de-vigged consensus probability and edge
 nbabot research-agent # produce research_bundle + trade-eligible market_candidates
 nbabot paper          # local paper fills only

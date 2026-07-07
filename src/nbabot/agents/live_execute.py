@@ -26,6 +26,11 @@ def _blocked_reason(ctx: Context, intent: object | None = None) -> str | None:
         return f"set NBABOT_LIVE_TRADING_ACK={LIVE_ACK}"
     if (
         intent is not None
+        and getattr(intent, "signal_source", "consensus") == "qual"
+    ):
+        return "qual-sourced intents are hard-blocked in live mode"
+    if (
+        intent is not None
         and getattr(intent, "broad_slate", False)
         and getattr(ctx.settings, "broad_slate_execution", "") != BROAD_SLATE_ACK
     ):

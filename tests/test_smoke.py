@@ -35,6 +35,8 @@ from nbabot import (  # noqa: E402
     odds_math,
     odds_refresh,
     performance_learner,
+    qual_research as qual_research_core,
+    research_news,
     research,
     risk,
     scenarios,
@@ -56,9 +58,11 @@ from nbabot.agents import (  # noqa: E402
     historical_backtest,
     market_matcher,
     live_execute,
+    news_ingest,
     paper,
     portfolio_sync,
     ports,
+    qual_research as qual_research_agent,
     reconcile,
     research_agent,
     scheduled_demo_cycle,
@@ -523,11 +527,18 @@ class _ExecSettings:
     demo_api_base = "https://demo-api.kalshi.co/trade-api/v2"
     kalshi_demo_api_key = ""
     paper_demo_daily_trade_cap = 50
+    qual_daily_trade_cap = 10
     max_daily_loss_units = 2.0
     max_daily_exposure_units = 5.0
     max_game_exposure_units = 5.0
     min_edge = 0.05
     demo_min_edge = 0.03
+    qual_min_edge = 0.06
+    qual_signal_max_age_hours = 12
+    qual_llm_cmd = "/missing/codex exec"
+    qual_llm_timeout_seconds = 600
+    news_window_hours = 48
+    news_user_agent = "nbabot-test/0.1"
     max_plausible_edge = 0.15
     stale_market_seconds = 90
     max_spread_cents = 10
@@ -539,6 +550,7 @@ class _ExecSettings:
         self.research_db_path = tmp_path / "research.sqlite"
         self.kill_switch_path = tmp_path / "KILL_SWITCH"
         self.kalshi_demo_private_key_path = tmp_path / "kalshi-demo-private-key.txt"
+        self.research_teams_path = tmp_path / "research_teams.yaml"
 
     def data_path(self, suffix):
         return self.data_dir / f"{self.game_id}.{suffix}"
@@ -647,6 +659,176 @@ def _record_constructed_validated_mlb_family(store):
                 clv_cents=6.0 if i < 75 else -2.0,
             )
         )
+
+
+RSS_FIXTURE = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <item>
+    <title>Yankees starter returns to lineup</title>
+    <link>https://example.com/yankees-lineup</link>
+    <description>New York Yankees get a key bat back.</description>
+    <pubDate>Tue, 07 Jul 2026 12:00:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>Old Yankees note</title>
+    <link>https://example.com/old-yankees</link>
+    <description>Old item.</description>
+    <pubDate>Fri, 03 Jul 2026 12:00:00 GMT</pubDate>
+  </item>
+</channel></rss>"""
+
+
+ATOM_FIXTURE = b"""<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Yankees bullpen discussion</title>
+    <link href="https://reddit.example/yankees-bullpen" />
+    <summary>Fans discuss Yankees bullpen fatigue.</summary>
+    <updated>2026-07-07T13:00:00Z</updated>
+  </entry>
+</feed>"""
+
+
+def test_news_ingest_parses_dedups_and_fails_soft(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    store = research.ResearchStore(settings.research_db_path)
+    teams = [
+        research_news.ResearchTeam(
+            key="yankees",
+            canonical_name="New York Yankees",
+            aliases=("New York Yankees", "Yankees"),
+            rss_feeds=(
+                {"name": "mlb_yankees", "url": "https://example.com/rss"},
+                {"name": "espn_mlb", "url": "https://example.com/blocked", "require_alias": True},
+            ),
+            subreddits=("NYYankees",),
+        )
+    ]
+
+    def fetcher(url, user_agent):
+        assert user_agent == "nbabot-test/0.1"
+        if url.endswith("/blocked"):
+            import urllib.error
+            raise urllib.error.HTTPError(url, 429, "rate limited", {}, None)
+        if url.endswith("/new.rss"):
+            return 200, ATOM_FIXTURE
+        return 200, RSS_FIXTURE
+
+    payload = research_news.ingest_team_feeds(
+        teams=teams,
+        store=store,
+        user_agent=settings.news_user_agent,
+        window_hours=48,
+        request_delay_seconds=0,
+        fetcher=fetcher,
+        now=datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc),
+    )
+    second = research_news.ingest_team_feeds(
+        teams=teams,
+        store=store,
+        user_agent=settings.news_user_agent,
+        window_hours=48,
+        request_delay_seconds=0,
+        fetcher=fetcher,
+        now=datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc),
+    )
+
+    assert payload["team_counts"]["yankees"]["parsed"] == 2
+    assert payload["team_counts"]["yankees"]["inserted"] == 2
+    assert payload["team_counts"]["yankees"]["ignored_old"] == 1
+    assert second["team_counts"]["yankees"]["inserted"] == 0
+    assert any(row["status"] == "http_429" for row in payload["source_status"])
+    recent = store.recent_news_items(["yankees"], window_hours=48)
+    assert {row["url"] for row in recent} == {
+        "https://example.com/yankees-lineup",
+        "https://reddit.example/yankees-bullpen",
+    }
+
+
+def test_qual_validation_clamps_and_discards_bad_entries():
+    raw = json.dumps([
+        {
+            "ticker": "KXQUAL1",
+            "qual_prob": 1.20,
+            "confidence": 0.70,
+            "rationale": "Cited signal.",
+            "citation_urls": ["https://example.com/a"],
+        },
+        {
+            "ticker": "KXQUAL2",
+            "qual_prob": 0.60,
+            "confidence": 0.54,
+            "rationale": "Too weak.",
+            "citation_urls": ["https://example.com/a"],
+        },
+        {
+            "ticker": "KXQUAL3",
+            "qual_prob": 0.60,
+            "confidence": 0.80,
+            "rationale": "Hallucinated ticker.",
+            "citation_urls": ["https://example.com/a"],
+        },
+        {
+            "ticker": "KXQUAL2",
+            "qual_prob": 0.60,
+            "confidence": 0.80,
+            "rationale": "Missing valid cite.",
+            "citation_urls": ["https://evil.example/x"],
+        },
+    ])
+
+    result = qual_research_core.validate_qual_output(
+        raw,
+        allowed_tickers={"KXQUAL1", "KXQUAL2"},
+        allowed_urls={"https://example.com/a"},
+        model_run_id="run-1",
+        created_at="2026-07-07T00:00:00+00:00",
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0]["ticker"] == "KXQUAL1"
+    assert result.accepted[0]["qual_prob"] == 0.98
+    assert {row["reason"] for row in result.discarded} == {
+        "confidence below 0.55",
+        "ticker not in provided set",
+        "no valid citation_urls",
+    }
+
+
+def test_qual_model_malformed_retry_then_unavailable():
+    calls = []
+
+    def invoker(command, prompt, timeout_seconds):
+        calls.append(prompt)
+        return True, "not json", ""
+
+    result = qual_research_core.run_qual_model(
+        command="/fake/codex exec",
+        news_items=[{"url": "https://example.com/a", "title": "Yankees", "summary": "news"}],
+        markets=[{"ticker": "KXQUAL1", "title": "Yankees win"}],
+        timeout_seconds=1,
+        invoker=invoker,
+    )
+
+    assert len(calls) == 2
+    assert result["status"] == "unavailable"
+    assert result["reason"].startswith("malformed-json-after-retry")
+
+
+def test_qual_model_cli_failure_is_unavailable():
+    def invoker(command, prompt, timeout_seconds):
+        return False, "", "command not found"
+
+    result = qual_research_core.run_qual_model(
+        command="/missing/codex exec",
+        news_items=[{"url": "https://example.com/a", "title": "Yankees", "summary": "news"}],
+        markets=[{"ticker": "KXQUAL1", "title": "Yankees win"}],
+        timeout_seconds=1,
+        invoker=invoker,
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "command not found"
 
 
 def _broad_execution_artifacts(now, learning, *, validated):
@@ -935,6 +1117,71 @@ def test_settlement_audit_records_paper_outcome_and_clv(tmp_path, monkeypatch):
     assert (tmp_path / "TEST-GAME.settlement_audit.json").exists()
 
 
+def test_qual_signal_source_persists_through_order_and_settlement_without_fake_clv(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    store = research.ResearchStore(settings.research_db_path)
+    audit = __import__("nbabot.audit", fromlist=["AuditTrail"]).AuditTrail(tmp_path, store)
+    intent = _intent(
+        ticker="KXQUALSETTLED",
+        price_cents=40,
+        bid_cents=38,
+        ask_cents=40,
+        market_prob=0.40,
+        model_prob=0.60,
+        sgp_adjusted_prob=0.60,
+        signal_source="qual",
+        market_family="mlb moneyline",
+    )
+    decision = risk.evaluate_trade_intent(intent, settings)
+    receipt = execution.execute_paper(intent, decision, settings, store, audit)
+    ranker_payload = {
+        "game_id": settings.game_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "rows": [
+            {
+                "ticker": "KXQUALSETTLED",
+                "signal_source": "qual",
+                "model_prob": 0.60,
+                "consensus": {"fair_prob": None, "book_count": 0, "sources": []},
+            }
+        ],
+    }
+    settings.data_path("candidate_ranker.json").write_text(json.dumps(ranker_payload))
+
+    class DummyKalshi:
+        def market(self, ticker):
+            return {
+                "ticker": ticker,
+                "status": "settled",
+                "result": "yes",
+                "settled_at": "2026-07-06T12:00:00+00:00",
+            }
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    monkeypatch.setattr(settlement_audit, "deliver", lambda *args, **kwargs: None)
+
+    result = settlement_audit.run(DummyContext())
+    order_rows = store.latest_rows("paper_orders", 1)
+    settlements = store.latest_rows("settlement_records", 1)
+
+    assert receipt.status == "filled"
+    assert json.loads(order_rows[0]["intent_json"])["signal_source"] == "qual"
+    assert order_rows[0]["signal_source"] == "qual"
+    assert result["records"][0]["signal_source"] == "qual"
+    assert result["records"][0]["closing_consensus_prob"] is None
+    assert result["records"][0]["clv_cents"] is None
+    assert settlements[0]["signal_source"] == "qual"
+
+
 def test_performance_learner_does_not_validate_small_lucky_sample():
     records = [
         _settlement_fixture(
@@ -986,6 +1233,27 @@ def test_performance_learner_validates_family_after_thresholds():
     assert row["market_type_verdict"] == "validated"
 
 
+def test_performance_learner_separates_qual_from_consensus_families():
+    consensus_rows = [
+        _settlement_fixture(i, outcome=1, model_prob=0.70, market_prob=0.50)
+        for i in range(2)
+    ]
+    qual_rows = [
+        {
+            **_settlement_fixture(100 + i, outcome=0, model_prob=0.40, market_prob=0.50),
+            "signal_source": "qual",
+        }
+        for i in range(2)
+    ]
+
+    payload = performance_learner.learn(consensus_rows + qual_rows)
+
+    assert "mlb moneyline" in payload["families"]
+    assert "qual mlb moneyline" in payload["families"]
+    assert payload["families"]["mlb moneyline"]["settled_count"] == 2
+    assert payload["families"]["qual mlb moneyline"]["settled_count"] == 2
+
+
 def test_broad_slate_daily_limit_ramps_with_validated_family_count(tmp_path):
     empty_store = research.ResearchStore(tmp_path / "empty.sqlite")
     empty_learning = performance_learner.learn_from_store(empty_store)
@@ -1034,6 +1302,51 @@ def test_unvalidated_broad_slate_paper_demo_risk_allows_bootstrap(tmp_path, mode
         check.name == "paper_demo_broad_slate_daily_trade_cap" and check.passed
         for check in decision.checks
     )
+
+
+def test_qual_daily_cap_blocks_at_configured_limit(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    intent = _intent(
+        signal_source="qual",
+        edge=0.08,
+        model_prob=0.58,
+        market_prob=0.50,
+        sgp_adjusted_prob=0.58,
+    )
+
+    decision = risk.evaluate_trade_intent(
+        intent,
+        settings,
+        risk.RiskContext(
+            qual_daily_trade_count=10,
+            qual_daily_trade_cap=10,
+            paper_demo_daily_trade_cap=50,
+        ),
+    )
+
+    assert not decision.approved
+    assert any("qual daily trade cap 10 reached" in reason for reason in decision.reasons)
+
+
+def test_live_execution_hard_blocks_qual_intents_even_when_gated(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "live"
+    settings.dry_run = False
+    settings.live_trading_ack = live_execute.LIVE_ACK
+    store = research.ResearchStore(settings.research_db_path)
+    audit = __import__("nbabot.audit", fromlist=["AuditTrail"]).AuditTrail(tmp_path, store)
+    intent = _intent(signal_source="qual", edge=0.10, model_prob=0.60)
+    decision = risk.evaluate_trade_intent(intent, settings)
+
+    class DummyKalshi:
+        def place_order(self, body):
+            raise AssertionError("qual live placement must not be called")
+
+    assert not decision.approved
+    assert "qual-sourced intents are hard-blocked in live mode" in decision.reasons
+    with pytest.raises(RuntimeError, match="qual-sourced intents"):
+        execution.execute_live(intent, decision, settings, store, audit, DummyKalshi())
 
 
 def test_performance_learner_suggests_shrink_only_overrides():
@@ -2652,6 +2965,153 @@ def test_candidate_ranker_demo_floor_passes_marginal_edge_while_live_is_unchange
     assert unchanged_live["rows"][0] == live_row
 
 
+def _qual_ranker_fixture(now: str):
+    slate_payload = {
+        "generated_at": now,
+        "candidates": [
+            {
+                "candidate_id": "kalshi:KXQUAL-NYY",
+                "sport": "mlb",
+                "structured_sources": ["kalshi"],
+                "kalshi_markets": [
+                    {
+                        "ticker": "KXQUAL-NYY",
+                        "title": "New York Yankees to win?",
+                        "bid": 48,
+                        "ask": 50,
+                        "implied": 0.49,
+                        "captured_at": now,
+                    }
+                ],
+            }
+        ],
+    }
+    market_matches = {
+        "generated_at": now,
+        "rows": [
+            {
+                "ticker": "KXQUAL-NYY",
+                "candidate_id": "kalshi:KXQUAL-NYY",
+                "sport": "mlb",
+                "title": "New York Yankees to win?",
+                "kalshi_quote": {"bid": 48, "ask": 50, "mid": 49, "implied": 0.49, "spread_cents": 2},
+                "orderbook": {
+                    "yes": {
+                        "best_bid_cents": 48,
+                        "best_ask_cents": 50,
+                        "spread_cents": 2,
+                        "fillable_contracts": 10,
+                        "vwap_cents": 50,
+                        "captured_at": now,
+                    }
+                },
+            }
+        ],
+    }
+    return slate_payload, market_matches
+
+
+def test_candidate_ranker_qual_prices_unconsensused_demo_rows_at_higher_floor(tmp_path):
+    now_dt = datetime(2026, 7, 7, 18, 0, tzinfo=timezone.utc)
+    now = now_dt.isoformat()
+    slate_payload, market_matches = _qual_ranker_fixture(now)
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+    result = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        qual_signals={
+            "KXQUAL-NYY": {
+                "ticker": "KXQUAL-NYY",
+                "qual_prob": 0.57,
+                "confidence": 0.70,
+                "rationale": "Lineup and bullpen notes support the Yankees.",
+                "citation_urls": ["https://example.com/yankees-lineup"],
+                "created_at": now,
+                "model_run_id": "qual-run",
+            }
+        },
+    )
+    row = result["rows"][0]
+
+    assert row["signal_source"] == "qual"
+    assert row["model_prob"] == pytest.approx(0.57)
+    assert row["edge"] == pytest.approx(0.07)
+    assert row["required_edge"] == pytest.approx(0.065)
+    assert row["passes_edge"] is True
+    assert row["trade_eligible"] is True
+    assert row["sgp_adjusted_prob"] == pytest.approx(0.57)
+
+    blocked = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        qual_signals={
+            "KXQUAL-NYY": {
+                "ticker": "KXQUAL-NYY",
+                "qual_prob": 0.55,
+                "confidence": 0.70,
+                "rationale": "Not enough edge.",
+                "citation_urls": ["https://example.com/yankees-lineup"],
+                "created_at": now,
+                "model_run_id": "qual-run",
+            }
+        },
+    )
+
+    assert blocked["rows"][0]["signal_source"] == "qual"
+    assert blocked["rows"][0]["passes_edge"] is False
+    assert "edge below dynamic required edge" in blocked["rows"][0]["blockers"]
+
+
+def test_candidate_ranker_logs_qual_delta_but_keeps_consensus_source(tmp_path):
+    now_dt = datetime(2026, 7, 7, 19, 0, tzinfo=timezone.utc)
+    now = now_dt.isoformat()
+    slate_payload, market_matches = _ranker_fixture(now)
+
+    def fixed_consensus(_rows, target_name=None):
+        return {
+            "fair_prob": 0.58,
+            "book_count": 6,
+            "sources": ["pinnacle", "circa", "draftkings"],
+            "disagreement_std": 0.0,
+        }
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = _ExecSettings(tmp_path)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(candidate_ranker_core, "consensus_prob", fixed_consensus)
+        result = candidate_ranker_core.build_candidate_rankings(
+            DummyContext(),
+            slate_payload,
+            market_matches,
+            now=now_dt,
+            qual_signals={
+                "KXEDGE": {
+                    "ticker": "KXEDGE",
+                    "qual_prob": 0.62,
+                    "confidence": 0.8,
+                    "citation_urls": ["https://example.com/a"],
+                }
+            },
+        )
+
+    row = result["rows"][0]
+    assert row["signal_source"] == "consensus"
+    assert row["model_prob"] == pytest.approx(0.58)
+    assert row["qual_vs_consensus_delta"] == pytest.approx(0.04)
+
+
 def test_candidate_ranker_records_closest_rejected_identity_for_unmatched_rows(tmp_path):
     now = datetime.now(timezone.utc).isoformat()
     candidate = {
@@ -3758,12 +4218,14 @@ def test_daily_cycle_skips_paper_execution_by_default(tmp_path, monkeypatch):
 
     monkeypatch.setattr(portfolio_sync, "run", step("portfolio-sync"))
     monkeypatch.setattr(source_check, "run", step("source-check"))
+    monkeypatch.setattr(news_ingest, "run", step("news-ingest"))
     monkeypatch.setattr(slate_discovery, "run", step("slate-discovery"))
     monkeypatch.setattr(slate_verify, "run", step("slate-verify"))
     monkeypatch.setattr(discover_markets, "run", step("discover-markets"))
     monkeypatch.setattr(snapshot_market, "run", step("snapshot-market"))
     monkeypatch.setattr(book_watch, "run", step("book-watch"))
     monkeypatch.setattr(market_matcher, "run", step("market-matcher"))
+    monkeypatch.setattr(qual_research_agent, "run", step("qual-research"))
     monkeypatch.setattr(candidate_ranker, "run", step("candidate-ranker"))
     monkeypatch.setattr(research_agent, "run", step("research-agent"))
     monkeypatch.setattr(status, "run", step("status"))
@@ -3773,6 +4235,7 @@ def test_daily_cycle_skips_paper_execution_by_default(tmp_path, monkeypatch):
 
     assert calls == [
         "source-check",
+        "news-ingest",
         "slate-discovery",
         "slate-verify",
         "portfolio-sync",
@@ -3780,6 +4243,7 @@ def test_daily_cycle_skips_paper_execution_by_default(tmp_path, monkeypatch):
         "snapshot-market",
         "book-watch",
         "market-matcher",
+        "qual-research",
         "candidate-ranker",
         "research-agent",
         "status",
@@ -3788,10 +4252,12 @@ def test_daily_cycle_skips_paper_execution_by_default(tmp_path, monkeypatch):
         step["name"] == "execution" and step["status"] == "skipped"
         for step in result["steps"]
     )
-    assert result["steps"][0]["activates"] == ["slate-discovery"]
+    assert result["steps"][0]["activates"] == ["news-ingest"]
     assert result["steps"][1]["activated_by"] == "source-check"
+    assert result["steps"][2]["activated_by"] == "news-ingest"
     assert {"from": "book-watch", "to": "market-matcher", "status": "ok"} in result["activation_edges"]
-    assert {"from": "market-matcher", "to": "candidate-ranker", "status": "ok"} in result["activation_edges"]
+    assert {"from": "market-matcher", "to": "qual-research", "status": "ok"} in result["activation_edges"]
+    assert {"from": "qual-research", "to": "candidate-ranker", "status": "ok"} in result["activation_edges"]
     assert {"from": "candidate-ranker", "to": "research-agent", "status": "ok"} in result["activation_edges"]
     assert {"from": "research-agent", "to": "execution", "status": "skipped"} in result["activation_edges"]
     assert (tmp_path / "TEST-GAME.daily_cycle.json").exists()

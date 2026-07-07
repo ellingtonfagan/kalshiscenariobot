@@ -14,6 +14,7 @@ MIN_RESEARCH_OVERRIDE_REASON_CHARS = 80
 MIN_RESEARCH_OVERRIDE_SOURCES = 2
 BROAD_SLATE_TRADES_PER_VALIDATED_FAMILY = 2
 DEFAULT_PAPER_DEMO_DAILY_TRADE_CAP = 50
+DEFAULT_QUAL_DAILY_TRADE_CAP = 10
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,8 @@ class RiskContext:
     broad_slate_daily_trade_limit: int | None = None
     paper_demo_broad_slate_trade_count: int = 0
     paper_demo_daily_trade_cap: int | None = None
+    qual_daily_trade_count: int = 0
+    qual_daily_trade_cap: int | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +143,7 @@ def evaluate_trade_intent(intent: Any, settings: Any,
     execution_mode = str(getattr(settings, "execution_mode", "paper") or "paper").lower()
     live_mode = execution_mode == "live"
     paper_demo_mode = execution_mode in {"paper", "demo"}
+    signal_source = str(getattr(intent, "signal_source", "consensus") or "consensus")
 
     kill_switch = Path(settings.kill_switch_path)
     checks.append(RiskCheck(
@@ -214,6 +218,19 @@ def evaluate_trade_intent(intent: Any, settings: Any,
         "tradable_mapping",
         bool(ticker),
         f"ticker {ticker} mapped" if ticker else "missing tradable Kalshi ticker",
+    ))
+
+    qual_live_ok = not (live_mode and signal_source == "qual")
+    checks.append(RiskCheck(
+        "qual_live_block",
+        qual_live_ok,
+        (
+            "qual-sourced intents are hard-blocked in live mode"
+            if not qual_live_ok else
+            "qual live block not applicable"
+            if signal_source == "qual" else
+            "not a qual-sourced intent"
+        ),
     ))
 
     broad_slate = bool(getattr(intent, "broad_slate", False))
@@ -293,12 +310,45 @@ def evaluate_trade_intent(intent: Any, settings: Any,
             ),
         ))
 
+    if signal_source == "qual" and paper_demo_mode:
+        configured_qual_cap = (
+            context.qual_daily_trade_cap
+            if context.qual_daily_trade_cap is not None
+            else getattr(settings, "qual_daily_trade_cap", DEFAULT_QUAL_DAILY_TRADE_CAP)
+        )
+        qual_cap = max(int(configured_qual_cap), 0)
+        qual_trades = max(int(context.qual_daily_trade_count or 0), 0)
+        qual_cap_ok = qual_trades < qual_cap
+        checks.append(RiskCheck(
+            "qual_daily_trade_cap",
+            qual_cap_ok,
+            (
+                f"qual daily trades {qual_trades + 1} <= cap {qual_cap}"
+                if qual_cap_ok else
+                f"qual daily trade cap {qual_cap} reached; order {qual_trades + 1} blocked"
+            ),
+        ))
+    else:
+        checks.append(RiskCheck(
+            "qual_daily_trade_cap",
+            True,
+            (
+                "qual daily cap applies only in paper/demo mode"
+                if signal_source == "qual" else
+                "not a qual-sourced intent"
+            ),
+        ))
+
     edge = getattr(intent, "edge", None)
-    min_edge = float(getattr(
-        settings,
-        "execution_min_edge",
-        getattr(settings, "min_edge", 0.05),
-    ))
+    min_edge = (
+        float(getattr(settings, "qual_min_edge", 0.06))
+        if signal_source == "qual" else
+        float(getattr(
+            settings,
+            "execution_min_edge",
+            getattr(settings, "min_edge", 0.05),
+        ))
+    )
     edge_ok = edge is not None and float(edge) >= min_edge
     if override_requested:
         checks.append(RiskCheck(

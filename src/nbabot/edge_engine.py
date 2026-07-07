@@ -134,6 +134,8 @@ def evaluate_market(
     *,
     base_min_edge: float,
     now: datetime | None = None,
+    require_consensus: bool = True,
+    require_exact_match: bool = True,
 ) -> EdgeCandidate:
     model_prob = consensus.get("fair_prob")
     price_prob = executable.price_prob
@@ -142,7 +144,7 @@ def evaluate_market(
     required = required_edge(
         float(base_min_edge),
         float(disagreement) if disagreement is not None else None,
-        book_count,
+        book_count if require_consensus else 4,
         executable.spread_cents,
     )
     edge = (
@@ -152,11 +154,11 @@ def evaluate_market(
     )
     blockers = []
     match_type = str(identity_match.get("match_type") or "none")
-    if match_type != "exact":
+    if require_exact_match and match_type != "exact":
         blockers.append("identity match is not exact")
     if model_prob is None:
         blockers.append("model probability unavailable from sportsbook consensus")
-    if book_count < 2:
+    if require_consensus and book_count < 2:
         blockers.append("insufficient sportsbook consensus")
     if executable.price_cents is None:
         blockers.append("missing executable Kalshi price")

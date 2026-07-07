@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict, is_dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
@@ -177,6 +177,7 @@ class ResearchStore:
                     client_order_id TEXT PRIMARY KEY,
                     game_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    signal_source TEXT NOT NULL DEFAULT 'consensus',
                     intent_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS risk_decisions (
@@ -190,6 +191,7 @@ class ResearchStore:
                     client_order_id TEXT PRIMARY KEY,
                     game_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    signal_source TEXT NOT NULL DEFAULT 'consensus',
                     intent_json TEXT NOT NULL,
                     decision_json TEXT NOT NULL,
                     request_json TEXT NOT NULL,
@@ -199,6 +201,7 @@ class ResearchStore:
                     client_order_id TEXT PRIMARY KEY,
                     game_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    signal_source TEXT NOT NULL DEFAULT 'consensus',
                     intent_json TEXT NOT NULL,
                     decision_json TEXT NOT NULL,
                     request_json TEXT NOT NULL,
@@ -208,6 +211,7 @@ class ResearchStore:
                     client_order_id TEXT PRIMARY KEY,
                     game_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    signal_source TEXT NOT NULL DEFAULT 'consensus',
                     intent_json TEXT NOT NULL,
                     decision_json TEXT NOT NULL,
                     request_json TEXT NOT NULL,
@@ -242,6 +246,7 @@ class ResearchStore:
                     clv_cents REAL,
                     beat_closing_consensus INTEGER,
                     brier_entry_model REAL,
+                    signal_source TEXT NOT NULL DEFAULT 'consensus',
                     market_json TEXT NOT NULL,
                     consensus_json TEXT NOT NULL,
                     record_json TEXT NOT NULL
@@ -300,10 +305,44 @@ class ResearchStore:
                     error TEXT NOT NULL,
                     event_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS news_items (
+                    id TEXT PRIMARY KEY,
+                    team TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    title TEXT,
+                    body TEXT,
+                    url TEXT,
+                    published_at TEXT,
+                    fetched_at TEXT NOT NULL,
+                    content_hash TEXT NOT NULL UNIQUE
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_news_items_url
+                    ON news_items(url) WHERE url IS NOT NULL AND url != '';
+                CREATE INDEX IF NOT EXISTS idx_news_items_team_published
+                    ON news_items(team, published_at DESC);
+                CREATE TABLE IF NOT EXISTS qual_signals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    qual_prob REAL NOT NULL,
+                    confidence REAL NOT NULL,
+                    rationale TEXT,
+                    citations_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    model_run_id TEXT NOT NULL,
+                    signal_source TEXT NOT NULL DEFAULT 'qual',
+                    UNIQUE(ticker, model_run_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_qual_signals_ticker_time
+                    ON qual_signals(ticker, created_at DESC);
                 """
             )
             self._ensure_column(db, "orderbook_snapshots", "no_bids_json", "TEXT")
             self._ensure_column(db, "orderbook_snapshots", "metrics_json", "TEXT")
+            self._ensure_column(db, "trade_intents", "signal_source", "TEXT NOT NULL DEFAULT 'consensus'")
+            self._ensure_column(db, "paper_orders", "signal_source", "TEXT NOT NULL DEFAULT 'consensus'")
+            self._ensure_column(db, "demo_orders", "signal_source", "TEXT NOT NULL DEFAULT 'consensus'")
+            self._ensure_column(db, "live_orders", "signal_source", "TEXT NOT NULL DEFAULT 'consensus'")
+            self._ensure_column(db, "settlement_records", "signal_source", "TEXT NOT NULL DEFAULT 'consensus'")
 
     @staticmethod
     def _ensure_column(db: sqlite3.Connection, table: str, column: str,
@@ -491,19 +530,146 @@ class ResearchStore:
                 ],
             )
 
+    def record_news_items(self, rows: Iterable[dict[str, Any]]) -> int:
+        self.init_schema()
+        rows = list(rows)
+        if not rows:
+            return 0
+        with self.connect() as db:
+            cur = db.executemany(
+                """
+                INSERT OR IGNORE INTO news_items(
+                    id, team, source, title, body, url, published_at, fetched_at,
+                    content_hash
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r["id"],
+                        r["team"],
+                        r["source"],
+                        r.get("title"),
+                        r.get("body"),
+                        r.get("url"),
+                        r.get("published_at"),
+                        r.get("fetched_at") or utc_now(),
+                        r["content_hash"],
+                    )
+                    for r in rows
+                ],
+            )
+        return cur.rowcount if cur.rowcount is not None else 0
+
+    def recent_news_items(
+        self,
+        teams: Iterable[str],
+        *,
+        window_hours: float = 48,
+    ) -> list[dict[str, Any]]:
+        self.init_schema()
+        team_list = [str(team) for team in teams if str(team)]
+        if not team_list:
+            return []
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=float(window_hours))).isoformat()
+        placeholders = ",".join("?" for _ in team_list)
+        with self.connect() as db:
+            rows = db.execute(
+                f"""
+                SELECT *
+                FROM news_items
+                WHERE team IN ({placeholders})
+                  AND (published_at IS NULL OR published_at >= ?)
+                ORDER BY published_at DESC, fetched_at DESC
+                """,
+                (*team_list, cutoff),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_qual_signals(self, rows: Iterable[dict[str, Any]]) -> int:
+        self.init_schema()
+        rows = list(rows)
+        if not rows:
+            return 0
+        with self.connect() as db:
+            cur = db.executemany(
+                """
+                INSERT OR IGNORE INTO qual_signals(
+                    ticker, qual_prob, confidence, rationale, citations_json,
+                    created_at, model_run_id, signal_source
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r["ticker"],
+                        r["qual_prob"],
+                        r["confidence"],
+                        r.get("rationale"),
+                        to_json(r.get("citation_urls") or r.get("citations") or []),
+                        r.get("created_at") or utc_now(),
+                        r["model_run_id"],
+                        str(r.get("signal_source") or "qual"),
+                    )
+                    for r in rows
+                ],
+            )
+        return cur.rowcount if cur.rowcount is not None else 0
+
+    def latest_qual_signals(
+        self,
+        *,
+        max_age_hours: float = 12,
+        tickers: Iterable[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        self.init_schema()
+        ticker_list = [str(ticker) for ticker in (tickers or []) if str(ticker)]
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=float(max_age_hours))).isoformat()
+        where = "created_at >= ?"
+        params: list[Any] = [cutoff]
+        if ticker_list:
+            placeholders = ",".join("?" for _ in ticker_list)
+            where += f" AND ticker IN ({placeholders})"
+            params.extend(ticker_list)
+        with self.connect() as db:
+            rows = db.execute(
+                f"""
+                SELECT *
+                FROM qual_signals
+                WHERE {where}
+                ORDER BY created_at DESC, confidence DESC
+                """,
+                tuple(params),
+            ).fetchall()
+        latest: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            ticker = row["ticker"]
+            if ticker in latest:
+                continue
+            item = dict(row)
+            try:
+                item["citation_urls"] = json.loads(item.pop("citations_json") or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item["citation_urls"] = []
+            latest[ticker] = item
+        return latest
+
     def record_order(self, table: str, game_id: str, intent: Any, decision: Any,
                      request: Any, receipt: Any) -> bool:
         if table not in ORDER_TABLES:
             raise ValueError(f"unsupported order table: {table}")
         self.init_schema()
         client_order_id = getattr(request, "client_order_id")
+        signal_source = str(getattr(intent, "signal_source", "consensus") or "consensus")
         with self.connect() as db:
             db.execute(
                 """
-                INSERT OR IGNORE INTO trade_intents(client_order_id, game_id, created_at, intent_json)
-                VALUES (?, ?, ?, ?)
+                INSERT OR IGNORE INTO trade_intents(
+                    client_order_id, game_id, created_at, signal_source, intent_json
+                )
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (client_order_id, game_id, utc_now(), to_json(intent)),
+                (client_order_id, game_id, utc_now(), signal_source, to_json(intent)),
             )
             db.execute(
                 """
@@ -520,13 +686,13 @@ class ResearchStore:
             cur = db.execute(
                 f"""
                 INSERT OR IGNORE INTO {table}(
-                    client_order_id, game_id, created_at, intent_json, decision_json,
-                    request_json, receipt_json
+                    client_order_id, game_id, created_at, signal_source, intent_json,
+                    decision_json, request_json, receipt_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    client_order_id, game_id, utc_now(), to_json(intent),
+                    client_order_id, game_id, utc_now(), signal_source, to_json(intent),
                     to_json(decision), to_json(request), to_json(receipt),
                 ),
             )
@@ -568,7 +734,7 @@ class ResearchStore:
                 mode = table.removesuffix("_orders")
                 for row in db.execute(
                     f"""
-                    SELECT client_order_id, game_id, created_at, intent_json,
+                    SELECT client_order_id, game_id, created_at, signal_source, intent_json,
                            decision_json, request_json, receipt_json
                     FROM {table}
                     ORDER BY created_at ASC
@@ -604,9 +770,9 @@ class ResearchStore:
                     winning_side, outcome, payout_cents, pnl_cents,
                     entry_model_prob, entry_market_prob, closing_consensus_prob,
                     closing_consensus_cents, clv_cents, beat_closing_consensus,
-                    brier_entry_model, market_json, consensus_json, record_json
+                    brier_entry_model, signal_source, market_json, consensus_json, record_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record["client_order_id"], record["game_id"], record["mode"],
@@ -623,6 +789,7 @@ class ResearchStore:
                         else int(bool(record.get("beat_closing_consensus")))
                     ),
                     record.get("brier_entry_model"),
+                    str(record.get("signal_source") or "consensus"),
                     to_json(record.get("market", {})),
                     to_json(record.get("closing_consensus", {})),
                     to_json(record),
@@ -718,6 +885,7 @@ class ResearchStore:
         *,
         timezone_name: str = DEFAULT_RISK_TIMEZONE,
         broad_slate_only: bool = False,
+        signal_source: str | None = None,
     ) -> float:
         selected = self._order_tables(tables)
         target_day, tz = self._risk_day(calendar_day, timezone_name)
@@ -726,7 +894,7 @@ class ResearchStore:
         with self.connect() as db:
             for table in selected:
                 rows = db.execute(
-                    f"SELECT created_at, intent_json FROM {table}",
+                    f"SELECT created_at, signal_source, intent_json FROM {table}",
                 ).fetchall()
                 for row in rows:
                     if not self._created_on_day(row["created_at"], target_day, tz):
@@ -736,6 +904,10 @@ class ResearchStore:
                     except (json.JSONDecodeError, TypeError):
                         continue
                     if broad_slate_only and not bool(intent.get("broad_slate")):
+                        continue
+                    if signal_source is not None and str(
+                        intent.get("signal_source") or row["signal_source"] or "consensus"
+                    ) != signal_source:
                         continue
                     try:
                         exposure += float(intent.get("stake_units", 0.0) or 0.0)
@@ -750,6 +922,7 @@ class ResearchStore:
         *,
         timezone_name: str = DEFAULT_RISK_TIMEZONE,
         broad_slate_only: bool = False,
+        signal_source: str | None = None,
     ) -> int:
         selected = self._order_tables(tables)
         target_day, tz = self._risk_day(calendar_day, timezone_name)
@@ -758,17 +931,21 @@ class ResearchStore:
         with self.connect() as db:
             for table in selected:
                 rows = db.execute(
-                    f"SELECT created_at, intent_json FROM {table}",
+                    f"SELECT created_at, signal_source, intent_json FROM {table}",
                 ).fetchall()
                 for row in rows:
                     if not self._created_on_day(row["created_at"], target_day, tz):
                         continue
-                    if broad_slate_only:
+                    if broad_slate_only or signal_source is not None:
                         try:
                             intent = json.loads(row["intent_json"])
                         except (json.JSONDecodeError, TypeError):
                             continue
-                        if not bool(intent.get("broad_slate")):
+                        if broad_slate_only and not bool(intent.get("broad_slate")):
+                            continue
+                        if signal_source is not None and str(
+                            intent.get("signal_source") or row["signal_source"] or "consensus"
+                        ) != signal_source:
                             continue
                     count += 1
         return count
@@ -876,7 +1053,7 @@ class ResearchStore:
             "market_snapshots", "edge_history", "backtest_runs", "paper_orders",
             "demo_orders", "live_orders", "risk_decisions", "risk_snapshots", "audit_events",
             "dead_letter_queue", "market_catalog", "orderbook_snapshots",
-            "settlement_records",
+            "settlement_records", "news_items", "qual_signals",
         }
         if table not in allowed:
             raise ValueError(f"unsupported table: {table}")
@@ -888,6 +1065,8 @@ class ResearchStore:
             "live_orders": "created_at",
             "risk_decisions": "created_at",
             "settlement_records": "audited_at",
+            "news_items": "fetched_at",
+            "qual_signals": "created_at",
         }.get(table, "id")
         with self.connect() as db:
             rows = db.execute(
@@ -895,3 +1074,71 @@ class ResearchStore:
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def signal_engine_summary(self) -> dict[str, dict[str, Any]]:
+        self.init_schema()
+        summary: dict[str, dict[str, Any]] = {
+            "consensus": {
+                "trades_placed": 0,
+                "settled": 0,
+                "brier": None,
+                "clv_available": 0,
+                "clv_beat_rate": None,
+            },
+            "qual": {
+                "trades_placed": 0,
+                "settled": 0,
+                "brier": None,
+                "clv_available": 0,
+                "clv_beat_rate": None,
+            },
+        }
+        with self.connect() as db:
+            for table in sorted(ORDER_TABLES):
+                for row in db.execute(f"SELECT signal_source, intent_json FROM {table}"):
+                    source = str(row["signal_source"] or "consensus")
+                    try:
+                        intent = json.loads(row["intent_json"])
+                        source = str(intent.get("signal_source") or source or "consensus")
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
+                    bucket = summary.setdefault(source, {
+                        "trades_placed": 0,
+                        "settled": 0,
+                        "brier": None,
+                        "clv_available": 0,
+                        "clv_beat_rate": None,
+                    })
+                    bucket["trades_placed"] += 1
+            settlements = db.execute(
+                """
+                SELECT signal_source, brier_entry_model, clv_cents, beat_closing_consensus
+                FROM settlement_records
+                """
+            ).fetchall()
+        brier_values: dict[str, list[float]] = {}
+        clv_hits: dict[str, list[int]] = {}
+        for row in settlements:
+            source = str(row["signal_source"] or "consensus")
+            bucket = summary.setdefault(source, {
+                "trades_placed": 0,
+                "settled": 0,
+                "brier": None,
+                "clv_available": 0,
+                "clv_beat_rate": None,
+            })
+            bucket["settled"] += 1
+            if row["brier_entry_model"] is not None:
+                try:
+                    brier_values.setdefault(source, []).append(float(row["brier_entry_model"]))
+                except (TypeError, ValueError):
+                    pass
+            if row["clv_cents"] is not None:
+                clv_hits.setdefault(source, []).append(1 if row["beat_closing_consensus"] else 0)
+        for source, values in brier_values.items():
+            if values:
+                summary[source]["brier"] = round(sum(values) / len(values), 6)
+        for source, hits in clv_hits.items():
+            summary[source]["clv_available"] = len(hits)
+            summary[source]["clv_beat_rate"] = round(sum(hits) / len(hits), 4) if hits else None
+        return summary

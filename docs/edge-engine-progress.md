@@ -1295,3 +1295,65 @@ were changed, and no scheduler or cron work was added.
   `checked=1 settled=0 pending=1 skipped=0 clv_available=0`.
 - Live mode's 5 percent base edge floor, live gates, fuzzy-never-passes rule,
   and plausible-edge guard were not weakened. No live orders were placed.
+
+---
+
+## Round 17 - 2026-07-07 - Phase 13 qualitative research layer
+
+### What changed in code
+
+- Added `config/research_teams.yaml` for Yankees, Mets, and Tigers aliases, MLB.com
+  feeds, ESPN MLB RSS, and Reddit `.rss` sources.
+- Added `news-ingest` with RSS/Atom parsing, per-source fail-soft statuses, SQLite
+  `news_items`, URL/content-hash deduplication, a default 48h window, and a descriptive
+  `nbabot-research/0.1` user agent.
+- Added `qual-research` with local Codex CLI subprocess execution
+  (`NBABOT_QUAL_LLM_CMD`), strict JSON validation, one malformed-output retry,
+  citation/confidence/ticker filtering, probability clamping, SQLite `qual_signals`,
+  and fail-soft `status=unavailable` handling for missing CLI, quota, timeout, or
+  subprocess failure.
+- Candidate ranking now uses fresh qual signals only when sportsbook consensus is
+  unavailable. Consensus rows remain consensus-priced, with qual-vs-consensus deltas
+  recorded only for analysis.
+- Added `signal_source` end-to-end on intents, order ledgers, audit payloads,
+  settlement records, performance-learning family keys, status, and dashboard views.
+- Added `NBABOT_QUAL_MIN_EDGE=0.06`, `NBABOT_QUAL_SIGNAL_MAX_AGE_HOURS=12`, and
+  `NBABOT_QUAL_DAILY_TRADE_CAP=10`. Qual demo/paper rows count inside the existing
+  paper/demo daily cap and against the separate qual cap.
+- Live execution now hard-blocks `signal_source=qual` intents in both the live wrapper
+  and low-level `execute_live`, independent of other live gates.
+- Settlement audit grades qual rows by outcome/Brier and leaves CLV null when no
+  closing sportsbook consensus exists instead of fabricating a baseline.
+- Scheduled demo reports now include news counts, qual engine status, accepted signals,
+  and qual-sourced demo order count.
+
+### Tests
+
+- Added fixture coverage for RSS/Atom parsing, deduplication, old-item filtering, and
+  per-source fail-soft behavior.
+- Added qual validation coverage for malformed retry, CLI failure, clamping, missing
+  citations, low confidence, and hallucinated tickers.
+- Added trading coverage for qual edge passing/blocking under the higher floor, qual
+  live hard-block, source persistence through order/settlement, qual daily cap, and
+  performance-family separation.
+- Full suite: `120 passed in 1.22s`.
+
+### Real behavior check
+
+- Real `news-ingest` in `/tmp/nbabot-phase13-real-ufT76M` inserted `56` items from
+  `57` parsed recent rows. Per-source highlights: Yankees MLB RSS `14`, Yankees ESPN
+  `1`, Yankees Reddit RSS `25`; Mets MLB RSS `10`; Tigers MLB RSS `6`. Reddit team and
+  `/r/baseball` RSS sources that returned `429` were recorded as soft source failures.
+- Real explicit `qual-research` pass used the local Codex CLI successfully:
+  `36` unpriced team markets, `56` news items, `11` produced entries, `6` accepted
+  signals after validation. Accepted sample included
+  `KXMLBGAME-26JUL071840NYYTB-NYY` at `0.48` probability and `0.63` confidence.
+- Real scheduled demo cycle in the same isolated temp data dir ran end-to-end with
+  `NBABOT_EXECUTION_MODE=demo`, `NBABOT_DRY_RUN=1`, and empty live ack vars. It placed
+  no paper, demo, or live orders: `candidates=200`, `edges_found=0`,
+  `trade_eligible=0`, `demo_orders=0`, `qual_orders=0`.
+- Nearest qual miss from that cycle was `KXMLBTOTAL-26JUL071840NYYTB-9`: qual
+  probability `0.44`, executable price `44c`, edge `0.000`, required edge `0.0625`;
+  it was blocked for stale executable order-book data and edge below the dynamic
+  required edge.
+- No live execution env vars were set to live values and no live orders were placed.

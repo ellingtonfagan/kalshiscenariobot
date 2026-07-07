@@ -27,6 +27,16 @@ def _execution_min_edge(settings: object) -> float:
     return float(getattr(settings, "min_edge", 0.05))
 
 
+def _row_signal_source(row: dict, meta: dict) -> str:
+    return str(row.get("signal_source") or meta.get("signal_source") or "consensus")
+
+
+def _row_min_edge(settings: object, signal_source: str) -> float:
+    if signal_source == "qual":
+        return float(getattr(settings, "qual_min_edge", 0.06))
+    return _execution_min_edge(settings)
+
+
 def _candidate_is_broad_slate(row: dict, settings: object) -> bool:
     if "broad_slate" in row:
         return bool(row.get("broad_slate"))
@@ -59,6 +69,15 @@ def execution_limits(ctx: Context, store: ResearchStore, table: str) -> dict[str
             "paper_demo_daily_trade_cap",
             50,
         )),
+        "qual_daily_trade_count": store.daily_order_count(
+            ("paper_orders", "demo_orders"),
+            signal_source="qual",
+        ),
+        "qual_daily_trade_cap": int(getattr(
+            ctx.settings,
+            "qual_daily_trade_cap",
+            10,
+        )),
     }
 
 
@@ -88,7 +107,8 @@ def _intent_from_row(
     )
     edge = float(row.get("edge")) if row.get("edge") is not None else float(prior) - float(implied)
     research_override = bool(row.get("research_override", False))
-    min_edge = _execution_min_edge(ctx.settings)
+    signal_source = _row_signal_source(row, meta)
+    min_edge = _row_min_edge(ctx.settings, signal_source)
     if edge < min_edge and not research_override:
         return None
     if research_override:
@@ -165,6 +185,7 @@ def _intent_from_row(
         validated=validated,
         market_type_verdict=str(meta.get("market_type_verdict", "")),
         broad_slate=_candidate_is_broad_slate(meta, ctx.settings),
+        signal_source=signal_source,
     )
 
 
@@ -252,6 +273,8 @@ def run(ctx: Context | None = None) -> dict:
     broad_slate_limit = int(limits["broad_slate_daily_trade_limit"])
     paper_demo_broad_slate_count = int(limits["paper_demo_broad_slate_trade_count"])
     paper_demo_daily_cap = int(limits["paper_demo_daily_trade_cap"])
+    qual_daily_trade_count = int(limits["qual_daily_trade_count"])
+    qual_daily_trade_cap = int(limits["qual_daily_trade_cap"])
     receipts = []
     for intent in intents:
         decision = evaluate_trade_intent(
@@ -264,6 +287,8 @@ def run(ctx: Context | None = None) -> dict:
                 broad_slate_daily_trade_limit=broad_slate_limit,
                 paper_demo_broad_slate_trade_count=paper_demo_broad_slate_count,
                 paper_demo_daily_trade_cap=paper_demo_daily_cap,
+                qual_daily_trade_count=qual_daily_trade_count,
+                qual_daily_trade_cap=qual_daily_trade_cap,
             ),
         )
         receipt = execute_paper(intent, decision, ctx.settings, store, audit)
@@ -274,6 +299,8 @@ def run(ctx: Context | None = None) -> dict:
             if intent.broad_slate:
                 broad_slate_count += 1
                 paper_demo_broad_slate_count += 1
+            if intent.signal_source == "qual":
+                qual_daily_trade_count += 1
         if (
             game_exposure >= ctx.settings.max_game_exposure_units
             or portfolio_exposure >= float(getattr(

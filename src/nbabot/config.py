@@ -52,11 +52,19 @@ class Settings:
     kalshi_demo_api_key: str
     kalshi_demo_private_key_path: Path
     paper_demo_daily_trade_cap: int
+    qual_daily_trade_cap: int
     max_daily_loss_units: float
     max_daily_exposure_units: float
     max_game_exposure_units: float
     min_edge: float
     demo_min_edge: float
+    qual_min_edge: float
+    qual_signal_max_age_hours: float
+    qual_llm_cmd: str
+    qual_llm_timeout_seconds: int
+    research_teams_path: Path
+    news_window_hours: float
+    news_user_agent: str
     max_plausible_edge: float
     stale_market_seconds: int
     max_spread_cents: int
@@ -138,6 +146,12 @@ def load_settings(game_id: str | None = None) -> Settings:
     if not kill_switch_path.is_absolute():
         kill_switch_path = (REPO_ROOT / kill_switch_path).resolve()
 
+    research_teams_path = Path(
+        os.environ.get("NBABOT_RESEARCH_TEAMS", CONFIG_DIR / "research_teams.yaml")
+    )
+    if not research_teams_path.is_absolute():
+        research_teams_path = (REPO_ROOT / research_teams_path).resolve()
+
     return Settings(
         kalshi_api_key=os.environ.get("KALSHI_API_KEY", ""),
         kalshi_private_key_path=pk_path,
@@ -164,6 +178,7 @@ def load_settings(game_id: str | None = None) -> Settings:
         kalshi_demo_api_key=os.environ.get("KALSHI_DEMO_API_KEY", ""),
         kalshi_demo_private_key_path=demo_pk_path,
         paper_demo_daily_trade_cap=int(os.environ.get("NBABOT_PAPER_DEMO_DAILY_TRADE_CAP", "50")),
+        qual_daily_trade_cap=int(os.environ.get("NBABOT_QUAL_DAILY_TRADE_CAP", "10")),
         max_daily_loss_units=float(os.environ.get("NBABOT_MAX_DAILY_LOSS_UNITS", "2")),
         max_daily_exposure_units=float(
             os.environ.get("NBABOT_MAX_DAILY_EXPOSURE_UNITS", str(MAX_STAKE_UNITS))
@@ -173,6 +188,16 @@ def load_settings(game_id: str | None = None) -> Settings:
         ),
         min_edge=float(os.environ.get("NBABOT_MIN_EDGE", "0.05")),
         demo_min_edge=float(os.environ.get("NBABOT_DEMO_MIN_EDGE", "0.03")),
+        qual_min_edge=float(os.environ.get("NBABOT_QUAL_MIN_EDGE", "0.06")),
+        qual_signal_max_age_hours=float(os.environ.get("NBABOT_QUAL_SIGNAL_MAX_AGE_HOURS", "12")),
+        qual_llm_cmd=os.environ.get(
+            "NBABOT_QUAL_LLM_CMD",
+            "~/.codex/plugins/.plugin-appserver/codex exec",
+        ),
+        qual_llm_timeout_seconds=int(os.environ.get("NBABOT_QUAL_LLM_TIMEOUT_SECONDS", "600")),
+        research_teams_path=research_teams_path,
+        news_window_hours=float(os.environ.get("NBABOT_NEWS_WINDOW_HOURS", "48")),
+        news_user_agent=os.environ.get("NBABOT_NEWS_USER_AGENT", "nbabot-research/0.1"),
         max_plausible_edge=float(os.environ.get("NBABOT_MAX_PLAUSIBLE_EDGE", "0.15")),
         stale_market_seconds=int(os.environ.get("NBABOT_STALE_MARKET_SECONDS", "90")),
         max_spread_cents=int(os.environ.get("NBABOT_MAX_SPREAD_CENTS", "10")),

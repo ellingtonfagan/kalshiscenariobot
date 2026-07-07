@@ -44,6 +44,7 @@ class TradeIntent:
     validated: bool = False
     market_type_verdict: str = ""
     broad_slate: bool = False
+    signal_source: str = "consensus"
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,7 @@ def client_order_id(intent: TradeIntent, mode: str) -> str:
         "side": intent.side,
         "contracts": intent.contracts,
         "price_cents": intent.price_cents,
+        "signal_source": intent.signal_source,
     }, sort_keys=True)
     return "nbabot-" + hashlib.sha256(raw.encode()).hexdigest()[:24]
 
@@ -146,7 +148,7 @@ def execute_paper(intent: TradeIntent, decision: RiskDecision, settings: Any,
     if not decision.approved:
         receipt = OrderReceipt(request.client_order_id, "paper", "rejected",
                                {"reasons": decision.reasons})
-        audit.log("PAPER_REJECTED", asdict(receipt), intent.game_id)
+        audit.log("PAPER_REJECTED", {"signal_source": intent.signal_source, **asdict(receipt)}, intent.game_id)
         return receipt
 
     _audit_research_override(intent, audit)
@@ -168,7 +170,7 @@ def execute_paper(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "request": asdict(request),
             "receipt": asdict(receipt),
         })
-    audit.log("PAPER_ORDER", {"inserted": inserted, **asdict(receipt)}, intent.game_id)
+    audit.log("PAPER_ORDER", {"signal_source": intent.signal_source, "inserted": inserted, **asdict(receipt)}, intent.game_id)
     return receipt
 
 
@@ -180,7 +182,7 @@ def execute_demo(intent: TradeIntent, decision: RiskDecision, settings: Any,
     if not decision.approved:
         receipt = OrderReceipt(request.client_order_id, "demo", "rejected",
                                {"reasons": decision.reasons})
-        audit.log("DEMO_REJECTED", asdict(receipt), intent.game_id)
+        audit.log("DEMO_REJECTED", {"signal_source": intent.signal_source, **asdict(receipt)}, intent.game_id)
         return receipt
     credential_check = getattr(kalshi, "demo_credentials_configured", None)
     if callable(credential_check) and not credential_check():
@@ -190,7 +192,7 @@ def execute_demo(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "rejected",
             {"reasons": [DEMO_CREDENTIALS_BLOCKED_REASON]},
         )
-        audit.log("DEMO_REJECTED", asdict(receipt), intent.game_id)
+        audit.log("DEMO_REJECTED", {"signal_source": intent.signal_source, **asdict(receipt)}, intent.game_id)
         return receipt
 
     _audit_research_override(intent, audit)
@@ -210,7 +212,7 @@ def execute_demo(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "request": asdict(request),
             "receipt": asdict(receipt),
         })
-    audit.log("DEMO_ORDER", {"inserted": inserted, **asdict(receipt)}, intent.game_id)
+    audit.log("DEMO_ORDER", {"signal_source": intent.signal_source, "inserted": inserted, **asdict(receipt)}, intent.game_id)
     return receipt
 
 
@@ -218,6 +220,8 @@ def execute_live(intent: TradeIntent, decision: RiskDecision, settings: Any,
                  store: ResearchStore, audit: AuditTrail, kalshi: Any) -> OrderReceipt:
     if settings.execution_mode != "live":
         raise RuntimeError("live execution requires NBABOT_EXECUTION_MODE=live")
+    if str(getattr(intent, "signal_source", "consensus") or "consensus") == "qual":
+        raise RuntimeError("live execution blocks qual-sourced intents")
     if getattr(settings, "dry_run", True):
         raise RuntimeError("live execution requires NBABOT_DRY_RUN=0")
     if getattr(settings, "live_trading_ack", "") != "LIVE_TRADES_REAL_MONEY":
@@ -233,17 +237,16 @@ def execute_live(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "live execution requires "
             "NBABOT_BROAD_SLATE_EXECUTION=BROAD_SLATE_TRADES_REAL_MONEY"
         )
-
     request = build_order_request(intent, "live")
     if store.order_exists("live_orders", request.client_order_id):
         receipt = OrderReceipt(request.client_order_id, "live", "duplicate",
                                {"reason": "client_order_id already recorded"})
-        audit.log("LIVE_DUPLICATE", asdict(receipt), intent.game_id)
+        audit.log("LIVE_DUPLICATE", {"signal_source": intent.signal_source, **asdict(receipt)}, intent.game_id)
         return receipt
     if not decision.approved:
         receipt = OrderReceipt(request.client_order_id, "live", "rejected",
                                {"reasons": decision.reasons})
-        audit.log("LIVE_REJECTED", asdict(receipt), intent.game_id)
+        audit.log("LIVE_REJECTED", {"signal_source": intent.signal_source, **asdict(receipt)}, intent.game_id)
         return receipt
 
     _audit_research_override(intent, audit)
@@ -263,5 +266,5 @@ def execute_live(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "request": asdict(request),
             "receipt": asdict(receipt),
         })
-    audit.log("LIVE_ORDER", {"inserted": inserted, **asdict(receipt)}, intent.game_id)
+    audit.log("LIVE_ORDER", {"signal_source": intent.signal_source, "inserted": inserted, **asdict(receipt)}, intent.game_id)
     return receipt
