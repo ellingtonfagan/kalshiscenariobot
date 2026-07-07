@@ -1,0 +1,26 @@
+# Combined crontab for nba-scenario-bot: 4 daily demo cycles + 5-min news-watch.
+# This is the ONE file to install (crontab <file> replaces the whole table, so
+# installing demo-crontab.txt and news-watch-crontab.txt separately would clobber
+# each other — use this merged file instead).
+#
+# Install:
+#   crontab /Users/ellingtonfagan/Downloads/nba-scenario-bot/scheduler/combined-crontab.txt
+# Verify:
+#   crontab -l
+# Keep the Mac awake while unattended:
+#   caffeinate -s
+#
+# Demo cycles run at 11:15, 16:10, 18:40, 23:35 ET (slate formation, line movement,
+# pre-primetime, West Coast + settlement audit). News-watch runs every 5 minutes
+# 10:00-23:55 ET and fires an immediate demo cycle on breaking injury/lineup news
+# (debounced 45 min/team, max 8 triggered cycles/day). Everything is demo mode only;
+# no live gates are ever set here.
+CRON_TZ=America/New_York
+REPO=/Users/ellingtonfagan/Downloads/nba-scenario-bot
+ENTRYPOINT=$REPO/scheduler/run-demo-cycle.sh
+LOG_DIR=$REPO/logs
+15 11 * * * mkdir -p $LOG_DIR && $ENTRYPOINT >> $LOG_DIR/demo-cycle-$(date +\%Y\%m\%dT\%H\%M\%S)-1115.log 2>&1
+10 16 * * * mkdir -p $LOG_DIR && $ENTRYPOINT >> $LOG_DIR/demo-cycle-$(date +\%Y\%m\%dT\%H\%M\%S)-1610.log 2>&1
+40 18 * * * mkdir -p $LOG_DIR && $ENTRYPOINT >> $LOG_DIR/demo-cycle-$(date +\%Y\%m\%dT\%H\%M\%S)-1840.log 2>&1
+35 23 * * * mkdir -p $LOG_DIR && $ENTRYPOINT >> $LOG_DIR/demo-cycle-$(date +\%Y\%m\%dT\%H\%M\%S)-2335.log 2>&1
+*/5 10-23 * * * mkdir -p $LOG_DIR && cd $REPO && NBABOT_EXECUTION_MODE=demo .venv/bin/ksobot news-watch >> $LOG_DIR/news-watch-$(date +\%Y\%m\%dT\%H\%M\%S).log 2>&1
