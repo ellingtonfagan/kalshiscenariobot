@@ -16,6 +16,7 @@ from . import (  # noqa: F401
     lock,
     market_matcher,
     news_ingest,
+    news_watch,
     paper,
     ports,
     portfolio_sync,
@@ -50,6 +51,7 @@ PHASES = {
     "live": heartbeat.run,      # alias so a plain crontab can drive the live loop
     "market-matcher": market_matcher.run,
     "news-ingest": news_ingest.run,
+    "news-watch": news_watch.run,
     "paper": paper.run,
     "ports": ports.run,
     "portfolio-sync": portfolio_sync.run,

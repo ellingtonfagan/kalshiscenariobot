@@ -45,6 +45,8 @@ class TradeIntent:
     market_type_verdict: str = ""
     broad_slate: bool = False
     signal_source: str = "consensus"
+    confluence_verdict: str = "none"
+    confluence: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -148,7 +150,15 @@ def execute_paper(intent: TradeIntent, decision: RiskDecision, settings: Any,
     if not decision.approved:
         receipt = OrderReceipt(request.client_order_id, "paper", "rejected",
                                {"reasons": decision.reasons})
-        audit.log("PAPER_REJECTED", {"signal_source": intent.signal_source, **asdict(receipt)}, intent.game_id)
+        audit.log(
+            "PAPER_REJECTED",
+            {
+                "signal_source": intent.signal_source,
+                "confluence_verdict": intent.confluence_verdict,
+                **asdict(receipt),
+            },
+            intent.game_id,
+        )
         return receipt
 
     _audit_research_override(intent, audit)
@@ -170,7 +180,16 @@ def execute_paper(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "request": asdict(request),
             "receipt": asdict(receipt),
         })
-    audit.log("PAPER_ORDER", {"signal_source": intent.signal_source, "inserted": inserted, **asdict(receipt)}, intent.game_id)
+    audit.log(
+        "PAPER_ORDER",
+        {
+            "signal_source": intent.signal_source,
+            "confluence_verdict": intent.confluence_verdict,
+            "inserted": inserted,
+            **asdict(receipt),
+        },
+        intent.game_id,
+    )
     return receipt
 
 
@@ -182,7 +201,15 @@ def execute_demo(intent: TradeIntent, decision: RiskDecision, settings: Any,
     if not decision.approved:
         receipt = OrderReceipt(request.client_order_id, "demo", "rejected",
                                {"reasons": decision.reasons})
-        audit.log("DEMO_REJECTED", {"signal_source": intent.signal_source, **asdict(receipt)}, intent.game_id)
+        audit.log(
+            "DEMO_REJECTED",
+            {
+                "signal_source": intent.signal_source,
+                "confluence_verdict": intent.confluence_verdict,
+                **asdict(receipt),
+            },
+            intent.game_id,
+        )
         return receipt
     credential_check = getattr(kalshi, "demo_credentials_configured", None)
     if callable(credential_check) and not credential_check():
@@ -192,7 +219,15 @@ def execute_demo(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "rejected",
             {"reasons": [DEMO_CREDENTIALS_BLOCKED_REASON]},
         )
-        audit.log("DEMO_REJECTED", {"signal_source": intent.signal_source, **asdict(receipt)}, intent.game_id)
+        audit.log(
+            "DEMO_REJECTED",
+            {
+                "signal_source": intent.signal_source,
+                "confluence_verdict": intent.confluence_verdict,
+                **asdict(receipt),
+            },
+            intent.game_id,
+        )
         return receipt
 
     _audit_research_override(intent, audit)
@@ -212,7 +247,16 @@ def execute_demo(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "request": asdict(request),
             "receipt": asdict(receipt),
         })
-    audit.log("DEMO_ORDER", {"signal_source": intent.signal_source, "inserted": inserted, **asdict(receipt)}, intent.game_id)
+    audit.log(
+        "DEMO_ORDER",
+        {
+            "signal_source": intent.signal_source,
+            "confluence_verdict": intent.confluence_verdict,
+            "inserted": inserted,
+            **asdict(receipt),
+        },
+        intent.game_id,
+    )
     return receipt
 
 
@@ -241,12 +285,28 @@ def execute_live(intent: TradeIntent, decision: RiskDecision, settings: Any,
     if store.order_exists("live_orders", request.client_order_id):
         receipt = OrderReceipt(request.client_order_id, "live", "duplicate",
                                {"reason": "client_order_id already recorded"})
-        audit.log("LIVE_DUPLICATE", {"signal_source": intent.signal_source, **asdict(receipt)}, intent.game_id)
+        audit.log(
+            "LIVE_DUPLICATE",
+            {
+                "signal_source": intent.signal_source,
+                "confluence_verdict": intent.confluence_verdict,
+                **asdict(receipt),
+            },
+            intent.game_id,
+        )
         return receipt
     if not decision.approved:
         receipt = OrderReceipt(request.client_order_id, "live", "rejected",
                                {"reasons": decision.reasons})
-        audit.log("LIVE_REJECTED", {"signal_source": intent.signal_source, **asdict(receipt)}, intent.game_id)
+        audit.log(
+            "LIVE_REJECTED",
+            {
+                "signal_source": intent.signal_source,
+                "confluence_verdict": intent.confluence_verdict,
+                **asdict(receipt),
+            },
+            intent.game_id,
+        )
         return receipt
 
     _audit_research_override(intent, audit)
@@ -266,5 +326,14 @@ def execute_live(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "request": asdict(request),
             "receipt": asdict(receipt),
         })
-    audit.log("LIVE_ORDER", {"signal_source": intent.signal_source, "inserted": inserted, **asdict(receipt)}, intent.game_id)
+    audit.log(
+        "LIVE_ORDER",
+        {
+            "signal_source": intent.signal_source,
+            "confluence_verdict": intent.confluence_verdict,
+            "inserted": inserted,
+            **asdict(receipt),
+        },
+        intent.game_id,
+    )
     return receipt

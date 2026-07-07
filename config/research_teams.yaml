@@ -1,3 +1,17 @@
+news_watch:
+  high_impact_patterns:
+    - scratched
+    - injury
+    - injured
+    - IL
+    - suspended
+    - out for
+    - doubtful
+    - questionable
+    - postponed
+    - rain delay
+    - lineup change
+
 teams:
   yankees:
     canonical_name: New York Yankees

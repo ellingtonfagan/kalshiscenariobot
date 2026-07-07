@@ -186,10 +186,18 @@ def market_family(row: dict[str, Any], default_sport: str | None = None) -> str:
     """Return a deterministic broad-slate family key such as ``mlb moneyline``."""
     payloads = _payloads(row)
     signal_source = _token(_first(payloads, "signal_source", "intent.signal_source")) or "consensus"
+    confluence_verdict = (
+        _token(_first(payloads, "confluence_verdict", "intent.confluence_verdict"))
+        or "none"
+    )
     explicit = _first(payloads, "market_family", "performance_family")
     if explicit:
         family = _family_text(explicit) or "unknown unknown"
-        return family if signal_source == "consensus" else f"{signal_source} {family}"
+        if signal_source != "consensus":
+            return f"{signal_source} {family}"
+        if confluence_verdict == "agree":
+            return f"confluence_agree {family}"
+        return family
 
     series = _series_from_payloads(payloads)
     if _is_composite(payloads, series):
@@ -231,7 +239,11 @@ def market_family(row: dict[str, Any], default_sport: str | None = None) -> str:
         family = "composite"
     else:
         family = f"{sport} {market_type}"
-    return family if signal_source == "consensus" else f"{signal_source} {family}"
+    if signal_source != "consensus":
+        return f"{signal_source} {family}"
+    if confluence_verdict == "agree":
+        return f"confluence_agree {family}"
+    return family
 
 
 def _confidence(settled_n: int, min_validated_n: int) -> str:

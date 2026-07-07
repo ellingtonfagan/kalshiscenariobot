@@ -178,6 +178,7 @@ class ResearchStore:
                     game_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     signal_source TEXT NOT NULL DEFAULT 'consensus',
+                    confluence_verdict TEXT NOT NULL DEFAULT 'none',
                     intent_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS risk_decisions (
@@ -192,6 +193,7 @@ class ResearchStore:
                     game_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     signal_source TEXT NOT NULL DEFAULT 'consensus',
+                    confluence_verdict TEXT NOT NULL DEFAULT 'none',
                     intent_json TEXT NOT NULL,
                     decision_json TEXT NOT NULL,
                     request_json TEXT NOT NULL,
@@ -202,6 +204,7 @@ class ResearchStore:
                     game_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     signal_source TEXT NOT NULL DEFAULT 'consensus',
+                    confluence_verdict TEXT NOT NULL DEFAULT 'none',
                     intent_json TEXT NOT NULL,
                     decision_json TEXT NOT NULL,
                     request_json TEXT NOT NULL,
@@ -212,6 +215,7 @@ class ResearchStore:
                     game_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     signal_source TEXT NOT NULL DEFAULT 'consensus',
+                    confluence_verdict TEXT NOT NULL DEFAULT 'none',
                     intent_json TEXT NOT NULL,
                     decision_json TEXT NOT NULL,
                     request_json TEXT NOT NULL,
@@ -247,6 +251,7 @@ class ResearchStore:
                     beat_closing_consensus INTEGER,
                     brier_entry_model REAL,
                     signal_source TEXT NOT NULL DEFAULT 'consensus',
+                    confluence_verdict TEXT NOT NULL DEFAULT 'none',
                     market_json TEXT NOT NULL,
                     consensus_json TEXT NOT NULL,
                     record_json TEXT NOT NULL
@@ -334,6 +339,48 @@ class ResearchStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_qual_signals_ticker_time
                     ON qual_signals(ticker, created_at DESC);
+                CREATE TABLE IF NOT EXISTS confluence_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    candidate_id TEXT,
+                    created_at TEXT NOT NULL,
+                    consensus_fair_prob REAL,
+                    qual_prob REAL,
+                    qual_confidence REAL,
+                    delta REAL,
+                    verdict TEXT NOT NULL,
+                    record_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_confluence_records_game_time
+                    ON confluence_records(game_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS shadow_trade_intents (
+                    client_order_id TEXT PRIMARY KEY,
+                    game_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    signal_source TEXT NOT NULL DEFAULT 'consensus',
+                    confluence_verdict TEXT NOT NULL DEFAULT 'none',
+                    ticker TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    contracts REAL NOT NULL,
+                    price_cents REAL NOT NULL,
+                    stake_units REAL NOT NULL,
+                    edge REAL,
+                    reason TEXT NOT NULL,
+                    intent_json TEXT NOT NULL,
+                    record_json TEXT NOT NULL,
+                    audited_at TEXT,
+                    settled_at TEXT,
+                    market_status TEXT,
+                    winning_side TEXT,
+                    outcome INTEGER,
+                    pnl_cents REAL,
+                    market_json TEXT,
+                    settlement_json TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_shadow_trade_intents_game_time
+                    ON shadow_trade_intents(game_id, created_at DESC);
                 """
             )
             self._ensure_column(db, "orderbook_snapshots", "no_bids_json", "TEXT")
@@ -343,6 +390,11 @@ class ResearchStore:
             self._ensure_column(db, "demo_orders", "signal_source", "TEXT NOT NULL DEFAULT 'consensus'")
             self._ensure_column(db, "live_orders", "signal_source", "TEXT NOT NULL DEFAULT 'consensus'")
             self._ensure_column(db, "settlement_records", "signal_source", "TEXT NOT NULL DEFAULT 'consensus'")
+            self._ensure_column(db, "trade_intents", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
+            self._ensure_column(db, "paper_orders", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
+            self._ensure_column(db, "demo_orders", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
+            self._ensure_column(db, "live_orders", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
+            self._ensure_column(db, "settlement_records", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
 
     @staticmethod
     def _ensure_column(db: sqlite3.Connection, table: str, column: str,
@@ -561,6 +613,23 @@ class ResearchStore:
             )
         return cur.rowcount if cur.rowcount is not None else 0
 
+    def existing_news_content_hashes(self, hashes: Iterable[str]) -> set[str]:
+        self.init_schema()
+        values = [str(value) for value in hashes if str(value)]
+        if not values:
+            return set()
+        placeholders = ",".join("?" for _ in values)
+        with self.connect() as db:
+            rows = db.execute(
+                f"""
+                SELECT content_hash
+                FROM news_items
+                WHERE content_hash IN ({placeholders})
+                """,
+                tuple(values),
+            ).fetchall()
+        return {str(row["content_hash"]) for row in rows}
+
     def recent_news_items(
         self,
         teams: Iterable[str],
@@ -661,15 +730,20 @@ class ResearchStore:
         self.init_schema()
         client_order_id = getattr(request, "client_order_id")
         signal_source = str(getattr(intent, "signal_source", "consensus") or "consensus")
+        confluence_verdict = str(getattr(intent, "confluence_verdict", "none") or "none")
         with self.connect() as db:
             db.execute(
                 """
                 INSERT OR IGNORE INTO trade_intents(
-                    client_order_id, game_id, created_at, signal_source, intent_json
+                    client_order_id, game_id, created_at, signal_source,
+                    confluence_verdict, intent_json
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (client_order_id, game_id, utc_now(), signal_source, to_json(intent)),
+                (
+                    client_order_id, game_id, utc_now(), signal_source,
+                    confluence_verdict, to_json(intent),
+                ),
             )
             db.execute(
                 """
@@ -686,14 +760,151 @@ class ResearchStore:
             cur = db.execute(
                 f"""
                 INSERT OR IGNORE INTO {table}(
-                    client_order_id, game_id, created_at, signal_source, intent_json,
-                    decision_json, request_json, receipt_json
+                    client_order_id, game_id, created_at, signal_source,
+                    confluence_verdict, intent_json, decision_json, request_json,
+                    receipt_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    client_order_id, game_id, utc_now(), signal_source, to_json(intent),
-                    to_json(decision), to_json(request), to_json(receipt),
+                    client_order_id, game_id, utc_now(), signal_source,
+                    confluence_verdict, to_json(intent), to_json(decision),
+                    to_json(request), to_json(receipt),
+                ),
+            )
+        return cur.rowcount == 1
+
+    def record_confluence_records(self, game_id: str, rows: Iterable[dict[str, Any]]) -> int:
+        self.init_schema()
+        records = [
+            row for row in rows
+            if isinstance(row, dict) and row.get("ticker") and isinstance(row.get("confluence"), dict)
+            and row["confluence"].get("consensus_fair_prob") is not None
+            and row["confluence"].get("qual_prob") is not None
+        ]
+        if not records:
+            return 0
+        with self.connect() as db:
+            cur = db.executemany(
+                """
+                INSERT INTO confluence_records(
+                    game_id, ticker, candidate_id, created_at, consensus_fair_prob,
+                    qual_prob, qual_confidence, delta, verdict, record_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        game_id,
+                        str(row.get("ticker")),
+                        row.get("candidate_id"),
+                        utc_now(),
+                        row["confluence"].get("consensus_fair_prob"),
+                        row["confluence"].get("qual_prob"),
+                        row["confluence"].get("qual_confidence"),
+                        row["confluence"].get("delta"),
+                        str(row.get("confluence_verdict") or row["confluence"].get("verdict") or "none"),
+                        to_json(row["confluence"]),
+                    )
+                    for row in records
+                ],
+            )
+        return cur.rowcount if cur.rowcount is not None else 0
+
+    def record_shadow_intent(
+        self,
+        *,
+        game_id: str,
+        mode: str,
+        client_order_id: str,
+        intent: Any,
+        reason: str,
+    ) -> bool:
+        self.init_schema()
+        signal_source = str(getattr(intent, "signal_source", "consensus") or "consensus")
+        confluence_verdict = str(getattr(intent, "confluence_verdict", "none") or "none")
+        record = {
+            "client_order_id": client_order_id,
+            "game_id": game_id,
+            "mode": mode,
+            "signal_source": signal_source,
+            "confluence_verdict": confluence_verdict,
+            "ticker": getattr(intent, "ticker", None),
+            "side": getattr(intent, "side", None),
+            "contracts": getattr(intent, "contracts", None),
+            "price_cents": getattr(intent, "price_cents", None),
+            "stake_units": getattr(intent, "stake_units", None),
+            "edge": getattr(intent, "edge", None),
+            "reason": reason,
+            "intent": intent,
+        }
+        with self.connect() as db:
+            cur = db.execute(
+                """
+                INSERT OR IGNORE INTO shadow_trade_intents(
+                    client_order_id, game_id, created_at, mode, signal_source,
+                    confluence_verdict, ticker, side, contracts, price_cents,
+                    stake_units, edge, reason, intent_json, record_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    client_order_id,
+                    game_id,
+                    utc_now(),
+                    mode,
+                    signal_source,
+                    confluence_verdict,
+                    str(getattr(intent, "ticker") or ""),
+                    str(getattr(intent, "side") or "yes"),
+                    float(getattr(intent, "contracts", 0) or 0),
+                    float(getattr(intent, "price_cents", 0) or 0),
+                    float(getattr(intent, "stake_units", 0) or 0),
+                    getattr(intent, "edge", None),
+                    reason,
+                    to_json(intent),
+                    to_json(record),
+                ),
+            )
+        return cur.rowcount == 1
+
+    def list_shadow_intents(self, unsettled_only: bool = True) -> list[dict[str, Any]]:
+        self.init_schema()
+        query = "SELECT * FROM shadow_trade_intents"
+        if unsettled_only:
+            query += " WHERE outcome IS NULL"
+        query += " ORDER BY created_at ASC"
+        with self.connect() as db:
+            rows = db.execute(query).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_shadow_settlement(self, record: dict[str, Any]) -> bool:
+        self.init_schema()
+        with self.connect() as db:
+            cur = db.execute(
+                """
+                UPDATE shadow_trade_intents
+                SET audited_at = ?,
+                    settled_at = ?,
+                    market_status = ?,
+                    winning_side = ?,
+                    outcome = ?,
+                    pnl_cents = ?,
+                    market_json = ?,
+                    settlement_json = ?
+                WHERE client_order_id = ?
+                  AND outcome IS NULL
+                """,
+                (
+                    record.get("audited_at") or utc_now(),
+                    record.get("settled_at"),
+                    record.get("market_status"),
+                    record.get("winning_side"),
+                    record.get("outcome"),
+                    record.get("pnl_cents"),
+                    to_json(record.get("market", {})),
+                    to_json(record),
+                    record["client_order_id"],
                 ),
             )
         return cur.rowcount == 1
@@ -734,8 +945,9 @@ class ResearchStore:
                 mode = table.removesuffix("_orders")
                 for row in db.execute(
                     f"""
-                    SELECT client_order_id, game_id, created_at, signal_source, intent_json,
-                           decision_json, request_json, receipt_json
+                    SELECT client_order_id, game_id, created_at, signal_source,
+                           confluence_verdict, intent_json, decision_json,
+                           request_json, receipt_json
                     FROM {table}
                     ORDER BY created_at ASC
                     """
@@ -770,9 +982,10 @@ class ResearchStore:
                     winning_side, outcome, payout_cents, pnl_cents,
                     entry_model_prob, entry_market_prob, closing_consensus_prob,
                     closing_consensus_cents, clv_cents, beat_closing_consensus,
-                    brier_entry_model, signal_source, market_json, consensus_json, record_json
+                    brier_entry_model, signal_source, confluence_verdict,
+                    market_json, consensus_json, record_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record["client_order_id"], record["game_id"], record["mode"],
@@ -790,6 +1003,7 @@ class ResearchStore:
                     ),
                     record.get("brier_entry_model"),
                     str(record.get("signal_source") or "consensus"),
+                    str(record.get("confluence_verdict") or "none"),
                     to_json(record.get("market", {})),
                     to_json(record.get("closing_consensus", {})),
                     to_json(record),

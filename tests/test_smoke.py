@@ -24,6 +24,7 @@ from nbabot import (  # noqa: E402
     backtesting,
     calibration,
     candidate_ranker as candidate_ranker_core,
+    confluence,
     cli,
     edge_engine,
     execution,
@@ -37,6 +38,7 @@ from nbabot import (  # noqa: E402
     performance_learner,
     qual_research as qual_research_core,
     research_news,
+    news_watch as news_watch_core,
     research,
     risk,
     scenarios,
@@ -59,6 +61,7 @@ from nbabot.agents import (  # noqa: E402
     market_matcher,
     live_execute,
     news_ingest,
+    news_watch,
     paper,
     portfolio_sync,
     ports,
@@ -534,11 +537,16 @@ class _ExecSettings:
     min_edge = 0.05
     demo_min_edge = 0.03
     qual_min_edge = 0.06
+    confluence_agree_delta = 0.05
+    confluence_edge_bonus = 0.01
+    confluence_veto_delta = 0.08
     qual_signal_max_age_hours = 12
     qual_llm_cmd = "/missing/codex exec"
     qual_llm_timeout_seconds = 600
     news_window_hours = 48
     news_user_agent = "nbabot-test/0.1"
+    event_trigger_cooldown_minutes = 45
+    event_trigger_daily_cap = 8
     max_plausible_edge = 0.15
     stale_market_seconds = 90
     max_spread_cents = 10
@@ -743,6 +751,165 @@ def test_news_ingest_parses_dedups_and_fails_soft(tmp_path):
         "https://example.com/yankees-lineup",
         "https://reddit.example/yankees-bullpen",
     }
+
+
+def test_news_watch_keyword_matching_uses_word_boundaries():
+    assert news_watch_core.keyword_hits("Starter is out for the season", ["out for"])
+    assert news_watch_core.keyword_hits("Slugger placed on IL", ["IL"])
+    assert news_watch_core.keyword_hits("Lineup change announced", ["lineup change"])
+    assert not news_watch_core.keyword_hits("Outfield alignment changes", ["out"])
+
+
+def test_news_watch_debounce_and_daily_cap_logic():
+    now = datetime(2026, 7, 7, 18, 0, tzinfo=timezone.utc)
+    recent_history = [
+        {
+            "team": "yankees",
+            "decision": "fired",
+            "fired_at": (now - timedelta(minutes=10)).isoformat(),
+        }
+    ]
+    debounced = news_watch_core.trigger_decision(
+        "yankees",
+        history=recent_history,
+        now=now,
+        cooldown_minutes=45,
+        daily_cap=8,
+    )
+    assert debounced["decision"] == "debounced"
+
+    capped_history = [
+        {
+            "team": f"team-{idx}",
+            "decision": "fired",
+            "fired_at": (now - timedelta(minutes=idx)).isoformat(),
+        }
+        for idx in range(8)
+    ]
+    capped = news_watch_core.trigger_decision(
+        "mets",
+        history=capped_history,
+        now=now,
+        cooldown_minutes=45,
+        daily_cap=8,
+    )
+    assert capped["decision"] == "capped"
+
+
+def test_news_watch_no_hit_run_is_silent_and_does_not_cycle(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    settings.research_teams_path.write_text("""
+news_watch:
+  high_impact_patterns:
+    - scratched
+teams:
+  yankees:
+    canonical_name: New York Yankees
+    aliases: [Yankees]
+    rss_feeds:
+      - name: mlb_yankees
+        url: https://example.com/yankees/rss
+""")
+    artifacts = {}
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+        def read_json(self, suffix):
+            return artifacts.get(suffix)
+
+        def write_json(self, suffix, payload):
+            artifacts[suffix] = payload
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    rss = b"""<?xml version="1.0"?>
+<rss><channel>
+  <item>
+    <title>Yankees announce charity event</title>
+    <link>https://example.com/yankees-charity</link>
+    <description>No roster impact.</description>
+    <pubDate>Tue, 07 Jul 2026 17:45:00 GMT</pubDate>
+  </item>
+</channel></rss>"""
+
+    cycle_calls = []
+    messages = []
+    monkeypatch.setattr(news_watch, "fetch_url", lambda url, user_agent: (200, rss))
+    monkeypatch.setattr(news_watch.scheduled_demo_cycle, "run", lambda ctx: cycle_calls.append("cycle") or {})
+    monkeypatch.setattr(news_watch, "deliver", lambda text, to="stdout": messages.append((text, to)))
+
+    result = news_watch.run(DummyContext())
+
+    assert result["new_item_count"] == 1
+    assert result["hit_count"] == 0
+    assert result["triggered_count"] == 0
+    assert cycle_calls == []
+    assert messages == []
+    assert (tmp_path / "TEST-GAME.news_watch.json").exists()
+
+
+def test_news_watch_trigger_invokes_scheduled_demo_cycle_and_alerts(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    settings.deliver_to = "telegram:123"
+    settings.event_trigger_cooldown_minutes = 45
+    settings.event_trigger_daily_cap = 8
+    settings.research_teams_path.write_text("""
+news_watch:
+  high_impact_patterns:
+    - lineup change
+teams:
+  yankees:
+    canonical_name: New York Yankees
+    aliases: [Yankees]
+    rss_feeds:
+      - name: mlb_yankees
+        url: https://example.com/yankees/rss
+""")
+    artifacts = {}
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+        def read_json(self, suffix):
+            return artifacts.get(suffix)
+
+        def write_json(self, suffix, payload):
+            artifacts[suffix] = payload
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    rss = b"""<?xml version="1.0"?>
+<rss><channel>
+  <item>
+    <title>Yankees lineup change before first pitch</title>
+    <link>https://example.com/yankees-lineup-change</link>
+    <description>Confirmed lineup change for Yankees.</description>
+    <pubDate>Tue, 07 Jul 2026 17:45:00 GMT</pubDate>
+  </item>
+</channel></rss>"""
+
+    cycle_calls = []
+    messages = []
+    monkeypatch.setattr(news_watch, "fetch_url", lambda url, user_agent: (200, rss))
+    monkeypatch.setattr(
+        news_watch.scheduled_demo_cycle,
+        "run",
+        lambda ctx: cycle_calls.append(ctx.settings.execution_mode) or {"exit_code": 0},
+    )
+    monkeypatch.setattr(news_watch, "deliver", lambda text, to="stdout": messages.append((text, to)))
+
+    result = news_watch.run(DummyContext())
+
+    assert result["hit_count"] == 1
+    assert result["triggered_count"] == 1
+    assert result["trigger_decisions"][0]["decision"] == "fired"
+    assert cycle_calls == ["paper"]
+    assert messages == [("news trigger: New York Yankees — Yankees lineup change before first pitch", "telegram:123")]
 
 
 def test_qual_validation_clamps_and_discards_bad_entries():
@@ -1182,6 +1349,83 @@ def test_qual_signal_source_persists_through_order_and_settlement_without_fake_c
     assert settlements[0]["signal_source"] == "qual"
 
 
+def test_confluence_verdict_persists_through_order_audit_and_settlement(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    store = research.ResearchStore(settings.research_db_path)
+    audit = __import__("nbabot.audit", fromlist=["AuditTrail"]).AuditTrail(tmp_path, store)
+    intent = _intent(
+        ticker="KXCONFLUENCE",
+        price_cents=40,
+        bid_cents=38,
+        ask_cents=40,
+        market_prob=0.40,
+        model_prob=0.60,
+        sgp_adjusted_prob=0.60,
+        confluence_verdict="agree",
+        confluence={
+            "consensus_fair_prob": 0.60,
+            "qual_prob": 0.59,
+            "qual_confidence": 0.70,
+            "delta": -0.01,
+            "verdict": "agree",
+            "effective_base_min_edge": 0.02,
+        },
+        market_family="mlb moneyline",
+    )
+    decision = risk.evaluate_trade_intent(intent, settings)
+    receipt = execution.execute_paper(intent, decision, settings, store, audit)
+    settings.data_path("candidate_ranker.json").write_text(json.dumps({
+        "game_id": settings.game_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "rows": [
+            {
+                "ticker": "KXCONFLUENCE",
+                "confluence_verdict": "agree",
+                "consensus": {"fair_prob": 0.55, "book_count": 3, "sources": ["pinnacle"]},
+            }
+        ],
+    }))
+
+    class DummyKalshi:
+        def market(self, ticker):
+            return {
+                "ticker": ticker,
+                "status": "settled",
+                "result": "yes",
+                "settled_at": "2026-07-06T12:00:00+00:00",
+            }
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    monkeypatch.setattr(settlement_audit, "deliver", lambda *args, **kwargs: None)
+
+    result = settlement_audit.run(DummyContext())
+    order_rows = store.latest_rows("paper_orders", 1)
+    settlements = store.latest_rows("settlement_records", 1)
+    audit_rows = [
+        json.loads(line)
+        for line in (tmp_path / "audit.jsonl").read_text().splitlines()
+    ]
+
+    assert receipt.status == "filled"
+    assert order_rows[0]["confluence_verdict"] == "agree"
+    assert json.loads(order_rows[0]["intent_json"])["confluence_verdict"] == "agree"
+    assert result["records"][0]["confluence_verdict"] == "agree"
+    assert settlements[0]["confluence_verdict"] == "agree"
+    assert any(
+        row["type"] == "PAPER_ORDER" and row["confluence_verdict"] == "agree"
+        for row in audit_rows
+    )
+
+
 def test_performance_learner_does_not_validate_small_lucky_sample():
     records = [
         _settlement_fixture(
@@ -1252,6 +1496,27 @@ def test_performance_learner_separates_qual_from_consensus_families():
     assert "qual mlb moneyline" in payload["families"]
     assert payload["families"]["mlb moneyline"]["settled_count"] == 2
     assert payload["families"]["qual mlb moneyline"]["settled_count"] == 2
+
+
+def test_performance_learner_separates_confluence_boosted_consensus_families():
+    plain_rows = [
+        _settlement_fixture(i, outcome=1, model_prob=0.70, market_prob=0.50)
+        for i in range(2)
+    ]
+    confluence_rows = [
+        {
+            **_settlement_fixture(100 + i, outcome=1, model_prob=0.70, market_prob=0.50),
+            "confluence_verdict": "agree",
+        }
+        for i in range(2)
+    ]
+
+    payload = performance_learner.learn(plain_rows + confluence_rows)
+
+    assert "mlb moneyline" in payload["families"]
+    assert "confluence_agree mlb moneyline" in payload["families"]
+    assert payload["families"]["mlb moneyline"]["settled_count"] == 2
+    assert payload["families"]["confluence_agree mlb moneyline"]["settled_count"] == 2
 
 
 def test_broad_slate_daily_limit_ramps_with_validated_family_count(tmp_path):
@@ -3110,6 +3375,295 @@ def test_candidate_ranker_logs_qual_delta_but_keeps_consensus_source(tmp_path):
     assert row["signal_source"] == "consensus"
     assert row["model_prob"] == pytest.approx(0.58)
     assert row["qual_vs_consensus_delta"] == pytest.approx(0.04)
+
+
+def test_candidate_ranker_confluence_agreement_lowers_demo_required_base(tmp_path, monkeypatch):
+    now_dt = datetime(2026, 7, 7, 19, 0, tzinfo=timezone.utc)
+    now = now_dt.isoformat()
+    slate_payload, market_matches = _ranker_fixture(now)
+
+    def fixed_consensus(_rows, target_name=None):
+        return {
+            "fair_prob": 0.53,
+            "book_count": 6,
+            "sources": ["pinnacle", "circa", "draftkings"],
+            "disagreement_std": 0.0,
+        }
+
+    monkeypatch.setattr(candidate_ranker_core, "consensus_prob", fixed_consensus)
+
+    class DummyContext:
+        def __init__(self, settings):
+            self.settings = settings
+
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    agreed = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(settings),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        qual_signals={
+            "KXEDGE": {
+                "ticker": "KXEDGE",
+                "qual_prob": 0.525,
+                "confidence": 0.80,
+                "citation_urls": ["https://example.com/a"],
+            }
+        },
+    )
+    row = agreed["rows"][0]
+
+    assert row["signal_source"] == "consensus"
+    assert row["confluence_verdict"] == "agree"
+    assert row["confluence"]["edge_bonus"] == pytest.approx(0.01)
+    assert row["confluence"]["effective_base_min_edge"] == pytest.approx(0.02)
+    assert row["required_edge"] == pytest.approx(0.025)
+    assert row["passes_edge"] is True
+
+    neutral = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(settings),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        qual_signals={
+            "KXEDGE": {
+                "ticker": "KXEDGE",
+                "qual_prob": 0.60,
+                "confidence": 0.80,
+                "citation_urls": ["https://example.com/a"],
+            }
+        },
+    )
+    neutral_row = neutral["rows"][0]
+    assert neutral_row["confluence_verdict"] == "neutral"
+    assert neutral_row["required_edge"] == pytest.approx(0.035)
+    assert neutral_row["passes_edge"] is False
+
+    settings.demo_min_edge = 0.025
+    floored = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(settings),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        qual_signals={
+            "KXEDGE": {
+                "ticker": "KXEDGE",
+                "qual_prob": 0.525,
+                "confidence": 0.80,
+                "citation_urls": ["https://example.com/a"],
+            }
+        },
+    )
+    floor_row = floored["rows"][0]
+    assert floor_row["confluence"]["edge_bonus"] == pytest.approx(0.005)
+    assert floor_row["confluence"]["effective_base_min_edge"] == pytest.approx(0.02)
+    assert floor_row["required_edge"] == pytest.approx(0.025)
+
+
+def test_candidate_ranker_confluence_disagreement_vetoes_demo_and_records_shadow(tmp_path, monkeypatch):
+    now_dt = datetime(2026, 7, 7, 19, 0, tzinfo=timezone.utc)
+    now = now_dt.isoformat()
+    slate_payload, market_matches = _ranker_fixture(now)
+
+    def fixed_consensus(_rows, target_name=None):
+        return {
+            "fair_prob": 0.54,
+            "book_count": 6,
+            "sources": ["pinnacle", "circa", "draftkings"],
+            "disagreement_std": 0.0,
+        }
+
+    monkeypatch.setattr(candidate_ranker_core, "consensus_prob", fixed_consensus)
+
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    settings.unit_usd = 1.0
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+        def read_json(self, suffix):
+            return artifacts.get(suffix)
+
+    result = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        qual_signals={
+            "KXEDGE": {
+                "ticker": "KXEDGE",
+                "qual_prob": 0.45,
+                "confidence": 0.80,
+                "citation_urls": ["https://example.com/a"],
+            }
+        },
+    )
+    rank_row = result["rows"][0]
+
+    assert rank_row["edge"] == pytest.approx(0.04)
+    assert rank_row["required_edge"] == pytest.approx(0.035)
+    assert rank_row["passes_edge"] is False
+    assert rank_row["confluence_verdict"] == "disagree"
+    assert rank_row["confluence_shadow"] is True
+    assert confluence.VETO_REASON in rank_row["blockers"]
+
+    artifacts = {
+        "market_snapshot.json": {"generated_at": now, "rows": []},
+        "slate_candidates.json": {
+            "generated_at": now,
+            "candidates": [
+                {
+                    "candidate_id": "kalshi:KXEDGE",
+                    "sport": "soccer_world_cup",
+                    "structured_sources": ["kalshi", "the_odds_api"],
+                    "kalshi_markets": [
+                        {
+                            "ticker": "KXEDGE",
+                            "title": "Reg Time: Over 2.5 goals scored",
+                            "bid": 48,
+                            "ask": 50,
+                            "mid": 49,
+                            "implied": 0.50,
+                            "captured_at": now,
+                        }
+                    ],
+                }
+            ],
+        },
+        "slate_verification.json": {"verified_at": now, "rows": []},
+        "book_watch.json": {
+            "generated_at": now,
+            "snapshots": [
+                {
+                    "captured_at": now,
+                    "metrics": {
+                        "KXEDGE": {
+                            "yes": {
+                                "captured_at": now,
+                                "fillable_contracts": 10,
+                                "spread_cents": 2,
+                            }
+                        }
+                    },
+                }
+            ],
+        },
+        "market_matches.json": {
+            "generated_at": now,
+            "rows": [{"ticker": "KXEDGE", "captured_at": now, "freshness": {}}],
+        },
+        "candidate_ranker.json": {"generated_at": now, "rows": [rank_row]},
+    }
+    bundle = slate.research_bundle(
+        DummyContext(),
+        artifacts["slate_candidates.json"],
+        artifacts["slate_verification.json"],
+    )
+    artifacts["research_bundle.json"] = bundle
+    store = research.ResearchStore(settings.research_db_path)
+    audit = __import__("nbabot.audit", fromlist=["AuditTrail"]).AuditTrail(tmp_path, store)
+
+    inserted = paper.record_shadow_intents(DummyContext(), store, audit, mode="demo")
+    shadows = store.list_shadow_intents(unsettled_only=False)
+
+    assert inserted == 1
+    assert bundle["market_candidates"][0]["trade_eligible"] is False
+    assert bundle["market_candidates"][0]["confluence_shadow"] is True
+    assert shadows[0]["ticker"] == "KXEDGE"
+    assert shadows[0]["side"] == "yes"
+    assert shadows[0]["contracts"] == pytest.approx(1.0)
+    assert shadows[0]["price_cents"] == pytest.approx(50.0)
+    assert shadows[0]["stake_units"] == pytest.approx(0.5)
+    assert shadows[0]["edge"] == pytest.approx(0.04)
+    assert shadows[0]["reason"] == confluence.VETO_REASON
+    assert shadows[0]["confluence_verdict"] == "disagree"
+
+
+def test_candidate_ranker_confluence_does_not_apply_in_live_mode(tmp_path, monkeypatch):
+    now_dt = datetime(2026, 7, 7, 19, 0, tzinfo=timezone.utc)
+    now = now_dt.isoformat()
+    slate_payload, market_matches = _ranker_fixture(now)
+
+    def fixed_consensus(_rows, target_name=None):
+        return {
+            "fair_prob": 0.53,
+            "book_count": 6,
+            "sources": ["pinnacle", "circa", "draftkings"],
+            "disagreement_std": 0.0,
+        }
+
+    monkeypatch.setattr(candidate_ranker_core, "consensus_prob", fixed_consensus)
+
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "live"
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+    result = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        qual_signals={
+            "KXEDGE": {
+                "ticker": "KXEDGE",
+                "qual_prob": 0.525,
+                "confidence": 0.80,
+                "citation_urls": ["https://example.com/a"],
+            }
+        },
+    )
+    row = result["rows"][0]
+
+    assert row["confluence_verdict"] == "agree"
+    assert row["confluence"]["edge_bonus"] == 0.0
+    assert row["required_edge"] == pytest.approx(0.055)
+    assert row["passes_edge"] is False
+
+    boosted_live_intent = _intent(
+        edge=0.025,
+        model_prob=0.525,
+        market_prob=0.50,
+        sgp_adjusted_prob=0.525,
+        confluence_verdict="agree",
+        confluence={"effective_base_min_edge": 0.02},
+    )
+    decision = risk.evaluate_trade_intent(boosted_live_intent, settings)
+    assert not decision.approved
+    assert any("below min 0.050" in reason for reason in decision.reasons)
+
+    def disagree_consensus(_rows, target_name=None):
+        return {
+            "fair_prob": 0.54,
+            "book_count": 6,
+            "sources": ["pinnacle", "circa", "draftkings"],
+            "disagreement_std": 0.0,
+        }
+
+    monkeypatch.setattr(candidate_ranker_core, "consensus_prob", disagree_consensus)
+    veto_candidate = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        qual_signals={
+            "KXEDGE": {
+                "ticker": "KXEDGE",
+                "qual_prob": 0.45,
+                "confidence": 0.80,
+                "citation_urls": ["https://example.com/a"],
+            }
+        },
+    )["rows"][0]
+
+    assert veto_candidate["confluence_verdict"] == "disagree"
+    assert veto_candidate["confluence_shadow"] is False
+    assert confluence.VETO_REASON not in veto_candidate["blockers"]
 
 
 def test_candidate_ranker_records_closest_rejected_identity_for_unmatched_rows(tmp_path):

@@ -59,12 +59,17 @@ class Settings:
     min_edge: float
     demo_min_edge: float
     qual_min_edge: float
+    confluence_agree_delta: float
+    confluence_edge_bonus: float
+    confluence_veto_delta: float
     qual_signal_max_age_hours: float
     qual_llm_cmd: str
     qual_llm_timeout_seconds: int
     research_teams_path: Path
     news_window_hours: float
     news_user_agent: str
+    event_trigger_cooldown_minutes: int
+    event_trigger_daily_cap: int
     max_plausible_edge: float
     stale_market_seconds: int
     max_spread_cents: int
@@ -189,6 +194,9 @@ def load_settings(game_id: str | None = None) -> Settings:
         min_edge=float(os.environ.get("NBABOT_MIN_EDGE", "0.05")),
         demo_min_edge=float(os.environ.get("NBABOT_DEMO_MIN_EDGE", "0.03")),
         qual_min_edge=float(os.environ.get("NBABOT_QUAL_MIN_EDGE", "0.06")),
+        confluence_agree_delta=float(os.environ.get("NBABOT_CONFLUENCE_AGREE_DELTA", "0.05")),
+        confluence_edge_bonus=float(os.environ.get("NBABOT_CONFLUENCE_EDGE_BONUS", "0.01")),
+        confluence_veto_delta=float(os.environ.get("NBABOT_CONFLUENCE_VETO_DELTA", "0.08")),
         qual_signal_max_age_hours=float(os.environ.get("NBABOT_QUAL_SIGNAL_MAX_AGE_HOURS", "12")),
         qual_llm_cmd=os.environ.get(
             "NBABOT_QUAL_LLM_CMD",
@@ -198,6 +206,10 @@ def load_settings(game_id: str | None = None) -> Settings:
         research_teams_path=research_teams_path,
         news_window_hours=float(os.environ.get("NBABOT_NEWS_WINDOW_HOURS", "48")),
         news_user_agent=os.environ.get("NBABOT_NEWS_USER_AGENT", "nbabot-research/0.1"),
+        event_trigger_cooldown_minutes=int(
+            os.environ.get("NBABOT_EVENT_TRIGGER_COOLDOWN_MINUTES", "45")
+        ),
+        event_trigger_daily_cap=int(os.environ.get("NBABOT_EVENT_TRIGGER_DAILY_CAP", "8")),
         max_plausible_edge=float(os.environ.get("NBABOT_MAX_PLAUSIBLE_EDGE", "0.15")),
         stale_market_seconds=int(os.environ.get("NBABOT_STALE_MARKET_SECONDS", "90")),
         max_spread_cents=int(os.environ.get("NBABOT_MAX_SPREAD_CENTS", "10")),

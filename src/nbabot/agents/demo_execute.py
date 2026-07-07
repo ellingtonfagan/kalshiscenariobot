@@ -12,7 +12,12 @@ from ..kalshi import DEMO_CREDENTIALS_BLOCKED_REASON
 from ..research import ResearchStore
 from ..risk import RiskContext, evaluate_trade_intent
 from .base import Context, load_context
-from .paper import _candidate_intents, execution_limits, refresh_research_for_execution
+from .paper import (
+    _candidate_intents,
+    execution_limits,
+    record_shadow_intents,
+    refresh_research_for_execution,
+)
 
 
 def _blocked_reason(ctx: Context) -> str | None:
@@ -37,11 +42,16 @@ def run(ctx: Context | None = None) -> dict:
     store = ResearchStore(ctx.settings.research_db_path)
     audit = AuditTrail(ctx.settings.data_dir, store)
     refresh_research_for_execution(ctx)
+    shadow_inserted = record_shadow_intents(ctx, store, audit, mode="demo")
     intents = _candidate_intents(ctx)
     if not intents:
         audit.log("DEMO_NO_CANDIDATES", {"game_id": ctx.settings.game_id}, ctx.settings.game_id)
         deliver("[demo-execute] no candidates; run snapshot-market first", ctx.settings.deliver_to)
-        return {"orders": [], "reason": "no-candidates"}
+        return {
+            "orders": [],
+            "reason": "no-candidates",
+            "shadow_intents_inserted": shadow_inserted,
+        }
 
     limits = execution_limits(ctx, store, "demo_orders")
     for intent in intents:
@@ -62,7 +72,12 @@ def run(ctx: Context | None = None) -> dict:
             ),
         )
         receipt = execute_demo(intent, decision, ctx.settings, store, audit, ctx.kalshi)
-        result = {"intent": asdict(intent), "decision": asdict(decision), "receipt": asdict(receipt)}
+        result = {
+            "intent": asdict(intent),
+            "decision": asdict(decision),
+            "receipt": asdict(receipt),
+            "shadow_intents_inserted": shadow_inserted,
+        }
         ctx.write_json("demo_execute.json", result)
         hope = " HOPE BET" if intent.hope_bet else ""
         out = (

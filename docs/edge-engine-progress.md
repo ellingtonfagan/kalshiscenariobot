@@ -1357,3 +1357,57 @@ were changed, and no scheduler or cron work was added.
   it was blocked for stale executable order-book data and edge below the dynamic
   required edge.
 - No live execution env vars were set to live values and no live orders were placed.
+
+---
+
+## Round 18 - 2026-07-07 - Phase 14 confluence and event-driven news-watch
+
+### What changed in code
+
+- Added a pure confluence layer for markets with both exact sportsbook consensus
+  and fresh qual signals. Consensus remains the `signal_source`; confluence adds
+  `confluence_verdict` plus the structured fair/qual/confidence/delta record.
+- Agreement in paper/demo lowers only the required-edge base by
+  `NBABOT_CONFLUENCE_EDGE_BONUS` with a hard `0.02` floor. Sizing remains the
+  existing quarter-Kelly path.
+- High-confidence disagreement in paper/demo vetoes an otherwise passing consensus
+  candidate with `qual disagrees with consensus`, and paper/demo execution now records
+  a sized `shadow_trade_intents` row for counterfactual settlement audit.
+- Persisted `confluence_verdict` through trade intents, paper/demo/live ledgers,
+  audit payloads, settlement records, and performance-learning family keys. The
+  learner separates `confluence_agree ...` consensus families from plain consensus
+  and qual families.
+- Added `ksobot news-watch`: RSS-only diffing, word-boundary high-impact keyword
+  detection, per-team cooldown, ET daily cap, no-hit silence, Telegram/stdout alert
+  on trigger, and a scheduled-demo-cycle trigger path.
+- Added `scheduler/news-watch-crontab.txt` for every five minutes from 10:00 through
+  23:55 ET. The existing four scheduled demo-cycle cron entries were left unchanged.
+
+### Tests
+
+- Added confluence coverage for agreement bonus, floor behavior, neutral deltas,
+  disagreement veto and shadow persistence, live-mode no-bonus/no-veto behavior,
+  confluence persistence through order/audit/settlement, and learner family
+  separation.
+- Added news-watch coverage for word-boundary matching, debounce, daily cap, no-hit
+  silence, and trigger path invocation with the heavy cycle mocked.
+- Full suite: `129 passed in 1.29s`.
+
+### Real behavior check
+
+- Real `news-watch` against live configured RSS feeds found `33` new items and `1`
+  high-impact hit: Yankees headline `Stanton still not running since injury setback;
+  return remains up in air`, matched on `injury`. It fired one scheduled demo cycle.
+- That triggered scheduled demo cycle ran in `demo` mode with `NBABOT_DRY_RUN=1` and
+  empty live ack vars. It placed one Kalshi demo order, not live:
+  `KXMLBGAME-26JUL082210COLLAD-LAD`, `1 YES @ 66c`, edge `+0.04866`.
+- The triggered real candidate-ranker artifact had `200` candidates, `1` edge pass,
+  `1` trade-eligible row, and confluence counts all zero: no market had both fresh
+  qual and consensus signals.
+- Isolated temp scheduled-demo-cycle run in `/tmp/nbabot-phase14-demo-AK4yZf` used
+  a separate data dir and blank demo credentials to avoid another external demo
+  order. It still ran real discovery, news, qual, matching, ranker, settlement, and
+  status paths: `200` candidates, `1` edge pass, `1` trade-eligible row, `1` fresh
+  qual signal, and `0` fresh qual/consensus overlaps. Delta distribution was empty
+  because there was no overlap fresh enough to combine.
+- No live execution env vars were set to live values and no live orders were placed.

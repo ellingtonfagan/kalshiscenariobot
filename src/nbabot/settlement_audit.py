@@ -243,8 +243,52 @@ def normalized_order(order: dict[str, Any]) -> dict[str, Any] | None:
         "entry_model_prob": _prob(intent.get("model_prob")),
         "entry_market_prob": _prob(intent.get("market_prob")),
         "signal_source": str(intent.get("signal_source") or order.get("signal_source") or "consensus"),
+        "confluence_verdict": str(
+            intent.get("confluence_verdict")
+            or order.get("confluence_verdict")
+            or "none"
+        ),
+        "confluence": intent.get("confluence") if isinstance(intent.get("confluence"), dict) else {},
         "intent": intent,
         "request": request,
+    }
+
+
+def normalized_shadow_intent(row: dict[str, Any]) -> dict[str, Any] | None:
+    intent = _loads(row.get("intent_json"), {}) or {}
+    ticker = row.get("ticker") or intent.get("ticker")
+    side = _side(row.get("side") or intent.get("side"))
+    if not ticker or not side:
+        return None
+    return {
+        "client_order_id": row["client_order_id"],
+        "game_id": row["game_id"],
+        "mode": row.get("mode") or "shadow",
+        "ticker": str(ticker),
+        "side": side,
+        "action": intent.get("action") or "buy",
+        "contracts": _num(row.get("contracts")) or _num(intent.get("contracts")) or 0,
+        "entry_price_cents": _price_cents(row.get("price_cents") or intent.get("price_cents")) or 0,
+        "filled_at": None,
+        "fill_source": "shadow_intent",
+        "scenario_id": intent.get("scenario_id"),
+        "entry_model_prob": _prob(intent.get("model_prob")),
+        "entry_market_prob": _prob(intent.get("market_prob")),
+        "signal_source": str(intent.get("signal_source") or row.get("signal_source") or "consensus"),
+        "confluence_verdict": str(
+            intent.get("confluence_verdict")
+            or row.get("confluence_verdict")
+            or "none"
+        ),
+        "confluence": intent.get("confluence") if isinstance(intent.get("confluence"), dict) else {},
+        "intent": intent,
+        "request": {
+            "ticker": ticker,
+            "side": side,
+            "action": intent.get("action") or "buy",
+            "count": row.get("contracts"),
+            "price_cents": row.get("price_cents"),
+        },
     }
 
 
@@ -368,6 +412,8 @@ def settlement_record(
         "fill_source": order.get("fill_source"),
         "scenario_id": order.get("scenario_id"),
         "signal_source": order.get("signal_source") or "consensus",
+        "confluence_verdict": order.get("confluence_verdict") or "none",
+        "confluence": order.get("confluence") or {},
         "audited_at": utc_now(),
         "settled_at": resolution.get("settled_at"),
         "market_status": resolution.get("market_status"),

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .confluence import MIN_EFFECTIVE_BASE
 from .guardrails import MAX_STAKE_UNITS
 
 RESEARCH_OVERRIDE_ACK = "RESEARCH_OVERRIDE_APPROVED"
@@ -349,6 +350,18 @@ def evaluate_trade_intent(intent: Any, settings: Any,
             getattr(settings, "min_edge", 0.05),
         ))
     )
+    confluence = getattr(intent, "confluence", None)
+    if (
+        paper_demo_mode
+        and signal_source == "consensus"
+        and str(getattr(intent, "confluence_verdict", "none") or "none") == "agree"
+        and isinstance(confluence, dict)
+    ):
+        try:
+            confluence_base = float(confluence.get("effective_base_min_edge"))
+        except (TypeError, ValueError):
+            confluence_base = min_edge
+        min_edge = max(confluence_base, MIN_EFFECTIVE_BASE)
     edge_ok = edge is not None and float(edge) >= min_edge
     if override_requested:
         checks.append(RiskCheck(

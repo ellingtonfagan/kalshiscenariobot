@@ -45,6 +45,11 @@ def run(ctx: Context | None = None) -> dict:
         tickers=tickers,
     )
     payload = build_candidate_rankings(ctx, slate, matches, qual_signals=qual_signals)
+    store = ResearchStore(ctx.settings.research_db_path)
+    payload["confluence_records_inserted"] = store.record_confluence_records(
+        ctx.settings.game_id,
+        payload.get("rows", []),
+    )
     payload["live_updates"] = live_updates
     payload["qual_signal_count"] = len(qual_signals)
     payload["input_freshness"] = artifact_freshness(ctx, (

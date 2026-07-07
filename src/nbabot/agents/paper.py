@@ -6,7 +6,8 @@ from dataclasses import asdict
 from .. import guardrails
 from ..alerts import deliver
 from ..audit import AuditTrail
-from ..execution import TradeIntent, execute_paper
+from ..confluence import MIN_EFFECTIVE_BASE, VETO_REASON
+from ..execution import TradeIntent, client_order_id, execute_paper
 from ..research import ResearchStore
 from ..risk import (
     RiskContext,
@@ -35,6 +36,37 @@ def _row_min_edge(settings: object, signal_source: str) -> float:
     if signal_source == "qual":
         return float(getattr(settings, "qual_min_edge", 0.06))
     return _execution_min_edge(settings)
+
+
+def _row_confluence(row: dict, meta: dict) -> dict:
+    confluence = meta.get("confluence")
+    if not isinstance(confluence, dict):
+        confluence = row.get("confluence")
+    return confluence if isinstance(confluence, dict) else {}
+
+
+def _row_confluence_verdict(row: dict, meta: dict) -> str:
+    return str(
+        meta.get("confluence_verdict")
+        or row.get("confluence_verdict")
+        or "none"
+    )
+
+
+def _effective_row_min_edge(settings: object, signal_source: str, row: dict, meta: dict) -> float:
+    base = _row_min_edge(settings, signal_source)
+    confluence = _row_confluence(row, meta)
+    mode = str(getattr(settings, "execution_mode", "paper") or "paper").lower()
+    if (
+        mode in {"paper", "demo"}
+        and signal_source == "consensus"
+        and _row_confluence_verdict(row, meta) == "agree"
+    ):
+        try:
+            return max(float(confluence.get("effective_base_min_edge")), MIN_EFFECTIVE_BASE)
+        except (TypeError, ValueError):
+            return base
+    return base
 
 
 def _candidate_is_broad_slate(row: dict, settings: object) -> bool:
@@ -108,7 +140,7 @@ def _intent_from_row(
     edge = float(row.get("edge")) if row.get("edge") is not None else float(prior) - float(implied)
     research_override = bool(row.get("research_override", False))
     signal_source = _row_signal_source(row, meta)
-    min_edge = _row_min_edge(ctx.settings, signal_source)
+    min_edge = _effective_row_min_edge(ctx.settings, signal_source, row, meta)
     if edge < min_edge and not research_override:
         return None
     if research_override:
@@ -186,6 +218,8 @@ def _intent_from_row(
         market_type_verdict=str(meta.get("market_type_verdict", "")),
         broad_slate=_candidate_is_broad_slate(meta, ctx.settings),
         signal_source=signal_source,
+        confluence_verdict=_row_confluence_verdict(row, meta),
+        confluence=_row_confluence(row, meta),
     )
 
 
@@ -248,6 +282,76 @@ def _candidate_intents(ctx: Context) -> list[TradeIntent]:
     return intents
 
 
+def _candidate_group_counts(rows: list[dict]) -> dict[str, int]:
+    group_counts: dict[str, int] = {}
+    for row in rows:
+        if not (row.get("trade_eligible") or row.get("confluence_shadow")):
+            continue
+        group = str(
+            row.get("event_key")
+            or row.get("market_family")
+            or row.get("candidate_id")
+            or row.get("scenario_id")
+            or row.get("ticker")
+        )
+        group_counts[group] = group_counts.get(group, 0) + 1
+    return group_counts
+
+
+def _shadow_intents(ctx: Context) -> list[TradeIntent]:
+    research = ctx.read_json("research_bundle.json") or {}
+    research_candidates = [
+        row for row in research.get("market_candidates") or []
+        if row.get("confluence_shadow")
+        and str(row.get("signal_source") or "consensus") == "consensus"
+    ]
+    group_counts = _candidate_group_counts(research.get("market_candidates") or [])
+    unit_cents = int(round(ctx.settings.unit_usd * 100))
+    intents = []
+    for row in research_candidates:
+        intent = _intent_from_row(ctx, row, row, group_counts, unit_cents)
+        if intent is not None:
+            intents.append(intent)
+    return intents
+
+
+def record_shadow_intents(
+    ctx: Context,
+    store: ResearchStore,
+    audit: AuditTrail,
+    *,
+    mode: str,
+) -> int:
+    inserted = 0
+    for intent in _shadow_intents(ctx):
+        shadow_id = client_order_id(intent, f"{mode}-shadow")
+        if store.record_shadow_intent(
+            game_id=ctx.settings.game_id,
+            mode=mode,
+            client_order_id=shadow_id,
+            intent=intent,
+            reason=VETO_REASON,
+        ):
+            inserted += 1
+            audit.log(
+                "CONFLUENCE_SHADOW_INTENT",
+                {
+                    "client_order_id": shadow_id,
+                    "ticker": intent.ticker,
+                    "side": intent.side,
+                    "contracts": intent.contracts,
+                    "price_cents": intent.price_cents,
+                    "stake_units": intent.stake_units,
+                    "edge": intent.edge,
+                    "signal_source": intent.signal_source,
+                    "confluence_verdict": intent.confluence_verdict,
+                    "reason": VETO_REASON,
+                },
+                ctx.settings.game_id,
+            )
+    return inserted
+
+
 def refresh_research_for_execution(ctx: Context) -> dict:
     from . import research_agent
 
@@ -259,12 +363,13 @@ def run(ctx: Context | None = None) -> dict:
     store = ResearchStore(ctx.settings.research_db_path)
     audit = AuditTrail(ctx.settings.data_dir, store)
     refresh_research_for_execution(ctx)
+    shadow_inserted = record_shadow_intents(ctx, store, audit, mode="paper")
     intents = _candidate_intents(ctx)
     if not intents:
         msg = "[paper] no approved candidates; run snapshot-market or lower NBABOT_MIN_EDGE after research"
         audit.log("PAPER_NO_CANDIDATES", {"game_id": ctx.settings.game_id}, ctx.settings.game_id)
         deliver(msg, ctx.settings.deliver_to)
-        return {"orders": [], "reason": "no-candidates"}
+        return {"orders": [], "reason": "no-candidates", "shadow_intents_inserted": shadow_inserted}
 
     limits = execution_limits(ctx, store, "paper_orders")
     game_exposure = float(limits["game_exposure_units"])
@@ -330,4 +435,4 @@ def run(ctx: Context | None = None) -> dict:
         f"SGP-adjusted scenario p={intent['sgp_adjusted_prob']:.3f}{hope}"
     )
     deliver(guardrails.with_footer(out), ctx.settings.deliver_to)
-    return {"orders": receipts}
+    return {"orders": receipts, "shadow_intents_inserted": shadow_inserted}

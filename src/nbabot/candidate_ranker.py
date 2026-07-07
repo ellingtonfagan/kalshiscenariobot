@@ -5,6 +5,7 @@ import math
 from datetime import datetime
 from typing import Any
 
+from .confluence import VETO_REASON, evaluate_confluence
 from .edge_engine import ExecutablePrice, evaluate_market
 from .market_identity import (
     MarketIdentity,
@@ -120,6 +121,15 @@ def _empty_match_diagnostics() -> dict[str, Any]:
             "unmatched_candidate_count": 0,
             "closest_rejection_field_counts": {},
             "examples": [],
+        },
+        "confluence": {
+            "overlap_count": 0,
+            "agree_count": 0,
+            "disagree_count": 0,
+            "neutral_count": 0,
+            "boost_count": 0,
+            "veto_count": 0,
+            "deltas": [],
         },
     }
 
@@ -517,6 +527,31 @@ def build_candidate_rankings(
         eval_consensus = consensus
         eval_base_min_edge = base_min_edge
         require_consensus = True
+        exact_consensus_match = bool(match.get("match_type") == "exact" and _has_consensus(consensus))
+        confluence = evaluate_confluence(
+            consensus=consensus,
+            qual_signal=qual_signal,
+            price_prob=executable.price_prob,
+            settings=ctx.settings,
+            base_min_edge=base_min_edge,
+            exact_match=exact_consensus_match,
+        )
+        if confluence.consensus_fair_prob is not None and confluence.qual_prob is not None:
+            confluence_diag = diagnostics["confluence"]
+            confluence_diag["overlap_count"] += 1
+            confluence_diag["deltas"].append(confluence.delta)
+            if confluence.verdict == "agree":
+                confluence_diag["agree_count"] += 1
+            elif confluence.verdict == "disagree":
+                confluence_diag["disagree_count"] += 1
+            elif confluence.verdict == "neutral":
+                confluence_diag["neutral_count"] += 1
+            if confluence.edge_bonus > 0:
+                confluence_diag["boost_count"] += 1
+            if confluence.veto:
+                confluence_diag["veto_count"] += 1
+        if confluence.edge_bonus > 0:
+            eval_base_min_edge = float(confluence.effective_base_min_edge or eval_base_min_edge)
         if not _has_consensus(consensus) and qual_signal is not None:
             signal_source = "qual"
             eval_base_min_edge = _qual_min_edge(ctx.settings)
@@ -548,6 +583,13 @@ def build_candidate_rankings(
             require_exact_match=signal_source != "qual",
         )
         payload = edge.as_dict()
+        would_pass_before_confluence = bool(payload["passes_edge"])
+        confluence_shadow = False
+        if signal_source == "consensus" and confluence.veto and would_pass_before_confluence:
+            if VETO_REASON not in payload["blockers"]:
+                payload["blockers"].append(VETO_REASON)
+            payload["passes_edge"] = False
+            confluence_shadow = True
         is_composite = composite is not None
         if is_composite:
             diagnostics["composite_trade_blocked"] += 1
@@ -567,6 +609,9 @@ def build_candidate_rankings(
             "qual_signal": qual_signal,
             "qual_vs_consensus_delta": qual_delta,
             "signal_source": signal_source,
+            "confluence": confluence.as_dict(),
+            "confluence_verdict": confluence.verdict if signal_source == "consensus" else "none",
+            "confluence_shadow": confluence_shadow,
             "sgp_adjusted_prob": consensus.get("sgp_adjusted_prob"),
             "raw_joint_prob": consensus.get("raw_joint_prob"),
             "sgp_haircut": consensus.get("sgp_haircut"),
@@ -579,6 +624,7 @@ def build_candidate_rankings(
         if signal_source == "qual":
             payload["sgp_adjusted_prob"] = payload.get("model_prob")
             payload["model_prob_sources"] = list((qual_signal or {}).get("citation_urls") or [])
+            payload["confluence_verdict"] = "none"
         ranked.append(payload)
     ranked.sort(key=lambda item: (
         not item.get("passes_edge"),
@@ -594,6 +640,14 @@ def build_candidate_rankings(
         "signal_source_counts": {
             "consensus": sum(1 for row in ranked if row.get("signal_source") == "consensus"),
             "qual": sum(1 for row in ranked if row.get("signal_source") == "qual"),
+        },
+        "confluence_counts": {
+            "overlap": diagnostics["confluence"]["overlap_count"],
+            "agree": diagnostics["confluence"]["agree_count"],
+            "disagree": diagnostics["confluence"]["disagree_count"],
+            "neutral": diagnostics["confluence"]["neutral_count"],
+            "boost": diagnostics["confluence"]["boost_count"],
+            "veto": diagnostics["confluence"]["veto_count"],
         },
         "diagnostics": diagnostics,
         "rows": ranked,
