@@ -60,6 +60,10 @@ src/nbabot/
   sports.py        Sport-port registry for active/research/planned adapters.
   slate.py         Slate discovery, verification, and research-candidate helpers.
   market_matcher.py Match Kalshi slate markets to books, external lines, and deltas.
+  market_identity.py Normalize Kalshi/sportsbook rows to deterministic market identities.
+  odds_math.py     Odds conversion, de-vigging, outlier reporting, consensus probability.
+  edge_engine.py   Pure model-vs-executable-price edge checks.
+  candidate_ranker.py Rank matched markets by de-vigged consensus edge.
   odds_refresh.py  Shared artifact freshness checks and live refresh helpers.
   sources/         Source registry + readiness checks for slate/research inputs.
   ui.py            Dependency-free local dashboard served by `nbabot ui`.
@@ -75,6 +79,7 @@ src/nbabot/
     snapshot_market.py Capture mapped Kalshi quote snapshots.
     book_watch.py   Capture side-aware order book depth from generic candidate artifacts.
     market_matcher.py Build market_matches.json and execution_slate.json.
+    candidate_ranker.py Build candidate_ranker.json and edge_candidates.json.
     status.py       Summarize mode, live blockers, artifacts, risk, and orders.
     portfolio_sync.py Mirror Kalshi balance + positions into local state.
     daily_cycle.py  Autonomous discover/snapshot/book/execution/backtest/status loop.
@@ -101,7 +106,7 @@ next phase it makes eligible. It does not paper trade by default; live execution
 requires the explicit live gates and risk approval.
 The current chain is `source-check -> slate-discovery -> slate-verify ->
 portfolio-sync -> discover-markets -> snapshot-market -> book-watch -> market-matcher
--> research-agent -> execution gate -> backtest -> status`. Slate verification,
+-> candidate-ranker -> research-agent -> execution gate -> backtest -> status`. Slate verification,
 market matching, research, and execution refresh stale odds/order-book handoff artifacts
 before consuming them. `NBABOT_STALE_MARKET_SECONDS` controls those freshness checks.
 
@@ -124,6 +129,7 @@ nbabot source-check  # verify external source readiness without exposing secrets
 nbabot slate-discovery # discover candidate sports events/lines
 nbabot slate-verify  # reject social/ESPN-only slate candidates
 nbabot market-matcher # match open Kalshi slate, order-book deltas, and execution review rows
+nbabot candidate-ranker # compute de-vigged consensus probability and edge
 nbabot research-agent # produce research_bundle + trade-eligible market_candidates
 nbabot paper          # local paper fills only
 nbabot demo-execute   # Kalshi demo only; requires NBABOT_EXECUTION_MODE=demo

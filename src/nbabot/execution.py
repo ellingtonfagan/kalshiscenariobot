@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .audit import AuditTrail
+from .kalshi import DEMO_CREDENTIALS_BLOCKED_REASON
 from .research import ResearchStore, utc_now
 from .risk import RiskDecision
 
@@ -36,6 +37,13 @@ class TradeIntent:
     research_override_reason: str = ""
     research_sources: tuple[str, ...] = ()
     research_approved_by: str = ""
+    candidate_id: str | None = None
+    event_key: str | None = None
+    market_family: str | None = None
+    performance: dict[str, Any] = field(default_factory=dict)
+    validated: bool = False
+    market_type_verdict: str = ""
+    broad_slate: bool = False
 
 
 @dataclass(frozen=True)
@@ -174,6 +182,16 @@ def execute_demo(intent: TradeIntent, decision: RiskDecision, settings: Any,
                                {"reasons": decision.reasons})
         audit.log("DEMO_REJECTED", asdict(receipt), intent.game_id)
         return receipt
+    credential_check = getattr(kalshi, "demo_credentials_configured", None)
+    if callable(credential_check) and not credential_check():
+        receipt = OrderReceipt(
+            request.client_order_id,
+            "demo",
+            "rejected",
+            {"reasons": [DEMO_CREDENTIALS_BLOCKED_REASON]},
+        )
+        audit.log("DEMO_REJECTED", asdict(receipt), intent.game_id)
+        return receipt
 
     _audit_research_override(intent, audit)
     body = request.kalshi_v2_body()
@@ -205,6 +223,15 @@ def execute_live(intent: TradeIntent, decision: RiskDecision, settings: Any,
     if getattr(settings, "live_trading_ack", "") != "LIVE_TRADES_REAL_MONEY":
         raise RuntimeError(
             "live execution requires NBABOT_LIVE_TRADING_ACK=LIVE_TRADES_REAL_MONEY"
+        )
+    if getattr(intent, "broad_slate", False) and getattr(
+        settings,
+        "broad_slate_execution",
+        "",
+    ) != "BROAD_SLATE_TRADES_REAL_MONEY":
+        raise RuntimeError(
+            "live execution requires "
+            "NBABOT_BROAD_SLATE_EXECUTION=BROAD_SLATE_TRADES_REAL_MONEY"
         )
 
     request = build_order_request(intent, "live")

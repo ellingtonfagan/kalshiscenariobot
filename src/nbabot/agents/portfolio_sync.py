@@ -35,12 +35,16 @@ def run(ctx: Context | None = None) -> dict:
         "open_positions": len(positions),
     }
     exposure_units = 0.0
+    portfolio_exposure_units = 0.0
     try:
         exposure_units = store.game_order_exposure_units("live_orders", ctx.settings.game_id)
+        portfolio_exposure_units = store.daily_order_exposure_units("live_orders")
     except Exception:
         exposure_units = 0.0
+        portfolio_exposure_units = 0.0
     store.record_risk_snapshot(ctx.settings.game_id, {
         "game_exposure_units": exposure_units,
+        "portfolio_exposure_units": portfolio_exposure_units,
         "daily_pnl_units": 0.0,
         "open_positions": len(positions),
         "circuit_breaker_on": False,

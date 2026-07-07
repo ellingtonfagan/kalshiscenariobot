@@ -9,6 +9,20 @@ from ..slate import discover_slate
 from .base import Context, load_context
 
 
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _sport_market_candidates_limit() -> int:
+    default = max(_int_env("NBABOT_KALSHI_SLATE_LIMIT", 200), 1)
+    requested = max(_int_env("NBABOT_SPORT_MARKET_CANDIDATES_LIMIT", default), 1)
+    ceiling = max(_int_env("NBABOT_SPORT_MARKET_CANDIDATES_MAX", 500), 1)
+    return min(requested, ceiling)
+
+
 def _format(payload: dict) -> str:
     candidates = payload.get("candidates") or []
     top = candidates[0] if candidates else {}
@@ -25,7 +39,7 @@ def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
     payload = discover_slate(ctx)
     ctx.write_json("slate_candidates.json", payload)
-    limit = int(os.environ.get("NBABOT_SPORT_MARKET_CANDIDATES_LIMIT", "50"))
+    limit = _sport_market_candidates_limit()
     rows = []
     captured_at = payload.get("generated_at")
     for candidate in payload.get("candidates", []):
@@ -34,9 +48,12 @@ def run(ctx: Context | None = None) -> dict:
                 continue
             rows.append({
                 "ticker": market.get("ticker"),
+                "event_ticker": market.get("event_ticker"),
+                "series_ticker": market.get("series_ticker"),
                 "candidate_id": candidate.get("candidate_id"),
                 "sport": candidate.get("sport"),
                 "title": market.get("title"),
+                "is_composite": market.get("is_composite"),
                 "bid": market.get("bid"),
                 "ask": market.get("ask"),
                 "implied": market.get("implied"),

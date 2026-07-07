@@ -28,7 +28,7 @@ def run(ctx: Context | None = None) -> dict:
     audit = AuditTrail(ctx.settings.data_dir, store)
     steps: list[dict[str, Any]] = []
 
-    from . import backtest, book_watch, discover_markets, market_matcher, portfolio_sync, research_agent
+    from . import backtest, book_watch, candidate_ranker, discover_markets, market_matcher, portfolio_sync, research_agent
     from . import slate_discovery, slate_verify, snapshot_market
     from . import source_check, status
 
@@ -165,12 +165,19 @@ def run(ctx: Context | None = None) -> dict:
             steps,
             activated_by="book-watch",
             reason="snapshot-market failed",
+            activates=("candidate-ranker",),
+        )
+        skip_activated_step(
+            "candidate-ranker",
+            steps,
+            activated_by="market-matcher",
+            reason="snapshot-market failed",
             activates=("research-agent",),
         )
         skip_activated_step(
             "research-agent",
             steps,
-            activated_by="market-matcher",
+            activated_by="candidate-ranker",
             reason="snapshot-market failed",
             activates=("execution",),
         )
@@ -187,12 +194,19 @@ def run(ctx: Context | None = None) -> dict:
             steps,
             activated_by="book-watch",
             reason="book-watch failed",
+            activates=("candidate-ranker",),
+        )
+        skip_activated_step(
+            "candidate-ranker",
+            steps,
+            activated_by="market-matcher",
+            reason="book-watch failed",
             activates=("research-agent",),
         )
         skip_activated_step(
             "research-agent",
             steps,
-            activated_by="market-matcher",
+            activated_by="candidate-ranker",
             reason="book-watch failed",
             activates=("execution",),
         )
@@ -211,14 +225,21 @@ def run(ctx: Context | None = None) -> dict:
             steps,
             audit,
             activated_by="book-watch",
-            activates=("research-agent",),
+            activates=("candidate-ranker",),
             dlq_type="DAILY_CYCLE_STEP",
         )
         if matches is None:
             skip_activated_step(
-                "research-agent",
+                "candidate-ranker",
                 steps,
                 activated_by="market-matcher",
+                reason="market-matcher failed",
+                activates=("research-agent",),
+            )
+            skip_activated_step(
+                "research-agent",
+                steps,
+                activated_by="candidate-ranker",
                 reason="market-matcher failed",
                 activates=("execution",),
             )
@@ -230,44 +251,70 @@ def run(ctx: Context | None = None) -> dict:
                 activates=("backtest",),
             )
         else:
-            research = run_activated_step(
+            ranked = run_activated_step(
                 ctx,
-                "research-agent",
-                research_agent.run,
+                "candidate-ranker",
+                candidate_ranker.run,
                 steps,
                 audit,
                 activated_by="market-matcher",
-                activates=("execution",),
+                activates=("research-agent",),
                 dlq_type="DAILY_CYCLE_STEP",
             )
-            if research is None:
+            if ranked is None:
                 skip_activated_step(
-                    "execution",
+                    "research-agent",
                     steps,
-                    activated_by="research-agent",
-                    reason="research-agent failed",
-                    activates=("backtest",),
+                    activated_by="candidate-ranker",
+                    reason="candidate-ranker failed",
+                    activates=("execution",),
                 )
-            elif exec_step is None:
                 skip_activated_step(
                     "execution",
                     steps,
                     activated_by="research-agent",
-                    reason="daily-cycle does not paper trade; set live/demo mode explicitly",
+                    reason="candidate-ranker failed",
                     activates=("backtest",),
                 )
             else:
-                exec_name, exec_fn = exec_step
-                run_activated_step(
+                research = run_activated_step(
                     ctx,
-                    exec_name,
-                    exec_fn,
+                    "research-agent",
+                    research_agent.run,
                     steps,
                     audit,
-                    activated_by="research-agent",
-                    activates=("backtest",),
+                    activated_by="candidate-ranker",
+                    activates=("execution",),
                     dlq_type="DAILY_CYCLE_STEP",
                 )
+                if research is None:
+                    skip_activated_step(
+                        "execution",
+                        steps,
+                        activated_by="research-agent",
+                        reason="research-agent failed",
+                        activates=("backtest",),
+                    )
+                elif exec_step is None:
+                    skip_activated_step(
+                        "execution",
+                        steps,
+                        activated_by="research-agent",
+                        reason="daily-cycle does not paper trade; set live/demo mode explicitly",
+                        activates=("backtest",),
+                    )
+                else:
+                    exec_name, exec_fn = exec_step
+                    run_activated_step(
+                        ctx,
+                        exec_name,
+                        exec_fn,
+                        steps,
+                        audit,
+                        activated_by="research-agent",
+                        activates=("backtest",),
+                        dlq_type="DAILY_CYCLE_STEP",
+                    )
 
     if ctx.settings.data_path("log.jsonl").exists():
         run_activated_step(

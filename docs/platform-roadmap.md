@@ -31,6 +31,8 @@ These modules should become sport-agnostic:
 - `adapters/base.py`: sport adapter contract used by runtime phases.
 - `agents/book_watch.py`: order book capture from generic candidate artifacts.
 - `market_matcher.py`: Kalshi-first order-book deltas and execution-review slate.
+- `market_identity.py`, `odds_math.py`, `edge_engine.py`: exact matching, de-vigged
+  consensus probability, and model-vs-executable edge evaluation.
 - `research.py`: SQLite mirror for snapshots, orders, fills, risk, calibration.
 - `risk.py`: execution gate, kill switch, exposure, liquidity, staleness, approvals.
 - `execution.py`: paper/demo/live order request and audit recording.

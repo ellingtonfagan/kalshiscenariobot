@@ -45,12 +45,19 @@ class Settings:
     calibration_overrides_path: Path
     execution_mode: str
     live_trading_ack: str
+    broad_slate_execution: str
     research_override_ack: str
     research_override_max_units: float
     demo_api_base: str
+    kalshi_demo_api_key: str
+    kalshi_demo_private_key_path: Path
+    paper_demo_daily_trade_cap: int
     max_daily_loss_units: float
+    max_daily_exposure_units: float
     max_game_exposure_units: float
     min_edge: float
+    demo_min_edge: float
+    max_plausible_edge: float
     stale_market_seconds: int
     max_spread_cents: int
     orderbook_depth: int | None
@@ -83,6 +90,12 @@ class Settings:
     def unit_usd(self) -> float:
         return float(self.game.get("bankroll", {}).get("unit_usd", 1))
 
+    @property
+    def execution_min_edge(self) -> float:
+        if self.execution_mode in {"demo", "paper"}:
+            return float(self.demo_min_edge)
+        return float(self.min_edge)
+
     def data_path(self, suffix: str) -> Path:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         return self.data_dir / f"{self.game_id}.{suffix}"
@@ -99,6 +112,13 @@ def load_settings(game_id: str | None = None) -> Settings:
     pk_path = Path(os.environ.get("KALSHI_PRIVATE_KEY_PATH", "./secrets/kalshi-private-key.pem"))
     if not pk_path.is_absolute():
         pk_path = (REPO_ROOT / pk_path).resolve()
+
+    demo_pk_path = Path(
+        os.environ.get("KALSHI_DEMO_PRIVATE_KEY_PATH")
+        or "./secrets/kalshi-demo-private-key.txt"
+    )
+    if not demo_pk_path.is_absolute():
+        demo_pk_path = (REPO_ROOT / demo_pk_path).resolve()
 
     data_dir = Path(os.environ.get("NBABOT_DATA_DIR", REPO_ROOT / "data"))
     if not data_dir.is_absolute():
@@ -131,6 +151,7 @@ def load_settings(game_id: str | None = None) -> Settings:
         calibration_overrides_path=calibration_overrides_path,
         execution_mode=os.environ.get("NBABOT_EXECUTION_MODE", "paper").lower(),
         live_trading_ack=os.environ.get("NBABOT_LIVE_TRADING_ACK", ""),
+        broad_slate_execution=os.environ.get("NBABOT_BROAD_SLATE_EXECUTION", ""),
         research_override_ack=os.environ.get("NBABOT_RESEARCH_OVERRIDE_ACK", ""),
         research_override_max_units=min(
             float(os.environ.get("NBABOT_RESEARCH_OVERRIDE_MAX_UNITS", "1")),
@@ -140,11 +161,19 @@ def load_settings(game_id: str | None = None) -> Settings:
             "NBABOT_DEMO_API_BASE",
             "https://external-api.demo.kalshi.co/trade-api/v2",
         ).rstrip("/"),
+        kalshi_demo_api_key=os.environ.get("KALSHI_DEMO_API_KEY", ""),
+        kalshi_demo_private_key_path=demo_pk_path,
+        paper_demo_daily_trade_cap=int(os.environ.get("NBABOT_PAPER_DEMO_DAILY_TRADE_CAP", "50")),
         max_daily_loss_units=float(os.environ.get("NBABOT_MAX_DAILY_LOSS_UNITS", "2")),
+        max_daily_exposure_units=float(
+            os.environ.get("NBABOT_MAX_DAILY_EXPOSURE_UNITS", str(MAX_STAKE_UNITS))
+        ),
         max_game_exposure_units=float(
             os.environ.get("NBABOT_MAX_GAME_EXPOSURE_UNITS", str(MAX_STAKE_UNITS))
         ),
         min_edge=float(os.environ.get("NBABOT_MIN_EDGE", "0.05")),
+        demo_min_edge=float(os.environ.get("NBABOT_DEMO_MIN_EDGE", "0.03")),
+        max_plausible_edge=float(os.environ.get("NBABOT_MAX_PLAUSIBLE_EDGE", "0.15")),
         stale_market_seconds=int(os.environ.get("NBABOT_STALE_MARKET_SECONDS", "90")),
         max_spread_cents=int(os.environ.get("NBABOT_MAX_SPREAD_CENTS", "10")),
         orderbook_depth=(

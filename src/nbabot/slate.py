@@ -8,10 +8,27 @@ from typing import Any, Iterable
 
 import requests
 
+from . import performance_learner
 from .guardrails import GUARDRAIL_FOOTER
+from .market_identity import KALSHI_SERIES_SPORTS
 from .odds_refresh import artifact_freshness
-from .research import utc_now
+from .research import ResearchStore, utc_now
 from .sources.registry import load_source_config
+
+
+_KALSHI_DISCOVERY_SERIES_BY_PREFIX = {
+    "KXMLB": ("KXMLBGAME", "KXMLBSPREAD", "KXMLBTOTAL"),
+    "KXNBA": ("KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL"),
+    "KXNFL": ("KXNFLGAME", "KXNFLSPREAD", "KXNFLTOTAL"),
+    "KXWNBA": ("KXWNBAGAME", "KXWNBASPREAD", "KXWNBATOTAL"),
+    "KXWC": ("KXWCGAME", "KXWCADVANCE", "KXWCTOTAL", "KXWCBTTS", "KXWCGOAL"),
+    "KXUCL": ("KXUCLGAME", "KXUCLADVANCE", "KXUCLTOTAL", "KXUCLBTTS", "KXUCLGOAL"),
+}
+
+STRUCTURED_BOOK_PROVIDERS = {"sportsgameodds", "the_odds_api", "parlay_api"}
+EXCLUDED_CONSENSUS_BOOKS_BY_PROVIDER = {
+    "parlay_api": {"kalshi"},
+}
 
 
 def _csv(raw: str | None, default: Iterable[str]) -> list[str]:
@@ -55,6 +72,30 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _the_odds_api_enabled() -> bool:
+    if _bool_env("NBABOT_DISABLE_THE_ODDS_API", False):
+        return False
+    raw = os.environ.get("NBABOT_THE_ODDS_API_ENABLED")
+    if raw is None:
+        return True
+    return str(raw).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _header_int(status: dict[str, Any], key: str) -> int | None:
+    value = status.get(key)
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _norm_text(raw: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(raw or "").lower())
 
@@ -70,6 +111,11 @@ def _team_name(raw: Any) -> str | None:
     if isinstance(raw, str):
         return raw
     if isinstance(raw, dict):
+        names = raw.get("names")
+        if isinstance(names, dict):
+            nested = _first(names, ("long", "medium", "short", "display", "name"))
+            if nested:
+                return str(nested)
         return _first(raw, ("displayName", "name", "fullName", "abbreviation", "id"))
     return None
 
@@ -96,7 +142,20 @@ def _teams_from_event(raw: dict[str, Any]) -> tuple[str | None, str | None]:
                 away = team
     if (not home or not away) and isinstance(raw.get("teams"), list) and len(raw["teams"]) >= 2:
         away, home = raw["teams"][0], raw["teams"][1]
+    if isinstance(raw.get("teams"), dict):
+        teams = raw["teams"]
+        away = away or teams.get("away")
+        home = home or teams.get("home")
     return _team_name(away), _team_name(home)
+
+
+def _event_side_name(raw: dict[str, Any], side: Any) -> Any:
+    """Translate provider home/away side IDs to actual team names."""
+    side_text = str(side or "").strip().lower()
+    if side_text not in {"home", "away"}:
+        return side
+    away, home = _teams_from_event(raw)
+    return home if side_text == "home" else away
 
 
 def _market_count(raw: dict[str, Any]) -> int:
@@ -113,27 +172,61 @@ def _market_count(raw: dict[str, Any]) -> int:
     return count
 
 
-def _line_markets_from_odds_api(raw: dict[str, Any]) -> list[dict[str, Any]]:
+def _book_key(raw: Any) -> str:
+    return str(raw or "").strip().lower().replace(" ", "")
+
+
+def _line_markets_from_bookmakers(
+    provider: str,
+    raw: dict[str, Any],
+    *,
+    price_format: str | None = None,
+) -> list[dict[str, Any]]:
     markets = []
+    excluded_books = EXCLUDED_CONSENSUS_BOOKS_BY_PROVIDER.get(provider, set())
     for book in raw.get("bookmakers") or []:
         book_key = book.get("key") or book.get("title")
+        if _book_key(book_key) in excluded_books:
+            continue
         for market in book.get("markets") or []:
             key = market.get("key")
             if key not in {"h2h", "spreads", "totals"}:
                 continue
             for outcome in market.get("outcomes") or []:
-                markets.append({
-                    "provider": "the_odds_api",
+                row = {
+                    "provider": provider,
                     "book": book_key,
+                    "book_title": book.get("title"),
                     "market": key,
                     "name": outcome.get("name"),
                     "price": outcome.get("price"),
                     "point": outcome.get("point"),
-                })
+                    "last_update": market.get("last_update") or book.get("last_update"),
+                    "last_update_ms": market.get("last_update_ms") or book.get("last_update_ms"),
+                }
+                if price_format:
+                    row["price_format"] = price_format
+                markets.append(row)
     return markets
 
 
-def _line_markets_generic(provider: str, raw: dict[str, Any]) -> list[dict[str, Any]]:
+def _line_markets_from_odds_api(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    return _line_markets_from_bookmakers(
+        "the_odds_api",
+        raw,
+        price_format=raw.get("_price_format"),
+    )
+
+
+def _line_markets_generic(
+    provider: str,
+    raw: dict[str, Any],
+    *,
+    price_format: str | None = None,
+) -> list[dict[str, Any]]:
+    price_format = price_format or raw.get("_price_format")
+    if isinstance(raw.get("bookmakers"), list):
+        return _line_markets_from_bookmakers(provider, raw, price_format=price_format)
     markets = []
     for key in ("odds", "markets", "lines"):
         value = raw.get(key)
@@ -141,17 +234,45 @@ def _line_markets_generic(provider: str, raw: dict[str, Any]) -> list[dict[str, 
         for row in rows:
             if not isinstance(row, dict):
                 continue
+            by_book = row.get("byBookmaker")
+            if isinstance(by_book, dict) and by_book:
+                for book_key, book_row in by_book.items():
+                    if not isinstance(book_row, dict):
+                        continue
+                    if book_row.get("available") is False and book_row.get("odds") in (None, ""):
+                        continue
+                    side_name = _first(row, ("sideID", "selection", "participant", "team", "name"))
+                    item = {
+                        "provider": provider,
+                        "book": book_key,
+                        "market": _first(row, ("marketName", "market", "type", "oddID", "name")),
+                        "name": _event_side_name(raw, side_name),
+                        "side_id": side_name,
+                        "price": _first(book_row, ("odds", "price", "americanOdds", "decimalOdds")),
+                        "point": _first(book_row, ("overUnder", "line", "point", "spread", "total")) or _first(row, ("bookOverUnder", "line", "point", "spread", "total")),
+                        "last_update": book_row.get("lastUpdatedAt"),
+                        "available": book_row.get("available"),
+                        "odd_id": row.get("oddID"),
+                        "opposing_odd_id": row.get("opposingOddID"),
+                    }
+                    if price_format:
+                        item["price_format"] = price_format
+                    markets.append(item)
+                continue
             market = _first(row, ("market", "marketName", "type", "oddID", "name"))
             line = _first(row, ("line", "point", "spread", "total"))
             price = _first(row, ("price", "odds", "americanOdds", "decimalOdds"))
-            markets.append({
+            item = {
                 "provider": provider,
                 "book": _first(row, ("sportsbook", "sportsBook", "book", "bookID")),
                 "market": market,
-                "name": _first(row, ("selection", "participant", "team", "name")),
+                "name": _event_side_name(raw, _first(row, ("selection", "participant", "team", "name", "sideID"))),
                 "price": price,
                 "point": line,
-            })
+            }
+            if price_format:
+                item["price_format"] = price_format
+            markets.append(item)
     return markets
 
 
@@ -206,6 +327,32 @@ def _kalshi_components(title: str) -> list[str]:
     ]
 
 
+def _kalshi_series_for_sports(sports: Iterable[str]) -> list[tuple[str, str]]:
+    selected = set(sports)
+    pairs: list[tuple[str, str]] = []
+    seen = set()
+    for prefix, sport in KALSHI_SERIES_SPORTS.items():
+        if sport not in selected:
+            continue
+        for series in _KALSHI_DISCOVERY_SERIES_BY_PREFIX.get(prefix, (f"{prefix}GAME",)):
+            if series not in seen:
+                pairs.append((series, sport))
+                seen.add(series)
+        if prefix not in seen:
+            pairs.append((prefix, sport))
+            seen.add(prefix)
+    return pairs
+
+
+def _kalshi_composite_market(market: dict[str, Any]) -> bool:
+    ticker = str(market.get("ticker") or "")
+    return (
+        ticker.startswith("KXMVE")
+        or bool(market.get("mve_selected_legs"))
+        or bool(market.get("mve_collection_ticker"))
+    )
+
+
 def _candidate_key(sport: str, away: str | None, home: str | None, event_id: str) -> str:
     if away and home:
         return f"{sport}:{_norm_text(away)}:{_norm_text(home)}"
@@ -243,10 +390,13 @@ def _merge_provider_events(provider: str, sport: str, raw_events: list[dict[str,
         away, home = _teams_from_event(raw)
         event_id = _event_id(raw)
         key = _candidate_key(sport, away, home, event_id)
-        candidate = candidates.setdefault(key, _empty_candidate(sport, key, away, home, _start_time(raw)))
+        start_time = _start_time(raw)
+        candidate = candidates.setdefault(key, _empty_candidate(sport, key, away, home, start_time))
+        if not candidate.get("start_time") and start_time:
+            candidate["start_time"] = start_time
         if provider not in candidate["sources"]:
             candidate["sources"].append(provider)
-        if provider in {"sportsgameodds", "the_odds_api"} and provider not in candidate["structured_sources"]:
+        if provider in STRUCTURED_BOOK_PROVIDERS and provider not in candidate["structured_sources"]:
             candidate["structured_sources"].append(provider)
         if provider == "espn_public_site_api" and provider not in candidate["fallback_sources"]:
             candidate["fallback_sources"].append(provider)
@@ -277,6 +427,10 @@ def _get_json(url: str, *, params: dict[str, Any] | None = None,
     try:
         response = requests.get(url, params=params, headers=headers, timeout=8)
         status = {"ok": response.ok, "status_code": response.status_code, "url": url}
+        for header in ("x-requests-used", "x-requests-remaining", "x-requests-last"):
+            value = response.headers.get(header)
+            if value is not None:
+                status[header.replace("-", "_")] = value
         if not response.ok:
             return [], {**status, "error": "http-error"}
         return _extract_response_events(response.json()), status
@@ -289,7 +443,7 @@ def _get_json(url: str, *, params: dict[str, Any] | None = None,
 def fetch_structured_events(sports: list[str], source_config: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     providers = source_config.get("providers", {})
     sports_config = source_config.get("sports", {})
-    out = {"sportsgameodds": [], "the_odds_api": [], "espn_public_site_api": []}
+    out = {"sportsgameodds": [], "the_odds_api": [], "parlay_api": [], "espn_public_site_api": []}
     statuses: list[dict[str, Any]] = []
 
     sgo_key = os.environ.get("SPORTSGAMEODDS_API_KEY", "")
@@ -323,25 +477,102 @@ def fetch_structured_events(sports: list[str], source_config: dict[str, Any]) ->
     else:
         statuses.append({"provider": "sportsgameodds", "rows": 0, "ok": False, "error": "missing-api-key"})
 
-    odds_key = os.environ.get("THE_ODDS_API_KEY", "")
-    odds = providers.get("the_odds_api", {})
-    if odds_key:
+    parlay_key = os.environ.get("PARLAY_API_KEY", "")
+    parlay = providers.get("parlay_api", {})
+    if parlay_key:
+        auth = parlay.get("auth") or {}
+        auth_header = auth.get("header") or "X-API-Key"
         for sport in sports:
             sport_keys = _odds_api_keys_for_sport(source_config, sport)
             if not sport_keys:
                 continue
             for sport_key in sport_keys:
-                params = dict((odds.get("default_params", {}) or {}).get("odds", {}) or {})
-                params["apiKey"] = odds_key
-                path = odds.get("endpoints", {}).get("odds", "/sports/{sport}/odds/").format(sport=sport_key)
-                rows, status = _get_json(odds.get("base_url", "").rstrip("/") + path, params=params)
+                params = dict((parlay.get("default_params", {}) or {}).get("odds", {}) or {})
+                path = parlay.get("endpoints", {}).get("odds", "/sports/{sport}/odds").format(sport=sport_key)
+                rows, status = _get_json(
+                    parlay.get("base_url", "").rstrip("/") + path,
+                    params=params,
+                    headers={auth_header: parlay_key},
+                )
+                price_format = str(params.get("oddsFormat") or "").lower() or None
                 for row in rows:
                     row.setdefault("sport_key", sport_key)
                     row.setdefault("sport", sport)
-                out["the_odds_api"].extend(rows)
-                statuses.append({"provider": "the_odds_api", "sport": sport, "sport_key": sport_key, "rows": len(rows), **status})
+                    if price_format:
+                        row.setdefault("_price_format", price_format)
+                out["parlay_api"].extend(rows)
+                statuses.append({"provider": "parlay_api", "sport": sport, "sport_key": sport_key, "rows": len(rows), **status})
     else:
+        statuses.append({"provider": "parlay_api", "rows": 0, "ok": False, "error": "missing-api-key"})
+
+    odds_key = os.environ.get("THE_ODDS_API_KEY", "")
+    odds = providers.get("the_odds_api", {})
+    if not odds_key:
         statuses.append({"provider": "the_odds_api", "rows": 0, "ok": False, "error": "missing-api-key"})
+    elif not _the_odds_api_enabled():
+        statuses.append({
+            "provider": "the_odds_api",
+            "rows": 0,
+            "ok": True,
+            "skipped": True,
+            "skip_reason": "disabled-by-env",
+        })
+    else:
+        floor = max(_int_env("NBABOT_THE_ODDS_API_MIN_REMAINING", 30), 0)
+        sports_path = odds.get("endpoints", {}).get("sports", "/sports/")
+        _, preflight = _get_json(
+            odds.get("base_url", "").rstrip("/") + sports_path,
+            params={"apiKey": odds_key},
+        )
+        remaining = _header_int(preflight, "x_requests_remaining")
+        preflight_status = {
+            "provider": "the_odds_api",
+            "stage": "quota-preflight",
+            "rows": 0,
+            "credit_floor": floor,
+            "credits_remaining": remaining,
+            **preflight,
+        }
+        allow_unknown = _bool_env("NBABOT_THE_ODDS_API_ALLOW_UNKNOWN_QUOTA", False)
+        skip_reason = None
+        if not preflight.get("ok"):
+            skip_reason = "quota-preflight-failed"
+        elif remaining is None and not allow_unknown:
+            skip_reason = "quota-remaining-unknown"
+        elif remaining is not None and remaining < floor:
+            skip_reason = "credits-below-floor"
+        if skip_reason:
+            statuses.append({
+                **preflight_status,
+                "skipped": True,
+                "skip_reason": skip_reason,
+            })
+        else:
+            statuses.append({
+                **preflight_status,
+                "quota_ok": True,
+            })
+            for sport in sports:
+                sport_keys = _odds_api_keys_for_sport(source_config, sport)
+                if not sport_keys:
+                    continue
+                for sport_key in sport_keys:
+                    params = dict((odds.get("default_params", {}) or {}).get("odds", {}) or {})
+                    params["apiKey"] = odds_key
+                    path = odds.get("endpoints", {}).get("odds", "/sports/{sport}/odds/").format(sport=sport_key)
+                    rows, status = _get_json(odds.get("base_url", "").rstrip("/") + path, params=params)
+                    for row in rows:
+                        row.setdefault("sport_key", sport_key)
+                        row.setdefault("sport", sport)
+                    out["the_odds_api"].extend(rows)
+                    statuses.append({
+                        "provider": "the_odds_api",
+                        "sport": sport,
+                        "sport_key": sport_key,
+                        "rows": len(rows),
+                        "credit_floor": floor,
+                        **status,
+                    })
 
     espn = providers.get("espn_public_site_api", {})
     base = espn.get("base_url", "").rstrip("/")
@@ -376,6 +607,32 @@ def _configured_game_candidate(settings: Any) -> dict[str, Any] | None:
     return candidate
 
 
+def configured_game_candidate_id(settings: Any) -> str | None:
+    candidate = _configured_game_candidate(settings)
+    return candidate.get("candidate_id") if candidate else None
+
+
+def _first_external_candidate_id(match: dict[str, Any]) -> str | None:
+    for item in match.get("external_matches") or []:
+        candidate_id = item.get("candidate_id") if isinstance(item, dict) else None
+        if candidate_id:
+            return str(candidate_id)
+    return None
+
+
+def _identity_event_key(identity: Any) -> str | None:
+    if isinstance(identity, dict):
+        value = identity.get("event_key")
+        return str(value) if value else None
+    return None
+
+
+def _broad_slate_candidate(candidate_id: str | None, configured_id: str | None) -> bool:
+    if not candidate_id:
+        return False
+    return not configured_id or candidate_id != configured_id
+
+
 def _kalshi_catalog(ctx: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     existing = ctx.read_json("market_catalog.json") or {}
     if existing.get("rows"):
@@ -391,21 +648,65 @@ def _kalshi_catalog(ctx: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
 
 def _kalshi_open_slate(ctx: Any, source_config: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    max_pages = max(_int_env("NBABOT_KALSHI_SLATE_MAX_PAGES", 3), 1)
+    broad_max_pages = max(_int_env("NBABOT_KALSHI_SLATE_MAX_PAGES", 3), 1)
+    series_max_pages = max(_int_env("NBABOT_KALSHI_SERIES_MAX_PAGES", 20), 1)
+    sports_filter = set(configured_sports(ctx.settings, source_config))
+    raw_entries: list[tuple[dict[str, Any], list[str], str, str | None]] = []
+    series_status = []
+    for series, sport in _kalshi_series_for_sports(sports_filter):
+        try:
+            series_rows = ctx.kalshi.list_markets(
+                series=series,
+                status="open",
+                max_pages=series_max_pages,
+            )
+        except Exception as exc:
+            series_status.append({
+                "series": series,
+                "sport": sport,
+                "ok": False,
+                "rows": 0,
+                "error": exc.__class__.__name__,
+                "max_pages": series_max_pages,
+            })
+            continue
+        series_status.append({
+            "series": series,
+            "sport": sport,
+            "ok": True,
+            "rows": len(series_rows),
+            "max_pages": series_max_pages,
+        })
+        raw_entries.extend(
+            (market, [sport], "kalshi-series-scoped", series)
+            for market in series_rows
+        )
+    broad_status: dict[str, Any]
     try:
-        raw = ctx.kalshi.list_open_markets(max_pages=max_pages)
+        broad_rows = ctx.kalshi.list_open_markets(max_pages=broad_max_pages)
+        broad_status = {
+            "ok": True,
+            "rows": len(broad_rows),
+            "raw_rows_scanned": len(broad_rows),
+            "max_pages": broad_max_pages,
+        }
     except Exception as exc:
-        return [], {
-            "source": "kalshi-open-markets",
+        broad_rows = []
+        broad_status = {
             "ok": False,
             "rows": 0,
+            "raw_rows_scanned": 0,
             "error": exc.__class__.__name__,
+            "max_pages": broad_max_pages,
         }
-    rows = []
-    sports_filter = set(configured_sports(ctx.settings, source_config))
-    for market in raw:
+    raw_entries.extend(
+        (market, [], "kalshi-open-markets", None)
+        for market in broad_rows
+    )
+    rows_by_ticker: dict[str, dict[str, Any]] = {}
+    for market, scoped_sports, source, series in raw_entries:
         title = market.get("title") or ""
-        sports = [
+        sports = scoped_sports or [
             sport for sport in _classify_kalshi_sports(title, source_config)
             if sport in sports_filter or sport == "kalshi_sports"
         ]
@@ -414,36 +715,61 @@ def _kalshi_open_slate(ctx: Any, source_config: dict[str, Any]) -> tuple[list[di
         q = _kalshi_quote_fields(market)
         if not q["has_live_quote"] and os.environ.get("NBABOT_INCLUDE_ZERO_QUOTE_MARKETS", "0") not in ("1", "true", "True"):
             continue
-        rows.append({
+        ticker = market.get("ticker")
+        if not ticker or ticker in rows_by_ticker:
+            continue
+        rows_by_ticker[ticker] = {
             "ticker": market.get("ticker"),
             "event_ticker": market.get("event_ticker"),
+            "series_ticker": series or market.get("series_ticker") or market.get("series"),
             "title": title,
+            "yes_sub_title": market.get("yes_sub_title"),
+            "no_sub_title": market.get("no_sub_title"),
+            "rules_primary": market.get("rules_primary"),
+            "rules_secondary": market.get("rules_secondary"),
             "sport_keys": sports,
             "components": _kalshi_components(title),
+            "custom_strike": market.get("custom_strike"),
+            "strike_type": market.get("strike_type"),
+            "floor_strike": market.get("floor_strike"),
+            "cap_strike": market.get("cap_strike"),
+            "mve_selected_legs": market.get("mve_selected_legs") or [],
+            "mve_collection_ticker": market.get("mve_collection_ticker"),
             "close_time": market.get("close_time"),
             "expiration_time": market.get("expiration_time"),
             "status": market.get("status"),
             "market_type": market.get("market_type"),
-            "source": "kalshi-open-markets",
+            "is_composite": _kalshi_composite_market(market),
+            "source": source,
             "mapping_status": "open_kalshi",
             "mapped_markets": [],
             "mapped_scenarios": [],
             **q,
-        })
+        }
+    rows = list(rows_by_ticker.values())
     rows.sort(
         key=lambda row: (
+            row.get("source") != "kalshi-series-scoped",
+            bool(row.get("is_composite")),
             not row.get("has_live_quote"),
             row.get("spread_cents") if row.get("spread_cents") is not None else 999,
             -(row.get("bid") or 0),
         )
     )
     limit = max(_int_env("NBABOT_KALSHI_SLATE_LIMIT", 200), 1)
+    limited = rows[:limit]
+    ok = bool(rows) or any(item.get("ok") for item in series_status) or broad_status.get("ok")
     return rows[:limit], {
         "source": "kalshi-open-markets",
-        "ok": True,
-        "rows": len(rows[:limit]),
-        "raw_rows_scanned": len(raw),
-        "max_pages": max_pages,
+        "ok": ok,
+        "rows": len(limited),
+        "raw_rows_scanned": len(raw_entries),
+        "series_rows_scanned": sum(int(item.get("rows") or 0) for item in series_status),
+        "broad_rows_scanned": len(broad_rows),
+        "series_queries": series_status,
+        "series_max_pages": series_max_pages,
+        "broad_scan": broad_status,
+        "max_pages": broad_max_pages,
     }
 
 
@@ -470,9 +796,20 @@ def _attach_open_kalshi_candidates(
         market = {
             "ticker": ticker,
             "event_ticker": row.get("event_ticker"),
+            "series_ticker": row.get("series_ticker"),
             "title": row.get("title"),
+            "yes_sub_title": row.get("yes_sub_title"),
+            "no_sub_title": row.get("no_sub_title"),
+            "rules_primary": row.get("rules_primary"),
+            "rules_secondary": row.get("rules_secondary"),
             "sport_keys": row.get("sport_keys"),
             "components": row.get("components"),
+            "custom_strike": row.get("custom_strike"),
+            "strike_type": row.get("strike_type"),
+            "floor_strike": row.get("floor_strike"),
+            "cap_strike": row.get("cap_strike"),
+            "mve_selected_legs": row.get("mve_selected_legs") or [],
+            "mve_collection_ticker": row.get("mve_collection_ticker"),
             "bid": row.get("bid"),
             "ask": row.get("ask"),
             "mid": row.get("mid"),
@@ -481,11 +818,12 @@ def _attach_open_kalshi_candidates(
             "has_live_quote": row.get("has_live_quote"),
             "close_time": row.get("close_time"),
             "mapping_status": row.get("mapping_status"),
+            "is_composite": row.get("is_composite"),
             "source": row.get("source"),
         }
         candidate["kalshi_markets"].append(market)
         candidate["open_kalshi_market_count"] = len(candidate["kalshi_markets"])
-        candidate["reasoning"].append("Open Kalshi sports market discovered from broad exchange scan.")
+        candidate["reasoning"].append("Open Kalshi sports market discovered from scoped/broad exchange scan.")
 
 
 def attach_kalshi_markets(ctx: Any, candidates: dict[str, dict[str, Any]],
@@ -537,7 +875,7 @@ def score_slate_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, A
         kalshi_count = len(candidate.get("kalshi_markets") or [])
         mapped_count = len(candidate.get("mapped_kalshi_markets") or [])
         line_count = len(candidate.get("line_markets") or [])
-        has_book = bool({"sportsgameodds", "the_odds_api"} & structured)
+        has_book = bool(STRUCTURED_BOOK_PROVIDERS & structured)
         has_kalshi = "kalshi" in structured
         open_kalshi = bool(candidate.get("open_kalshi_market_count"))
         score = (4 if has_kalshi else 0) + (3 if has_book else 0) + min(mapped_count, 5) + min(line_count, 5) / 10
@@ -601,7 +939,7 @@ def verify_slate(ctx: Any, slate: dict[str, Any]) -> dict[str, Any]:
     for candidate in candidates:
         structured = set(candidate.get("structured_sources") or [])
         hidden_only = structured <= set() and candidate.get("fallback_sources")
-        has_structured_book = bool({"sportsgameodds", "the_odds_api"} & structured)
+        has_structured_book = bool(STRUCTURED_BOOK_PROVIDERS & structured)
         has_kalshi = "kalshi" in structured or bool(candidate.get("kalshi_markets"))
         mapped = bool(candidate.get("mapped_kalshi_markets"))
         reasons = []
@@ -660,12 +998,19 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
         for row in matcher.get("rows", [])
         if row.get("ticker")
     }
+    ranker = ctx.read_json("candidate_ranker.json") or {}
+    rank_by_ticker = {
+        row.get("ticker"): row
+        for row in ranker.get("rows", [])
+        if row.get("ticker")
+    }
     input_freshness = artifact_freshness(ctx, (
         "market_snapshot.json",
         "slate_candidates.json",
         "slate_verification.json",
         "book_watch.json",
         "market_matches.json",
+        "candidate_ranker.json",
     ))
     verified_ids = {
         row["candidate_id"]
@@ -680,6 +1025,20 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
         for source in (candidate.get("structured_sources") or [])
     })
     metrics = _book_metrics(ctx)
+    configured_candidate_id = configured_game_candidate_id(ctx.settings)
+    execution_mode = str(getattr(ctx.settings, "execution_mode", "paper") or "paper").lower()
+    paper_demo_mode = execution_mode in {"paper", "demo"}
+    try:
+        performance_learning = performance_learner.learn_from_store(
+            ResearchStore(ctx.settings.research_db_path),
+            default_sport=getattr(ctx.settings, "sport", None),
+        )
+    except Exception as exc:
+        performance_learning = performance_learner.learn(
+            [],
+            default_sport=getattr(ctx.settings, "sport", None),
+        )
+        performance_learning["error"] = exc.__class__.__name__
     market_candidates = []
     seen_tickers = set()
     for row in rows:
@@ -692,17 +1051,31 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
         edge = (float(prior) - float(implied)) if implied is not None and prior is not None else None
         book = metrics.get(ticker, {})
         match = match_by_ticker.get(ticker, {})
+        rank = rank_by_ticker.get(ticker, {}) or {}
+        candidate_id = (
+            row.get("candidate_id")
+            or rank.get("candidate_id")
+            or _first_external_candidate_id(match)
+        )
+        market_identity = rank.get("market_identity")
         spread = row.get("ask") - row.get("bid") if row.get("ask") is not None and row.get("bid") is not None else None
         blockers = []
-        for report in input_freshness.values():
+        for artifact, report in input_freshness.items():
+            if artifact == "candidate_ranker.json":
+                continue
             if not report["fresh"]:
                 blockers.append(f"{report['artifact']} {report['reason']}")
         if not verified_ids:
             blockers.append("slate verifier has no approved research candidates")
+        min_edge = float(getattr(
+            ctx.settings,
+            "execution_min_edge",
+            getattr(ctx.settings, "min_edge", 0.05),
+        ))
         if edge is None:
             blockers.append("missing model-vs-market edge")
-        elif edge < float(ctx.settings.min_edge):
-            blockers.append(f"edge below configured minimum {ctx.settings.min_edge:.3f}")
+        elif edge < min_edge:
+            blockers.append(f"edge below configured minimum {min_edge:.3f}")
         if row.get("sgp_adjusted_prob") is None:
             blockers.append("missing SGP-adjusted scenario probability")
         if spread is None or spread > int(ctx.settings.max_spread_cents):
@@ -713,8 +1086,11 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
         if isinstance(side_metrics, dict) and side_metrics.get("fillable_contracts", 0) == 0:
             blockers.append("no fillable contracts at observed limit")
         trade_eligible = not blockers
-        market_candidates.append({
+        candidate_row = {
             "ticker": ticker,
+            "candidate_id": candidate_id,
+            "event_key": _identity_event_key(market_identity),
+            "broad_slate": _broad_slate_candidate(candidate_id, configured_candidate_id),
             "scenario_id": row.get("scenario_id"),
             "market": row.get("market"),
             "label": row.get("label"),
@@ -731,6 +1107,8 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
             "book_metrics": book,
             "orderbook_delta": match.get("orderbook_delta"),
             "external_matches": match.get("external_matches") or [],
+            "market_identity": market_identity,
+            "is_composite": bool(rank.get("is_composite")),
             "freshness": {
                 "inputs": input_freshness,
                 "market_match": match.get("freshness"),
@@ -743,7 +1121,13 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
                 "Structured slate verification is required before execution.",
                 "Existing risk.py remains the final execution gate.",
             ],
-        })
+        }
+        performance_learner.annotate_candidate(
+            candidate_row,
+            performance_learning,
+            default_sport=getattr(ctx.settings, "sport", None),
+        )
+        market_candidates.append(candidate_row)
     for candidate in slate_candidates:
         for market in candidate.get("kalshi_markets") or []:
             ticker = market.get("ticker")
@@ -752,19 +1136,37 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
             seen_tickers.add(ticker)
             book = metrics.get(ticker, {})
             match = match_by_ticker.get(ticker, {})
-            blockers = [
-                "not mapped to a configured scenario leg",
-                "missing model-vs-market edge",
-                "missing SGP-adjusted scenario probability",
-                "slate verifier has not approved this market for execution",
-            ]
+            rank = rank_by_ticker.get(ticker, {})
+            candidate_id = candidate.get("candidate_id") or rank.get("candidate_id")
+            model_prob = rank.get("model_prob")
+            rank_edge = rank.get("edge")
+            sgp_adjusted_prob = rank.get("sgp_adjusted_prob")
+            if sgp_adjusted_prob is None and model_prob is not None and not rank.get("is_composite"):
+                sgp_adjusted_prob = model_prob
+            blockers = []
+            if not paper_demo_mode:
+                blockers.extend([
+                    "not mapped to a configured scenario leg",
+                    "missing SGP-adjusted scenario probability",
+                    "slate verifier has not approved this market for execution",
+                ])
+            if model_prob is None or rank_edge is None:
+                blockers.append("edge engine has not evaluated this market")
+            elif not rank.get("passes_edge"):
+                blockers.extend(rank.get("blockers") or ["edge engine did not pass this market"])
+            elif sgp_adjusted_prob is None:
+                blockers.append("missing SGP-adjusted scenario probability")
             for report in input_freshness.values():
                 if not report["fresh"]:
                     blockers.append(f"{report['artifact']} {report['reason']}")
             if not book:
                 blockers.append("missing order-book verification")
-            market_candidates.append({
+            trade_eligible = paper_demo_mode and not blockers
+            candidate_row = {
                 "ticker": ticker,
+                "candidate_id": candidate_id,
+                "event_key": _identity_event_key(rank.get("market_identity")),
+                "broad_slate": _broad_slate_candidate(candidate_id, configured_candidate_id),
                 "scenario_id": None,
                 "market": "open_kalshi_sports",
                 "label": market.get("title"),
@@ -774,26 +1176,40 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
                 "bid": market.get("bid"),
                 "ask": market.get("ask"),
                 "implied": market.get("implied"),
-                "prior_p": None,
-                "edge": None,
-                "sgp_adjusted_prob": None,
+                "prior_p": model_prob,
+                "model_prob": model_prob,
+                "model_prob_sources": rank.get("model_prob_sources") or [],
+                "edge": rank_edge,
+                "required_edge": rank.get("required_edge"),
+                "book_count": rank.get("book_count"),
+                "disagreement_std": rank.get("disagreement_std"),
+                "sgp_adjusted_prob": sgp_adjusted_prob,
                 "risk": None,
                 "book_metrics": book,
                 "orderbook_delta": match.get("orderbook_delta"),
                 "external_matches": match.get("external_matches") or [],
+                "market_identity": rank.get("market_identity"),
+                "is_composite": bool(rank.get("is_composite") or market.get("is_composite")),
                 "execution_review": bool(match.get("execution_review")),
                 "freshness": {
                     "inputs": input_freshness,
                     "market_match": match.get("freshness"),
                 },
                 "structured_sources": candidate.get("structured_sources") or [],
-                "trade_eligible": False,
+                "trade_eligible": trade_eligible,
                 "blockers": blockers,
                 "reasoning": [
                     "Open Kalshi sports market discovered by broad slate scan.",
-                    "This is a research/watchlist row until model probability, SGP adjustment, and risk checks exist.",
+                    "Single-market paper/demo execution uses the ranker model probability as the SGP-adjusted probability.",
+                    "Live execution still requires explicit live gates and risk.py approval.",
                 ],
-            })
+            }
+            performance_learner.annotate_candidate(
+                candidate_row,
+                performance_learning,
+                default_sport=getattr(ctx.settings, "sport", None),
+            )
+            market_candidates.append(candidate_row)
     market_candidates.sort(key=lambda item: item.get("edge") if item.get("edge") is not None else -999, reverse=True)
     return {
         "game_id": ctx.settings.game_id,
@@ -802,6 +1218,7 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
         "candidate_count": len(market_candidates),
         "trade_eligible_count": sum(1 for row in market_candidates if row["trade_eligible"]),
         "structured_sources": verified_sources,
+        "performance_learning": performance_learning,
         "market_candidates": market_candidates,
         "notes": [
             "Research-agent does not place orders.",

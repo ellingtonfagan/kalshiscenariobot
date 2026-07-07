@@ -6,6 +6,7 @@ import math
 import re
 from typing import Any
 
+from .market_identity import match_identities, resolve_kalshi_market, resolve_line_market
 from .odds_refresh import artifact_freshness, freshness_report
 from .research import ResearchStore, utc_now
 
@@ -194,8 +195,56 @@ def _best_external_matches(market: dict[str, Any], pool: list[dict[str, Any]]) -
             "sources": item.get("sources"),
             "structured_sources": item.get("structured_sources"),
             "line_count": item.get("line_count"),
+            "match_type": "fuzzy",
         })
     return sorted(matches, key=lambda row: row["score"], reverse=True)[:5]
+
+
+def _candidate_by_id(slate: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        candidate.get("candidate_id"): candidate
+        for candidate in slate.get("candidates") or []
+        if candidate.get("candidate_id")
+    }
+
+
+def _identity_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
+    pool = []
+    for candidate in slate.get("candidates") or []:
+        for line in candidate.get("line_markets") or []:
+            pool.append({
+                "candidate_id": candidate.get("candidate_id"),
+                "line": line,
+                "identity": resolve_line_market(line, candidate),
+                "sources": candidate.get("sources") or [],
+                "structured_sources": candidate.get("structured_sources") or [],
+                "line_count": len(candidate.get("line_markets") or []),
+            })
+    return pool
+
+
+def _identity_external_matches(
+    market: dict[str, Any],
+    slate: dict[str, Any],
+    pool: list[dict[str, Any]],
+    candidates: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidate = candidates.get(market.get("candidate_id"), {})
+    identity = resolve_kalshi_market(market, candidate)
+    matches = []
+    for match in match_identities(identity, pool):
+        candidate_id = match.get("candidate_id")
+        candidate_doc = candidates.get(candidate_id, {})
+        matches.append({
+            "candidate_id": candidate_id,
+            "score": match.get("score"),
+            "match_type": match.get("match_type"),
+            "identity": match.get("identity"),
+            "sources": candidate_doc.get("sources") or [],
+            "structured_sources": candidate_doc.get("structured_sources") or [],
+            "line_count": len(candidate_doc.get("line_markets") or []),
+        })
+    return matches
 
 
 def build_market_matches(ctx: Any) -> dict[str, Any]:
@@ -210,6 +259,8 @@ def build_market_matches(ctx: Any) -> dict[str, Any]:
     previous_books = _previous_book_metrics(ctx, current_books)
     markets = _slate_markets(slate, sport_handoff)
     external = _external_pool(slate)
+    candidates = _candidate_by_id(slate)
+    identity_pool = _identity_pool(slate)
     rows = []
     for ticker, market in markets.items():
         current = current_books.get(ticker, {})
@@ -222,7 +273,9 @@ def build_market_matches(ctx: Any) -> dict[str, Any]:
             "book_watch.json",
             {"captured_at": yes.get("captured_at")},
         )
-        external_matches = _best_external_matches(market, external)
+        external_matches = _identity_external_matches(market, slate, identity_pool, candidates)
+        if not external_matches:
+            external_matches = _best_external_matches(market, external)
         blockers = []
         for report in input_freshness.values():
             if not report["fresh"]:
@@ -240,7 +293,7 @@ def build_market_matches(ctx: Any) -> dict[str, Any]:
         if not external_matches:
             blockers.append("no comparable sportsbook/API market matched yet")
         blockers.extend([
-            "missing model probability",
+            "candidate-ranker edge model required",
             "missing SGP-adjusted probability",
             "risk gate has not approved",
         ])
@@ -254,10 +307,24 @@ def build_market_matches(ctx: Any) -> dict[str, Any]:
         )
         rows.append({
             "ticker": ticker,
+            "event_ticker": market.get("event_ticker"),
+            "series_ticker": market.get("series_ticker"),
             "candidate_id": market.get("candidate_id"),
             "sport": market.get("sport"),
             "title": market.get("title"),
             "components": market.get("components") or [],
+            "custom_strike": market.get("custom_strike"),
+            "strike_type": market.get("strike_type"),
+            "floor_strike": market.get("floor_strike"),
+            "cap_strike": market.get("cap_strike"),
+            "mve_selected_legs": market.get("mve_selected_legs") or [],
+            "mve_collection_ticker": market.get("mve_collection_ticker"),
+            "is_composite": market.get("is_composite"),
+            "yes_sub_title": market.get("yes_sub_title"),
+            "no_sub_title": market.get("no_sub_title"),
+            "rules_primary": market.get("rules_primary"),
+            "rules_secondary": market.get("rules_secondary"),
+            "close_time": market.get("close_time"),
             "captured_at": yes.get("captured_at") or market.get("captured_at"),
             "kalshi_quote": {
                 "bid": market.get("bid"),

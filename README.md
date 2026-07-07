@@ -50,6 +50,7 @@ ksobot source-check           # verify external source readiness without exposin
 ksobot slate-discovery        # discover candidate sports events/lines
 ksobot slate-verify           # verify slate findings before research
 ksobot market-matcher         # build orderbook delta + execution-review slate
+ksobot candidate-ranker       # compute de-vigged consensus probability + edge
 ksobot research-agent         # write research_bundle + trade-eligible candidates
 ksobot autopilot              # safe repeated orchestration for cron/launchd
 ksobot ui                     # local browser UI at http://127.0.0.1:8765
@@ -85,10 +86,12 @@ nbabot source-check      # verify external source readiness; network probes are 
 nbabot slate-discovery   # SportsGameOdds + The Odds API + ESPN fallback + Kalshi map
 nbabot slate-verify      # reject social-only / ESPN-only / unmapped findings
 nbabot market-matcher    # build orderbook delta + execution-review slate artifacts
+nbabot candidate-ranker  # score matched markets with sportsbook consensus edge
 nbabot research-agent    # build evidence bundle and trade-eligible handoff rows
 nbabot status            # summarize current operating state
 nbabot portfolio-sync    # mirror Kalshi balance + positions into local state
 nbabot daily-cycle       # autonomous control loop; execution only in explicit live/demo mode
+nbabot scheduled-demo-cycle # daily-cycle + settlement audit + one final demo report
 nbabot ports             # export planned sport adapters and blockers
 nbabot paper             # create local paper fills for approved single-leg intents
 nbabot demo-execute      # Kalshi demo only; requires NBABOT_EXECUTION_MODE=demo
@@ -137,6 +140,7 @@ NBABOT_RESEARCH_OVERRIDE_MAX_UNITS=1
 NBABOT_MAX_DAILY_LOSS_UNITS=2
 NBABOT_MAX_GAME_EXPOSURE_UNITS=5
 NBABOT_MIN_EDGE=0.05
+NBABOT_DEMO_MIN_EDGE=0.03
 NBABOT_STALE_MARKET_SECONDS=90
 NBABOT_MAX_SPREAD_CENTS=10
 NBABOT_ORDERBOOK_DEPTH=
@@ -207,10 +211,30 @@ watch, market matching, research, the explicit execution gate, backtesting, and 
 The run artifact includes `activation_edges` so the automation trail is inspectable after
 every cycle.
 
+For unattended demo trading, use `scheduler/run-demo-cycle.sh` or install the ready-made
+cron file:
+
+```bash
+crontab scheduler/demo-crontab.txt
+```
+
+On a Mac that may sleep, keep it awake during scheduled windows with `caffeinate -s`.
+The demo cron runs four fixed ET passes per day, forces `NBABOT_EXECUTION_MODE=demo`
+inside its own process, runs settlement audit and final status, and sends one concise
+report through the configured delivery target.
+
 `market-matcher` writes `market_matches.json` and `execution_slate.json`. It compares the
 current Kalshi order book with the previous stored book, records deltas such as spread
 tightening or bid movement, and marks rows for `execution_review` only when the input
 artifacts are fresh. That is still not approval to trade.
+
+`candidate-ranker` writes `candidate_ranker.json` and `edge_candidates.json`. It maps
+Kalshi and sportsbook rows to deterministic market identities, de-vigs multi-book odds
+into a consensus model probability, adjusts the required edge for disagreement/book
+count/spread, and blocks fuzzy identity matches from passing. Kalshi multivariate
+markets are matched by their `mve_selected_legs`; a whole composite is exact only when
+all supported component legs match sportsbook lines and receive an SGP-adjusted joint
+probability.
 
 `research-agent` writes `research_bundle.json` for the full evidence trail and
 `market_candidates.json` for only rows marked `trade_eligible`. If a research bundle

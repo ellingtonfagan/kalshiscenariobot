@@ -78,7 +78,7 @@ providers:
   the_odds_api:
     label: The Odds API
     tier: 2
-    role: secondary_structured_odds
+    role: credit_gated_structured_odds_fallback
     required_env:
       - THE_ODDS_API_KEY
     docs_url: https://the-odds-api.com/liveapi/guides/v4/
@@ -93,7 +93,7 @@ providers:
       event_odds: /sports/{sport}/events/{event_id}/odds/
     default_params:
       odds:
-        regions: us
+        regions: us,eu
         markets: h2h,spreads,totals
         oddsFormat: american
     probe:
@@ -103,6 +103,41 @@ providers:
         type: api_key
         env: THE_ODDS_API_KEY
         query_param: apiKey
+    allowed_for:
+      - slate_discovery
+      - odds_consensus
+      - line_movement_backup
+      - research_context
+    live_execution_allowed: false
+    confidence: high
+
+  parlay_api:
+    label: ParlayAPI
+    tier: 1
+    role: primary_structured_odds
+    required_env:
+      - PARLAY_API_KEY
+    docs_url: https://parlay-api.com/docs
+    base_url: https://parlay-api.com/v1
+    auth:
+      type: api_key
+      env: PARLAY_API_KEY
+      header: X-API-Key
+    endpoints:
+      sports: /sports
+      odds: /sports/{sport}/odds
+    default_params:
+      odds:
+        regions: us
+        markets: h2h,spreads,totals
+        oddsFormat: american
+    probe:
+      method: GET
+      path: /sports
+      auth:
+        type: api_key
+        env: PARLAY_API_KEY
+        header: X-API-Key
     allowed_for:
       - slate_discovery
       - odds_consensus

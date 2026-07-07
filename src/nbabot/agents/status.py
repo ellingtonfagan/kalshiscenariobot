@@ -60,6 +60,8 @@ def build_status(ctx: Context) -> dict[str, Any]:
             "book_watch.json",
             "market_matches.json",
             "execution_slate.json",
+            "candidate_ranker.json",
+            "edge_candidates.json",
             "research_bundle.json",
             "market_candidates.json",
             "sport_market_candidates.json",
@@ -69,6 +71,7 @@ def build_status(ctx: Context) -> dict[str, Any]:
             "source_check.json",
             "reconcile.json",
             "backtest.json",
+            "historical_backtest.json",
         )
     }
     latest_risk = store.latest_rows("risk_snapshots", 1)

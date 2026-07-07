@@ -4,11 +4,13 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict, is_dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 ORDER_TABLES = {"paper_orders", "demo_orders", "live_orders"}
+DEFAULT_RISK_TIMEZONE = "America/New_York"
 
 
 def utc_now() -> str:
@@ -145,6 +147,32 @@ class ResearchStore:
                     simulated_pnl REAL,
                     row_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS backtest_edge_runs (
+                    run_id TEXT PRIMARY KEY,
+                    game_id TEXT NOT NULL,
+                    run_at TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    api_cost_json TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS backtest_edge_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    game_id TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    sport TEXT,
+                    market_family TEXT,
+                    decision_time TEXT,
+                    model_prob REAL,
+                    kalshi_price_prob REAL,
+                    edge REAL,
+                    outcome INTEGER,
+                    row_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_backtest_edge_records_run
+                    ON backtest_edge_records(run_id);
+                CREATE INDEX IF NOT EXISTS idx_backtest_edge_records_ticker_time
+                    ON backtest_edge_records(ticker, decision_time DESC);
                 CREATE TABLE IF NOT EXISTS trade_intents (
                     client_order_id TEXT PRIMARY KEY,
                     game_id TEXT NOT NULL,
@@ -192,6 +220,34 @@ class ResearchStore:
                     filled_at TEXT NOT NULL,
                     fill_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS settlement_records (
+                    client_order_id TEXT PRIMARY KEY,
+                    game_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    contracts REAL NOT NULL,
+                    entry_price_cents REAL NOT NULL,
+                    audited_at TEXT NOT NULL,
+                    settled_at TEXT,
+                    market_status TEXT,
+                    winning_side TEXT,
+                    outcome INTEGER NOT NULL,
+                    payout_cents REAL,
+                    pnl_cents REAL,
+                    entry_model_prob REAL,
+                    entry_market_prob REAL,
+                    closing_consensus_prob REAL,
+                    closing_consensus_cents REAL,
+                    clv_cents REAL,
+                    beat_closing_consensus INTEGER,
+                    brier_entry_model REAL,
+                    market_json TEXT NOT NULL,
+                    consensus_json TEXT NOT NULL,
+                    record_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_settlement_records_game_time
+                    ON settlement_records(game_id, audited_at DESC);
                 CREATE TABLE IF NOT EXISTS positions (
                     position_id TEXT PRIMARY KEY,
                     game_id TEXT NOT NULL,
@@ -385,6 +441,56 @@ class ResearchStore:
                 ],
             )
 
+    def record_backtest_edge_run(self, run_id: str, game_id: str,
+                                 payload: dict[str, Any]) -> None:
+        """Persist historical edge backtest output outside real settlements."""
+        self.init_schema()
+        records = list(payload.get("records") or [])
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT OR REPLACE INTO backtest_edge_runs(
+                    run_id, game_id, run_at, summary_json, api_cost_json, payload_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    game_id,
+                    utc_now(),
+                    to_json(payload.get("summary", {})),
+                    to_json(payload.get("api_cost", {})),
+                    to_json(payload),
+                ),
+            )
+            db.execute("DELETE FROM backtest_edge_records WHERE run_id = ?", (run_id,))
+            db.executemany(
+                """
+                INSERT INTO backtest_edge_records(
+                    run_id, game_id, ticker, sport, market_family, decision_time,
+                    model_prob, kalshi_price_prob, edge, outcome, row_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        run_id,
+                        game_id,
+                        r.get("ticker") or "",
+                        r.get("sport"),
+                        r.get("market_family"),
+                        r.get("decision_time"),
+                        r.get("model_prob"),
+                        r.get("kalshi_price_prob"),
+                        r.get("edge"),
+                        r.get("outcome"),
+                        to_json(r),
+                    )
+                    for r in records
+                    if r.get("ticker")
+                ],
+            )
+
     def record_order(self, table: str, game_id: str, intent: Any, decision: Any,
                      request: Any, receipt: Any) -> bool:
         if table not in ORDER_TABLES:
@@ -437,6 +543,104 @@ class ResearchStore:
                 (client_order_id, game_id, utc_now(), to_json(fill)),
             )
 
+    def list_execution_orders(self, unsettled_only: bool = True) -> list[dict[str, Any]]:
+        self.init_schema()
+        rows: list[dict[str, Any]] = []
+        with self.connect() as db:
+            settled_ids = set()
+            if unsettled_only:
+                settled_ids = {
+                    row["client_order_id"]
+                    for row in db.execute("SELECT client_order_id FROM settlement_records")
+                }
+            fills = db.execute(
+                """
+                SELECT client_order_id, filled_at, fill_json
+                FROM fills
+                ORDER BY id ASC
+                """
+            ).fetchall()
+            fills_by_order: dict[str, list[dict[str, Any]]] = {}
+            for fill in fills:
+                fills_by_order.setdefault(fill["client_order_id"], []).append(dict(fill))
+
+            for table in sorted(ORDER_TABLES):
+                mode = table.removesuffix("_orders")
+                for row in db.execute(
+                    f"""
+                    SELECT client_order_id, game_id, created_at, intent_json,
+                           decision_json, request_json, receipt_json
+                    FROM {table}
+                    ORDER BY created_at ASC
+                    """
+                ):
+                    client_order_id = row["client_order_id"]
+                    if client_order_id in settled_ids:
+                        continue
+                    payload = dict(row)
+                    payload["mode"] = mode
+                    payload["order_table"] = table
+                    payload["fills"] = fills_by_order.get(client_order_id, [])
+                    rows.append(payload)
+        return rows
+
+    def settlement_exists(self, client_order_id: str) -> bool:
+        self.init_schema()
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM settlement_records WHERE client_order_id = ?",
+                (client_order_id,),
+            ).fetchone()
+        return row is not None
+
+    def record_settlement(self, record: dict[str, Any]) -> bool:
+        self.init_schema()
+        with self.connect() as db:
+            cur = db.execute(
+                """
+                INSERT OR IGNORE INTO settlement_records(
+                    client_order_id, game_id, mode, ticker, side, contracts,
+                    entry_price_cents, audited_at, settled_at, market_status,
+                    winning_side, outcome, payout_cents, pnl_cents,
+                    entry_model_prob, entry_market_prob, closing_consensus_prob,
+                    closing_consensus_cents, clv_cents, beat_closing_consensus,
+                    brier_entry_model, market_json, consensus_json, record_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["client_order_id"], record["game_id"], record["mode"],
+                    record["ticker"], record["side"], record["contracts"],
+                    record["entry_price_cents"], record["audited_at"],
+                    record.get("settled_at"), record.get("market_status"),
+                    record.get("winning_side"), record["outcome"],
+                    record.get("payout_cents"), record.get("pnl_cents"),
+                    record.get("entry_model_prob"), record.get("entry_market_prob"),
+                    record.get("closing_consensus_prob"),
+                    record.get("closing_consensus_cents"), record.get("clv_cents"),
+                    (
+                        None if record.get("beat_closing_consensus") is None
+                        else int(bool(record.get("beat_closing_consensus")))
+                    ),
+                    record.get("brier_entry_model"),
+                    to_json(record.get("market", {})),
+                    to_json(record.get("closing_consensus", {})),
+                    to_json(record),
+                ),
+            )
+        return cur.rowcount == 1
+
+    def list_settlement_records(self, limit: int | None = None) -> list[dict[str, Any]]:
+        self.init_schema()
+        query = "SELECT * FROM settlement_records ORDER BY audited_at ASC"
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (int(limit),)
+        with self.connect() as db:
+            rows = db.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
     def count_orders(self, table: str) -> int:
         if table not in ORDER_TABLES:
             raise ValueError(f"unsupported order table: {table}")
@@ -472,6 +676,102 @@ class ResearchStore:
             except (json.JSONDecodeError, TypeError, ValueError):
                 continue
         return exposure
+
+    @staticmethod
+    def _order_tables(tables: str | Iterable[str]) -> list[str]:
+        selected = [tables] if isinstance(tables, str) else list(tables)
+        if not selected:
+            raise ValueError("at least one order table is required")
+        unsupported = [table for table in selected if table not in ORDER_TABLES]
+        if unsupported:
+            raise ValueError(f"unsupported order table: {unsupported[0]}")
+        return selected
+
+    @staticmethod
+    def _risk_day(
+        calendar_day: str | date | None,
+        timezone_name: str = DEFAULT_RISK_TIMEZONE,
+    ) -> tuple[date, ZoneInfo]:
+        tz = ZoneInfo(timezone_name)
+        if calendar_day is None:
+            return datetime.now(tz).date(), tz
+        if isinstance(calendar_day, date):
+            return calendar_day, tz
+        return date.fromisoformat(str(calendar_day)), tz
+
+    @staticmethod
+    def _created_on_day(raw: str | None, target_day: date, tz: ZoneInfo) -> bool:
+        if not raw:
+            return False
+        try:
+            created = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return created.astimezone(tz).date() == target_day
+
+    def daily_order_exposure_units(
+        self,
+        tables: str | Iterable[str],
+        calendar_day: str | date | None = None,
+        *,
+        timezone_name: str = DEFAULT_RISK_TIMEZONE,
+        broad_slate_only: bool = False,
+    ) -> float:
+        selected = self._order_tables(tables)
+        target_day, tz = self._risk_day(calendar_day, timezone_name)
+        self.init_schema()
+        exposure = 0.0
+        with self.connect() as db:
+            for table in selected:
+                rows = db.execute(
+                    f"SELECT created_at, intent_json FROM {table}",
+                ).fetchall()
+                for row in rows:
+                    if not self._created_on_day(row["created_at"], target_day, tz):
+                        continue
+                    try:
+                        intent = json.loads(row["intent_json"])
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if broad_slate_only and not bool(intent.get("broad_slate")):
+                        continue
+                    try:
+                        exposure += float(intent.get("stake_units", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+        return exposure
+
+    def daily_order_count(
+        self,
+        tables: str | Iterable[str],
+        calendar_day: str | date | None = None,
+        *,
+        timezone_name: str = DEFAULT_RISK_TIMEZONE,
+        broad_slate_only: bool = False,
+    ) -> int:
+        selected = self._order_tables(tables)
+        target_day, tz = self._risk_day(calendar_day, timezone_name)
+        self.init_schema()
+        count = 0
+        with self.connect() as db:
+            for table in selected:
+                rows = db.execute(
+                    f"SELECT created_at, intent_json FROM {table}",
+                ).fetchall()
+                for row in rows:
+                    if not self._created_on_day(row["created_at"], target_day, tz):
+                        continue
+                    if broad_slate_only:
+                        try:
+                            intent = json.loads(row["intent_json"])
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                        if not bool(intent.get("broad_slate")):
+                            continue
+                    count += 1
+        return count
 
     def record_scenario_results(self, game_id: str, scenarios: list[dict[str, Any]],
                                 legs: list[dict[str, Any]]) -> None:
@@ -576,6 +876,7 @@ class ResearchStore:
             "market_snapshots", "edge_history", "backtest_runs", "paper_orders",
             "demo_orders", "live_orders", "risk_decisions", "risk_snapshots", "audit_events",
             "dead_letter_queue", "market_catalog", "orderbook_snapshots",
+            "settlement_records",
         }
         if table not in allowed:
             raise ValueError(f"unsupported table: {table}")
@@ -586,6 +887,7 @@ class ResearchStore:
             "demo_orders": "created_at",
             "live_orders": "created_at",
             "risk_decisions": "created_at",
+            "settlement_records": "audited_at",
         }.get(table, "id")
         with self.connect() as db:
             rows = db.execute(

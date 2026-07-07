@@ -1,8 +1,8 @@
 # Slate Discovery And Research Source Plan
 
 This is the source hierarchy used by `slate-discovery`, `slate-verify`,
-`market-matcher`, and `research-agent`. The machine-readable version lives in
-`config/sources.yaml`.
+`market-matcher`, `candidate-ranker`, and `research-agent`. The machine-readable version
+lives in `config/sources.yaml`.
 
 ## Source Hierarchy
 
@@ -84,12 +84,39 @@ fresh enough, narrow enough, and visible enough for the research agent to review
 probability, SGP-adjusted probability, research approval, and `risk.py` are still required
 before execution.
 
+## `candidate-ranker` Data Flow
+
+1. Refresh `slate_candidates.json` and `market_matches.json` if either handoff is stale.
+2. Resolve Kalshi and sportsbook rows into deterministic identities:
+   sport, event key, market type, line, side, and start date.
+3. For Kalshi multivariate exchange markets, use `mve_selected_legs` and
+   `custom_strike.Associated Markets` to resolve each component leg. A composite market
+   is exact only when every supported leg has an exact external identity match.
+4. Prefer exact identity matches; fuzzy matches may be reported but never pass edge.
+5. Convert sportsbook prices to implied probabilities, de-vig each book market, exclude
+   outlier books with explicit reporting, and compute a weighted consensus probability.
+   Composite probabilities are reported as SGP-adjusted joint probabilities with a
+   conservative generic haircut until settlement learning can calibrate them.
+6. Compare consensus probability to executable Kalshi order-book price.
+7. Raise required edge when book count is thin, books disagree, or spread is wide.
+8. Write `candidate_ranker.json` for all ranked rows and `edge_candidates.json` for rows
+   that pass the edge model.
+
+This phase still does not place orders. Broad-slate live execution remains off unless a
+future explicit broad-slate execution gate is added and enabled.
+
+The diagnostics block counts slate coverage, line-market coverage, structured source
+coverage, Kalshi/external event-key resolution, exact/fuzzy/none identity outcomes, and
+component-level composite matching. A July 6, 2026 live run against 200 Kalshi rows
+resolved 200 composite markets, 526 exact legs, 43 full composite matches, 107 partial
+composite matches, and 43 SGP-adjusted model probabilities.
+
 ## `research-agent` Data Flow
 
-1. `market-matcher` activates `research-agent` after fresh quote, order-book, and matcher
-   artifacts exist.
-2. Refresh mapped Kalshi quote snapshots, slate verification, and market matching if any
-   handoff is stale.
+1. `candidate-ranker` activates `research-agent` after fresh quote, order-book, matcher,
+   and edge artifacts exist.
+2. Refresh mapped Kalshi quote snapshots, slate verification, market matching, and
+   candidate ranking if any handoff is stale.
 3. Load a `SlateEvent` and its mapped Kalshi ticker/order book.
 4. Build an evidence bundle:
    structured odds, line movement, order-book depth, current positions, injury/news
@@ -111,8 +138,14 @@ before execution.
 
 - SportsGameOdds uses `https://api.sportsgameodds.com/v2` and the `/events` endpoint
   with API-key authentication.
+- Captured SportsGameOdds event fixtures use `body.data`, `teams.away/home.names.*`,
+  and `odds.*.byBookmaker`; bookmaker keys in the captured MLB/NFL fixtures included
+  DraftKings, FanDuel, BetMGM, Caesars, ESPNBet, Bovada, PointsBet, Unibet, and
+  William Hill, but not Pinnacle or Circa.
 - The Odds API v4 uses `https://api.the-odds-api.com/v4`; `/sports` lists in-season
   sports and `/sports/{sport}/odds` returns upcoming/live games and bookmaker odds.
+  The configured regions are `us,eu`; the captured fixtures include Pinnacle from the
+  EU region but not Circa.
 - ESPN hidden endpoints are useful for schedule/score/news fallbacks, but they are not
   documented as a stable production contract.
 - Reddit should use official API access only. Do not scrape private, paywalled, or

@@ -19,24 +19,32 @@ repo as runnable phases, scheduler jobs, persisted state, and audited risk gates
 - `ksobot market-matcher`: refreshes slate/book handoffs, matches open Kalshi markets to
   comparable structured odds candidates, records order-book deltas, and writes
   `market_matches.json` plus `execution_slate.json`.
+- `ksobot candidate-ranker`: resolves exact market identity, de-vigs sportsbook odds into
+  consensus model probability, compares that to executable Kalshi price, and writes
+  `candidate_ranker.json` plus `edge_candidates.json`.
 - `ksobot research-agent`: writes full evidence to `research_bundle.json` and a narrowed
   `market_candidates.json` handoff containing only `trade_eligible` rows.
 - `ksobot daily-cycle`: runs the autonomous control loop for one configured event:
   slate discovery, verification, portfolio sync, market discovery, quote snapshot,
-  order book watch, market matching, research, explicit-mode execution, backtest if a
-  learning log exists, then status.
+  order book watch, market matching, edge ranking, research, explicit-mode execution,
+  backtest if a learning log exists, then status.
 
 `daily-cycle` is the activation chain. A scheduler only has to wake that one phase; each
 successful agent records which next agent it activated:
 
 ```text
 source-check -> slate-discovery -> slate-verify -> portfolio-sync -> discover-markets
-  -> snapshot-market -> book-watch -> market-matcher -> research-agent -> execution gate
-  -> backtest -> status
+  -> snapshot-market -> book-watch -> market-matcher -> candidate-ranker
+  -> research-agent -> execution gate -> backtest -> status
 ```
 
 `market-matcher` writes `market_matches.json` and `execution_slate.json`.
 `execution_slate.json` is an order-book-aware review list, not an order instruction.
+
+`candidate-ranker` writes `candidate_ranker.json` and `edge_candidates.json`.
+`edge_candidates.json` is an edge-model output, not an order instruction. For Kalshi
+multivariate markets, the ranker evaluates component legs from `mve_selected_legs` and
+only treats the composite as exact when every supported leg is exactly matched.
 
 `research-agent` writes `research_bundle.json` and `market_candidates.json`.
 `market_candidates.json` is the fast handoff for downstream agents, but it is not an

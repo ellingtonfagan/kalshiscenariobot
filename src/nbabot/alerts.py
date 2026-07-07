@@ -24,10 +24,17 @@ def format_block(header: str, scen_states: list[ScenarioState],
     return "\n".join(lines)
 
 
-def deliver(text: str, to: str = "stdout") -> None:
+def _redact_error(error: Exception, token: str = "") -> str:
+    msg = str(error)
+    if token:
+        msg = msg.replace(token, "<redacted-token>")
+    return msg
+
+
+def deliver(text: str, to: str = "stdout") -> bool:
     if to == "stdout" or not to:
         print(text)
-        return
+        return True
     if to.startswith("telegram"):
         token = os.environ.get("NBABOT_TELEGRAM_BOT_TOKEN", "")
         chat_id = os.environ.get("NBABOT_TELEGRAM_CHAT_ID", "")
@@ -35,9 +42,9 @@ def deliver(text: str, to: str = "stdout") -> None:
             chat_id = to.split(":", 1)[1].strip()
         if not token or not chat_id:
             print("[deliver telegram missing NBABOT_TELEGRAM_BOT_TOKEN/NBABOT_TELEGRAM_CHAT_ID]\n" + text)
-            return
+            return False
         try:
-            requests.post(
+            response = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 data=json.dumps({
                     "chat_id": chat_id,
@@ -47,14 +54,23 @@ def deliver(text: str, to: str = "stdout") -> None:
                 headers={"Content-Type": "application/json"},
                 timeout=6,
             )
+            raise_for_status = getattr(response, "raise_for_status", None)
+            if callable(raise_for_status):
+                raise_for_status()
+            return True
         except Exception as e:  # delivery must never crash a run
-            print(f"[deliver telegram failed: {e}]\n{text}")
-        return
+            print(f"[deliver telegram failed: {_redact_error(e, token)}]\n{text}")
+            return False
     if to.startswith("http"):
         try:
-            requests.post(to, data=json.dumps({"text": text}),
-                          headers={"Content-Type": "application/json"}, timeout=6)
+            response = requests.post(to, data=json.dumps({"text": text}),
+                                     headers={"Content-Type": "application/json"}, timeout=6)
+            raise_for_status = getattr(response, "raise_for_status", None)
+            if callable(raise_for_status):
+                raise_for_status()
+            return True
         except Exception as e:  # delivery must never crash a run
             print(f"[deliver webhook failed: {e}]\n{text}")
-        return
+            return False
     print(f"[deliver target '{to}' unknown, printing]\n{text}")
+    return False

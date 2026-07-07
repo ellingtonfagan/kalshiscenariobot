@@ -68,26 +68,62 @@ class Quote:
         return min(max(self.mid / 100.0, 0.0), 1.0)
 
 
+DEMO_CREDENTIALS_BLOCKED_REASON = (
+    "set KALSHI_DEMO_API_KEY / KALSHI_DEMO_PRIVATE_KEY_PATH to use Kalshi demo"
+)
+
+
 class KalshiClient:
-    def __init__(self, api_key: str, private_key_path: Path, base: str):
+    def __init__(
+        self,
+        api_key: str,
+        private_key_path: Path,
+        base: str,
+        *,
+        demo_api_key: str = "",
+        demo_private_key_path: Path | None = None,
+    ):
         self.api_key = api_key
         self.base = base.rstrip("/")
         self.private_key_path = Path(private_key_path)
+        self.demo_api_key = demo_api_key
+        self.demo_private_key_path = (
+            Path(demo_private_key_path) if demo_private_key_path is not None else None
+        )
         self._pk = None
+        self._demo_pk = None
         self._s = requests.Session()
+
+    @staticmethod
+    def _load_private_key(path: Path):
+        return serialization.load_pem_private_key(path.read_bytes(), password=None)
 
     def _private_key(self):
         if self._pk is None:
-            self._pk = serialization.load_pem_private_key(
-                self.private_key_path.read_bytes(), password=None
-            )
+            self._pk = self._load_private_key(self.private_key_path)
         return self._pk
 
+    def _demo_private_key(self):
+        if not self.demo_credentials_configured():
+            raise RuntimeError(DEMO_CREDENTIALS_BLOCKED_REASON)
+        if self._demo_pk is None:
+            self._demo_pk = self._load_private_key(self.demo_private_key_path)
+        return self._demo_pk
+
+    def demo_credentials_configured(self) -> bool:
+        return bool(
+            str(self.demo_api_key or "").strip()
+            and self.demo_private_key_path is not None
+            and self.demo_private_key_path.is_file()
+        )
+
     # ── signing ────────────────────────────────────────────────────────────────
-    def _headers(self, method: str, path: str) -> dict[str, str]:
+    def _headers(self, method: str, path: str, *,
+                 api_key: str | None = None, private_key: object | None = None) -> dict[str, str]:
         ts = str(int(time.time() * 1000))
+        signing_key = private_key if private_key is not None else self._private_key()
         sig = base64.b64encode(
-            self._private_key().sign(
+            signing_key.sign(
                 (ts + method + path).encode(),
                 padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
                             salt_length=padding.PSS.DIGEST_LENGTH),
@@ -95,20 +131,28 @@ class KalshiClient:
             )
         ).decode()
         return {
-            "KALSHI-ACCESS-KEY": self.api_key,
+            "KALSHI-ACCESS-KEY": self.api_key if api_key is None else api_key,
             "KALSHI-ACCESS-TIMESTAMP": ts,
             "KALSHI-ACCESS-SIGNATURE": sig,
             "Content-Type": "application/json",
         }
 
     def _request(self, method: str, path: str, params: dict | None = None,
-                 body: dict | None = None) -> dict:
-        url = self.base + path
+                 body: dict | None = None, *, base: str | None = None,
+                 api_key: str | None = None,
+                 private_key: object | None = None) -> dict:
+        url = (base or self.base) + path
         last_error = None
         for attempt in range(4):
             try:
                 r = self._s.request(
-                    method, url, headers=self._headers(method, path),
+                    method, url,
+                    headers=self._headers(
+                        method,
+                        path,
+                        api_key=api_key,
+                        private_key=private_key,
+                    ),
                     params=params, data=json.dumps(body) if body is not None else None,
                     timeout=8,
                 )
@@ -131,20 +175,31 @@ class KalshiClient:
     def _post(self, path: str, body: dict | None = None) -> dict:
         return self._request("POST", path, body=body)
 
-    def post_to_base(self, base: str, api_path: str, body: dict) -> dict:
-        """POST to a fully-qualified API base, preserving Kalshi's signed path."""
-        old_base = self.base
+    @staticmethod
+    def _base_and_signed_path(base: str, api_path: str) -> tuple[str, str]:
         parsed = urlparse(base.rstrip("/"))
         prefix = parsed.path.rstrip("/")
         root = base.rstrip("/")
         if prefix:
             root = root[: -len(prefix)]
-        path = prefix + api_path
-        self.base = root
-        try:
-            return self._post(path, body)
-        finally:
-            self.base = old_base
+        return root, prefix + api_path
+
+    def post_to_base(self, base: str, api_path: str, body: dict) -> dict:
+        """POST to a fully-qualified API base, preserving Kalshi's signed path."""
+        root, path = self._base_and_signed_path(base, api_path)
+        return self._request("POST", path, body=body, base=root)
+
+    def demo_post_to_base(self, base: str, api_path: str, body: dict) -> dict:
+        """POST to Kalshi demo using the demo credential pair only."""
+        root, path = self._base_and_signed_path(base, api_path)
+        return self._request(
+            "POST",
+            path,
+            body=body,
+            base=root,
+            api_key=self.demo_api_key,
+            private_key=self._demo_private_key(),
+        )
 
     # ── account ─────────────────────────────────────────────────────────────────
     def balance_cents(self) -> int:
@@ -181,6 +236,12 @@ class KalshiClient:
     def list_open_markets(self, max_pages: int = 3) -> list[dict]:
         """Return broad open markets without filtering to one sport series."""
         return self.list_markets(None, None, "open", max_pages=max_pages)
+
+    def market(self, ticker: str) -> dict:
+        """Return one market document by ticker."""
+        data = self._get(f"/trade-api/v2/markets/{ticker}")
+        market = data.get("market")
+        return market if isinstance(market, dict) else data
 
     def _list_series(self, series: str, game_tag: str) -> list[dict]:
         return self.list_markets(series, game_tag)
@@ -230,7 +291,7 @@ class KalshiClient:
     # ── orders (live execution is gated in execution.py / agents/live_execute.py) ─
     def demo_place_order(self, demo_api_base: str, body: dict) -> dict:
         """Submit a gated demo order."""
-        return self.post_to_base(demo_api_base, "/portfolio/events/orders", body)
+        return self.demo_post_to_base(demo_api_base, "/portfolio/events/orders", body)
 
     def place_order(self, body: dict) -> dict:
         """Submit a gated live order to the configured production API base."""

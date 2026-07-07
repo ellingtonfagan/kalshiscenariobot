@@ -17,7 +17,7 @@ def _format(payload: dict) -> str:
 
 def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
-    from . import market_matcher, slate_verify, snapshot_market
+    from . import candidate_ranker, market_matcher, slate_verify, snapshot_market
 
     live_updates = {
         "market_snapshot": refresh_if_stale(
@@ -35,6 +35,11 @@ def run(ctx: Context | None = None) -> dict:
             "market_matches.json",
             market_matcher.run,
         ),
+        "candidate_ranker": refresh_if_stale(
+            ctx,
+            "candidate_ranker.json",
+            candidate_ranker.run,
+        ),
     }
     slate = ctx.read_json("slate_candidates.json") or {"candidates": []}
     verification = ctx.read_json("slate_verification.json") or {"rows": []}
@@ -46,6 +51,7 @@ def run(ctx: Context | None = None) -> dict:
         "slate_verification.json",
         "book_watch.json",
         "market_matches.json",
+        "candidate_ranker.json",
     ))
     ctx.write_json("research_bundle.json", payload)
     ctx.write_json("market_candidates.json", {
