@@ -24,3 +24,6 @@ dist/
 
 # operating system
 .DS_Store
+
+# cron literal-variable workaround symlink
+$REPO
