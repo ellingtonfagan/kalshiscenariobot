@@ -114,7 +114,7 @@ def _qual_order_count(cycle: dict[str, Any]) -> int:
     for item in _order_items(result):
         receipt = item.get("receipt") if isinstance(item.get("receipt"), dict) else {}
         intent = item.get("intent") if isinstance(item.get("intent"), dict) else {}
-        if str(intent.get("signal_source") or "consensus") != "qual":
+        if str(intent.get("signal_source") or "consensus") not in {"qual", "qual_activated_quant"}:
             continue
         if str(receipt.get("status") or "") in {"submitted", "filled"}:
             count += 1

@@ -221,7 +221,8 @@ def evaluate_trade_intent(intent: Any, settings: Any,
         f"ticker {ticker} mapped" if ticker else "missing tradable Kalshi ticker",
     ))
 
-    qual_live_ok = not (live_mode and signal_source == "qual")
+    qual_like = signal_source in {"qual", "qual_activated_quant"}
+    qual_live_ok = not (live_mode and qual_like)
     checks.append(RiskCheck(
         "qual_live_block",
         qual_live_ok,
@@ -229,7 +230,7 @@ def evaluate_trade_intent(intent: Any, settings: Any,
             "qual-sourced intents are hard-blocked in live mode"
             if not qual_live_ok else
             "qual live block not applicable"
-            if signal_source == "qual" else
+            if qual_like else
             "not a qual-sourced intent"
         ),
     ))
@@ -311,7 +312,7 @@ def evaluate_trade_intent(intent: Any, settings: Any,
             ),
         ))
 
-    if signal_source == "qual" and paper_demo_mode:
+    if qual_like and paper_demo_mode:
         configured_qual_cap = (
             context.qual_daily_trade_cap
             if context.qual_daily_trade_cap is not None
@@ -335,12 +336,14 @@ def evaluate_trade_intent(intent: Any, settings: Any,
             True,
             (
                 "qual daily cap applies only in paper/demo mode"
-                if signal_source == "qual" else
+                if qual_like else
                 "not a qual-sourced intent"
             ),
         ))
 
     edge = getattr(intent, "edge", None)
+    if getattr(intent, "net_edge", None) is not None:
+        edge = getattr(intent, "net_edge")
     min_edge = (
         float(getattr(settings, "qual_min_edge", 0.06))
         if signal_source == "qual" else
@@ -350,18 +353,8 @@ def evaluate_trade_intent(intent: Any, settings: Any,
             getattr(settings, "min_edge", 0.05),
         ))
     )
-    confluence = getattr(intent, "confluence", None)
-    if (
-        paper_demo_mode
-        and signal_source == "consensus"
-        and str(getattr(intent, "confluence_verdict", "none") or "none") == "agree"
-        and isinstance(confluence, dict)
-    ):
-        try:
-            confluence_base = float(confluence.get("effective_base_min_edge"))
-        except (TypeError, ValueError):
-            confluence_base = min_edge
-        min_edge = max(confluence_base, MIN_EFFECTIVE_BASE)
+    if signal_source == "qual_activated_quant":
+        min_edge = float(getattr(intent, "required_edge", min_edge) or min_edge)
     edge_ok = edge is not None and float(edge) >= min_edge
     if override_requested:
         checks.append(RiskCheck(
@@ -376,12 +369,12 @@ def evaluate_trade_intent(intent: Any, settings: Any,
         "edge",
         edge_passed,
         (
-            f"edge {float(edge):+.3f} meets min {min_edge:.3f}"
+            f"net edge {float(edge):+.3f} meets min {min_edge:.3f}"
             if edge_ok else
-            f"edge {float(edge):+.3f} below min {min_edge:.3f}; "
+            f"net edge {float(edge):+.3f} below min {min_edge:.3f}; "
             "approved research override applied"
             if edge_passed else
-            f"edge {float(edge):+.3f} below min {min_edge:.3f}"
+            f"net edge {float(edge):+.3f} below min {min_edge:.3f}"
             if edge is not None else
             "missing edge"
         ),

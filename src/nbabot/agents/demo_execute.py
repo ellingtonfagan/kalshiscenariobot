@@ -83,7 +83,7 @@ def run(ctx: Context | None = None) -> dict:
         out = (
             f"[demo-execute] {receipt.status}: {intent.scenario_id} {intent.ticker} "
             f"{intent.contracts} {intent.side.upper()} @ {intent.price_cents}c "
-            f"stake={intent.stake_units:.3f}u edge={intent.edge:+.3f} "
+            f"stake={intent.stake_units:.3f}u net_edge={intent.edge:+.3f} "
             f"SGP-adjusted scenario p={intent.sgp_adjusted_prob:.3f}{hope}"
         )
         deliver(guardrails.with_footer(out), ctx.settings.deliver_to)

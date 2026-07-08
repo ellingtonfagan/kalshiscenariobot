@@ -56,8 +56,7 @@ def applies_to_mode(settings: Any) -> bool:
 
 
 def effective_base_for_agreement(settings: Any, base_min_edge: float) -> float:
-    bonus = max(_setting(settings, "confluence_edge_bonus", DEFAULT_EDGE_BONUS), 0.0)
-    return round(max(float(base_min_edge) - bonus, MIN_EFFECTIVE_BASE), 5)
+    return round(float(base_min_edge), 5)
 
 
 def evaluate_confluence(
@@ -94,8 +93,6 @@ def evaluate_confluence(
     delta = round(qual - fair, 6)
     agree_delta = abs(_setting(settings, "confluence_agree_delta", DEFAULT_AGREE_DELTA))
     veto_delta = abs(_setting(settings, "confluence_veto_delta", DEFAULT_VETO_DELTA))
-    configured_bonus = max(_setting(settings, "confluence_edge_bonus", DEFAULT_EDGE_BONUS), 0.0)
-
     consensus_edge = None if price_prob is None else fair - float(price_prob)
     qual_edge = None if price_prob is None else qual - float(price_prob)
     verdict = "neutral"
@@ -122,10 +119,6 @@ def evaluate_confluence(
 
     edge_bonus = 0.0
     effective_base = no_bonus_base
-    if mode_applies and verdict == "agree":
-        effective_base = effective_base_for_agreement(settings, base_min_edge)
-        edge_bonus = round(no_bonus_base - effective_base, 5)
-
     return ConfluenceRecord(
         consensus_fair_prob=round(fair, 6),
         qual_prob=round(qual, 6),

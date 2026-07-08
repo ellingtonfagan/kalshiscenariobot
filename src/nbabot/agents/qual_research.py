@@ -91,6 +91,7 @@ def run(ctx: Context | None = None) -> dict:
         lessons=learning["lessons"],
         calibration_lines=learning["calibration_lines"],
         timeout_seconds=ctx.settings.qual_llm_timeout_seconds,
+        fallback_model=getattr(ctx.settings, "qual_fallback_model", "claude-opus-4-8"),
     )
     accepted = result.get("signals") or []
     inserted = store.record_qual_signals(accepted)
@@ -99,6 +100,7 @@ def run(ctx: Context | None = None) -> dict:
         "reason": result.get("reason"),
         "model_run_id": result.get("model_run_id"),
         "attempts": result.get("attempts", 0),
+        "engine": result.get("engine"),
         "market_count": len(markets),
         "news_count": len(prompt_news),
         "produced_count": len(accepted) + len(result.get("discarded") or []),

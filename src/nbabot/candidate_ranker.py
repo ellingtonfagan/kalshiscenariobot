@@ -23,6 +23,9 @@ from .slate import STRUCTURED_BOOK_PROVIDERS
 
 
 COMPOSITE_TRADE_BLOCKER = "composite/multi-leg Kalshi markets require validated performance track record"
+EDGE_BELOW_BLOCKER = "edge below dynamic required edge"
+QAQ_SIGNAL_SOURCE = "qual_activated_quant"
+QAQ_MIN_NET_EDGE = 0.005
 
 
 def _execution_min_edge(settings: Any) -> float:
@@ -50,6 +53,134 @@ def _qual_signal_for(row: dict[str, Any], qual_signals: dict[str, dict[str, Any]
         return None
     signal = qual_signals.get(str(row.get("ticker") or ""))
     return signal if isinstance(signal, dict) else None
+
+
+def _qaq_verdict_for(row: dict[str, Any], qaq_verdicts: dict[str, dict[str, Any]] | None) -> dict[str, Any] | None:
+    if not qaq_verdicts:
+        return None
+    verdict = qaq_verdicts.get(str(row.get("ticker") or ""))
+    return verdict if isinstance(verdict, dict) else None
+
+
+def _truthy(raw: Any) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _qaq_eligible_verdict(verdict: dict[str, Any] | None) -> bool:
+    if not isinstance(verdict, dict):
+        return False
+    citations = [url for url in verdict.get("citation_urls") or [] if str(url).strip()]
+    try:
+        confidence = float(verdict.get("confidence"))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return (
+        _truthy(verdict.get("justified"))
+        and _truthy(verdict.get("direction_consistent"))
+        and confidence >= 0.60
+        and bool(citations)
+    )
+
+
+def _qaq_required_edge(required: float, settings: Any) -> float:
+    try:
+        bonus = float(getattr(settings, "qaq_floor_bonus", 0.015))
+    except (TypeError, ValueError):
+        bonus = 0.015
+    return round(max(float(required) - max(bonus, 0.0), QAQ_MIN_NET_EDGE), 5)
+
+
+def _with_qaq_evidence(
+    *,
+    payload: dict[str, Any],
+    verdict: dict[str, Any],
+    consensus: dict[str, Any],
+    executable: ExecutablePrice,
+    row: dict[str, Any],
+    match: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    net_edge = payload.get("net_edge")
+    required = payload.get("required_edge")
+    if net_edge is None or required is None or not _qaq_eligible_verdict(verdict):
+        payload["qaq_investigation"] = verdict
+        return payload
+    lowered_required = _qaq_required_edge(float(required), settings)
+    blockers = [b for b in payload.get("blockers") or [] if b != EDGE_BELOW_BLOCKER]
+    if float(net_edge) < lowered_required:
+        blockers.append(EDGE_BELOW_BLOCKER)
+    evidence = {
+        "news_item_ids": verdict.get("news_item_ids") or [],
+        "first_seen_at": verdict.get("first_seen_at"),
+        "source": verdict.get("source"),
+        "investigation": verdict,
+        "consensus_prob": consensus.get("fair_prob"),
+        "kalshi_price_cents": executable.price_cents,
+        "kalshi_price_prob": executable.price_prob,
+        "gap": round(float(required) - float(net_edge), 6),
+        "basket_id": row.get("basket_id"),
+        "event_ids": [
+            value for value in (
+                row.get("event_ticker"),
+                row.get("candidate_id"),
+                match.get("candidate_id"),
+            )
+            if value
+        ],
+    }
+    payload.update({
+        "signal_source": QAQ_SIGNAL_SOURCE,
+        "required_edge": lowered_required,
+        "blockers": blockers,
+        "passes_edge": not blockers,
+        "qaq_investigation": verdict,
+        "qaq_evidence": evidence,
+        "signal_engine": verdict.get("engine") or "codex",
+    })
+    return payload
+
+
+def select_near_miss_candidates(
+    rows: list[dict[str, Any]],
+    settings: Any,
+) -> list[dict[str, Any]]:
+    try:
+        window = float(getattr(settings, "near_miss_window", 0.02))
+    except (TypeError, ValueError):
+        window = 0.02
+    try:
+        cap = int(getattr(settings, "near_miss_investigations_per_cycle", 5))
+    except (TypeError, ValueError):
+        cap = 5
+    selected: list[dict[str, Any]] = []
+    if window <= 0 or cap <= 0:
+        return selected
+    for row in rows:
+        if row.get("passes_edge"):
+            continue
+        if str(row.get("signal_source") or "consensus") != "consensus":
+            continue
+        if str(row.get("match_type") or "") != "exact":
+            continue
+        blockers = set(row.get("blockers") or [])
+        if EDGE_BELOW_BLOCKER not in blockers:
+            continue
+        if blockers - {EDGE_BELOW_BLOCKER}:
+            continue
+        net_edge = row.get("net_edge")
+        required = row.get("required_edge")
+        if net_edge is None or required is None:
+            continue
+        gap = round(float(required) - float(net_edge), 6)
+        if 0 < gap <= window:
+            selected.append({
+                **row,
+                "near_miss_gap": gap,
+            })
+    selected.sort(key=lambda item: (item["near_miss_gap"], -(item.get("net_edge") or -999)))
+    return selected[:cap]
 
 
 def _candidate_by_id(slate: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -409,6 +540,8 @@ def build_candidate_rankings(
     *,
     now: datetime | None = None,
     qual_signals: dict[str, dict[str, Any]] | None = None,
+    qaq_verdicts: dict[str, dict[str, Any]] | None = None,
+    liquidity_role: str = "maker",
 ) -> dict[str, Any]:
     candidate_lookup = _candidate_by_id(slate)
     identity_pool = _line_identity_pool(slate)
@@ -515,7 +648,12 @@ def build_candidate_rankings(
             )
             target = identity.side or identity.participant
             consensus = consensus_prob(consensus_rows, target_name=target)
-        executable = ExecutablePrice.from_orderbook_metrics(row.get("orderbook") or {}, "yes")
+        maker = str(liquidity_role or "maker").lower() != "taker"
+        executable = ExecutablePrice.from_orderbook_metrics(
+            row.get("orderbook") or {},
+            "yes",
+            maker=maker,
+        )
         signal_source = "consensus"
         qual_signal = _qual_signal_for(row, qual_signals)
         qual_delta = None
@@ -550,8 +688,6 @@ def build_candidate_rankings(
                 confluence_diag["boost_count"] += 1
             if confluence.veto:
                 confluence_diag["veto_count"] += 1
-        if confluence.edge_bonus > 0:
-            eval_base_min_edge = float(confluence.effective_base_min_edge or eval_base_min_edge)
         if not _has_consensus(consensus) and qual_signal is not None:
             signal_source = "qual"
             eval_base_min_edge = _qual_min_edge(ctx.settings)
@@ -585,6 +721,19 @@ def build_candidate_rankings(
         payload = edge.as_dict()
         would_pass_before_confluence = bool(payload["passes_edge"])
         confluence_shadow = False
+        qaq_verdict = _qaq_verdict_for(row, qaq_verdicts)
+        if signal_source == "consensus" and qaq_verdict is not None and not confluence.veto:
+            payload = _with_qaq_evidence(
+                payload=payload,
+                verdict=qaq_verdict,
+                consensus=consensus,
+                executable=executable,
+                row=row,
+                match=match,
+                settings=ctx.settings,
+            )
+            signal_source = str(payload.get("signal_source") or signal_source)
+            would_pass_before_confluence = bool(payload["passes_edge"])
         if signal_source == "consensus" and confluence.veto and would_pass_before_confluence:
             if VETO_REASON not in payload["blockers"]:
                 payload["blockers"].append(VETO_REASON)
@@ -628,7 +777,7 @@ def build_candidate_rankings(
         ranked.append(payload)
     ranked.sort(key=lambda item: (
         not item.get("passes_edge"),
-        -(item.get("edge") if item.get("edge") is not None else -999),
+        -(item.get("net_edge") if item.get("net_edge") is not None else item.get("edge") if item.get("edge") is not None else -999),
         item.get("required_edge", 999),
     ))
     return {
@@ -640,6 +789,7 @@ def build_candidate_rankings(
         "signal_source_counts": {
             "consensus": sum(1 for row in ranked if row.get("signal_source") == "consensus"),
             "qual": sum(1 for row in ranked if row.get("signal_source") == "qual"),
+            "qual_activated_quant": sum(1 for row in ranked if row.get("signal_source") == "qual_activated_quant"),
         },
         "confluence_counts": {
             "overlap": diagnostics["confluence"]["overlap_count"],

@@ -341,11 +341,44 @@ class ResearchStore:
                     created_at TEXT NOT NULL,
                     model_run_id TEXT NOT NULL,
                     prompt_version TEXT,
+                    engine TEXT NOT NULL DEFAULT 'codex',
                     signal_source TEXT NOT NULL DEFAULT 'qual',
                     UNIQUE(ticker, model_run_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_qual_signals_ticker_time
                     ON qual_signals(ticker, created_at DESC);
+                CREATE TABLE IF NOT EXISTS market_baskets (
+                    basket_id TEXT PRIMARY KEY,
+                    game_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    team TEXT,
+                    reason TEXT,
+                    event_ids_json TEXT NOT NULL,
+                    news_item_ids_json TEXT NOT NULL,
+                    tickers_json TEXT NOT NULL,
+                    basket_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_market_baskets_game_time
+                    ON market_baskets(game_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS near_miss_investigations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    candidate_id TEXT,
+                    created_at TEXT NOT NULL,
+                    model_run_id TEXT,
+                    engine TEXT NOT NULL DEFAULT 'codex',
+                    justified INTEGER NOT NULL DEFAULT 0,
+                    direction_consistent INTEGER NOT NULL DEFAULT 0,
+                    confidence REAL,
+                    gap REAL,
+                    citation_urls_json TEXT NOT NULL,
+                    news_item_ids_json TEXT NOT NULL,
+                    verdict_json TEXT NOT NULL,
+                    UNIQUE(game_id, ticker, model_run_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_near_miss_game_time
+                    ON near_miss_investigations(game_id, created_at DESC);
                 CREATE TABLE IF NOT EXISTS qual_recaps (
                     client_order_id TEXT PRIMARY KEY,
                     game_id TEXT NOT NULL,
@@ -453,6 +486,7 @@ class ResearchStore:
             self._ensure_column(db, "qual_signals", "analysis_json", "TEXT")
             self._ensure_column(db, "qual_signals", "news_item_ids_json", "TEXT")
             self._ensure_column(db, "qual_signals", "prompt_version", "TEXT")
+            self._ensure_column(db, "qual_signals", "engine", "TEXT NOT NULL DEFAULT 'codex'")
 
     @staticmethod
     def _ensure_column(db: sqlite3.Connection, table: str, column: str,
@@ -733,9 +767,9 @@ class ResearchStore:
                 INSERT OR IGNORE INTO qual_signals(
                     ticker, base_rate, qual_prob, confidence, rationale, citations_json,
                     scenarios_json, analysis_json, news_item_ids_json,
-                    created_at, model_run_id, prompt_version, signal_source
+                    created_at, model_run_id, prompt_version, engine, signal_source
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -757,15 +791,81 @@ class ResearchStore:
                             "scenarios": r.get("scenarios") or [],
                             "model_run_id": r.get("model_run_id"),
                             "prompt_version": r.get("prompt_version"),
+                            "engine": r.get("engine") or "codex",
                             "created_at": r.get("created_at"),
                         }),
                         to_json(r.get("news_item_ids_used") or []),
                         r.get("created_at") or utc_now(),
                         r["model_run_id"],
                         r.get("prompt_version"),
+                        str(r.get("engine") or "codex"),
                         str(r.get("signal_source") or "qual"),
                     )
                     for r in rows
+                ],
+            )
+        return cur.rowcount if cur.rowcount is not None else 0
+
+    def record_market_basket(self, game_id: str, basket: dict[str, Any]) -> bool:
+        self.init_schema()
+        basket_id = str(basket.get("basket_id") or "")
+        if not basket_id:
+            return False
+        with self.connect() as db:
+            cur = db.execute(
+                """
+                INSERT OR REPLACE INTO market_baskets(
+                    basket_id, game_id, created_at, team, reason,
+                    event_ids_json, news_item_ids_json, tickers_json, basket_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    basket_id,
+                    game_id,
+                    basket.get("created_at") or utc_now(),
+                    basket.get("team"),
+                    basket.get("reason"),
+                    to_json(basket.get("event_ids") or []),
+                    to_json(basket.get("news_item_ids") or []),
+                    to_json(basket.get("tickers") or []),
+                    to_json(basket),
+                ),
+            )
+        return cur.rowcount is not None and cur.rowcount > 0
+
+    def record_near_miss_investigations(self, game_id: str, rows: Iterable[dict[str, Any]]) -> int:
+        self.init_schema()
+        records = [row for row in rows if isinstance(row, dict) and row.get("ticker")]
+        if not records:
+            return 0
+        with self.connect() as db:
+            cur = db.executemany(
+                """
+                INSERT OR IGNORE INTO near_miss_investigations(
+                    game_id, ticker, candidate_id, created_at, model_run_id,
+                    engine, justified, direction_consistent, confidence, gap,
+                    citation_urls_json, news_item_ids_json, verdict_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        game_id,
+                        str(row.get("ticker")),
+                        row.get("candidate_id"),
+                        row.get("created_at") or utc_now(),
+                        row.get("model_run_id"),
+                        str(row.get("engine") or "codex"),
+                        int(bool(row.get("justified"))),
+                        int(bool(row.get("direction_consistent"))),
+                        row.get("confidence"),
+                        row.get("gap"),
+                        to_json(row.get("citation_urls") or []),
+                        to_json(row.get("news_item_ids") or []),
+                        to_json(row),
+                    )
+                    for row in records
                 ],
             )
         return cur.rowcount if cur.rowcount is not None else 0
@@ -873,6 +973,7 @@ class ResearchStore:
             WHERE qp.client_order_id IS NULL
               AND (
                 sr.signal_source = 'qual'
+                OR sr.signal_source = 'qual_activated_quant'
                 OR (sr.confluence_verdict IS NOT NULL AND sr.confluence_verdict != 'none')
               )
             ORDER BY sr.audited_at ASC
@@ -1041,7 +1142,7 @@ class ResearchStore:
                 """
                 SELECT *
                 FROM settlement_records
-                WHERE signal_source = 'qual'
+                WHERE signal_source IN ('qual', 'qual_activated_quant')
                    OR (confluence_verdict IS NOT NULL AND confluence_verdict != 'none')
                 ORDER BY audited_at ASC
                 """
@@ -1634,6 +1735,7 @@ class ResearchStore:
             "dead_letter_queue", "market_catalog", "orderbook_snapshots",
             "settlement_records", "news_items", "qual_signals",
             "qual_recaps", "qual_postmortems", "qual_lessons",
+            "market_baskets", "near_miss_investigations",
         }
         if table not in allowed:
             raise ValueError(f"unsupported table: {table}")
@@ -1650,6 +1752,8 @@ class ResearchStore:
             "qual_recaps": "fetched_at",
             "qual_postmortems": "created_at",
             "qual_lessons": "last_seen_at",
+            "market_baskets": "created_at",
+            "near_miss_investigations": "created_at",
         }.get(table, "id")
         with self.connect() as db:
             rows = db.execute(
@@ -1669,6 +1773,13 @@ class ResearchStore:
                 "clv_beat_rate": None,
             },
             "qual": {
+                "trades_placed": 0,
+                "settled": 0,
+                "brier": None,
+                "clv_available": 0,
+                "clv_beat_rate": None,
+            },
+            "qual_activated_quant": {
                 "trades_placed": 0,
                 "settled": 0,
                 "brier": None,

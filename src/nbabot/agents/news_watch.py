@@ -14,6 +14,7 @@ from ..news_watch import (
 )
 from ..research import ResearchStore, utc_now
 from ..research_news import fetch_url, load_research_teams
+from ..slate import build_market_basket
 from . import scheduled_demo_cycle
 from .base import Context, load_context
 
@@ -61,6 +62,7 @@ def run(ctx: Context | None = None) -> dict:
     trigger_history = list(history)
     decisions: list[dict[str, Any]] = []
     cycle_results: list[dict[str, Any]] = []
+    market_baskets: list[dict[str, Any]] = []
 
     for hit in scan.get("hits") or []:
         team = str(hit.get("team") or "")
@@ -95,10 +97,34 @@ def run(ctx: Context | None = None) -> dict:
                 str(hit.get("headline") or ""),
             )
             deliver(alert, ctx.settings.deliver_to)
-            cycle = scheduled_demo_cycle.run(ctx)
+            slate = ctx.read_json("slate_candidates.json") or {"candidates": []}
+            matches = ctx.read_json("market_matches.json") or {"rows": []}
+            basket = build_market_basket(
+                team=team,
+                hit=hit,
+                slate=slate,
+                market_matches=matches,
+                reason="news-watch high-impact hit",
+            )
+            previous_active = ctx.read_json("active_market_basket.json") or {}
+            if basket.get("empty"):
+                cycle = scheduled_demo_cycle.run(ctx)
+                row["basket_reason"] = "empty-basket-full-cycle-fallback"
+            else:
+                store.record_market_basket(ctx.settings.game_id, basket)
+                market_baskets.append(basket)
+                ctx.write_json("active_market_basket.json", basket)
+                try:
+                    cycle = scheduled_demo_cycle.run(ctx)
+                finally:
+                    ctx.write_json("active_market_basket.json", previous_active)
+                row["basket_id"] = basket.get("basket_id")
+                row["basket_ticker_count"] = len(basket.get("tickers") or [])
             cycle_results.append({
                 "team": team,
                 "headline": hit.get("headline"),
+                "basket_id": row.get("basket_id"),
+                "basket_reason": row.get("basket_reason"),
                 "exit_code": cycle.get("exit_code") if isinstance(cycle, dict) else None,
             })
             row["fired_at"] = now.isoformat()
@@ -117,6 +143,7 @@ def run(ctx: Context | None = None) -> dict:
         "team_counts": scan.get("team_counts") or {},
         "source_status": scan.get("source_status") or [],
         "hits": scan.get("hits") or [],
+        "market_baskets": market_baskets,
         "trigger_decisions": decisions,
         "trigger_history": trigger_history[-200:],
         "cycle_results": cycle_results,

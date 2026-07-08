@@ -29,6 +29,7 @@ STRUCTURED_BOOK_PROVIDERS = {"sportsgameodds", "the_odds_api", "parlay_api"}
 EXCLUDED_CONSENSUS_BOOKS_BY_PROVIDER = {
     "parlay_api": {"kalshi"},
 }
+BASKET_MARKET_TYPES = {"moneyline", "spread", "total", "team_total"}
 
 
 def _csv(raw: str | None, default: Iterable[str]) -> list[str]:
@@ -98,6 +99,26 @@ def _header_int(status: dict[str, Any], key: str) -> int | None:
 
 def _norm_text(raw: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(raw or "").lower())
+
+
+def _basket_market_type(row: dict[str, Any]) -> str | None:
+    series = str(row.get("series_ticker") or row.get("series") or "").upper()
+    title = " ".join(str(part or "") for part in (
+        row.get("title"),
+        row.get("yes_sub_title"),
+        row.get("no_sub_title"),
+        row.get("rules_primary"),
+        row.get("rules_secondary"),
+    )).lower()
+    if series.endswith("GAME") or " winner" in title or " to win" in title:
+        return "moneyline"
+    if series.endswith("SPREAD") or "spread" in title or "run line" in title:
+        return "spread"
+    if "team total" in title or series.endswith("GOAL") or "teamtotal" in series:
+        return "team_total"
+    if series.endswith("TOTAL") or "total" in title or "over" in title or "under" in title:
+        return "total"
+    return None
 
 
 def _first(raw: dict[str, Any], names: tuple[str, ...]) -> Any:
@@ -612,6 +633,105 @@ def configured_game_candidate_id(settings: Any) -> str | None:
     return candidate.get("candidate_id") if candidate else None
 
 
+def build_market_basket(
+    *,
+    team: str,
+    hit: dict[str, Any],
+    slate: dict[str, Any],
+    market_matches: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    team_terms = {
+        _norm_text(team),
+        _norm_text(hit.get("canonical_name")),
+        _norm_text(hit.get("team")),
+    }
+    team_terms = {term for term in team_terms if term}
+    match_rows_by_ticker = {
+        row.get("ticker"): row
+        for row in market_matches.get("rows") or []
+        if isinstance(row, dict) and row.get("ticker")
+    }
+    tickers: list[str] = []
+    event_ids: list[str] = []
+    market_rows: list[dict[str, Any]] = []
+    for candidate in slate.get("candidates") or []:
+        candidate_text = " ".join(str(part or "") for part in (
+            candidate.get("candidate_id"),
+            candidate.get("away_team"),
+            candidate.get("home_team"),
+            candidate.get("team"),
+        ))
+        if team_terms and not any(term in _norm_text(candidate_text) for term in team_terms):
+            continue
+        candidate_id = candidate.get("candidate_id")
+        if candidate_id:
+            event_ids.append(str(candidate_id))
+        for market in candidate.get("kalshi_markets") or []:
+            ticker = market.get("ticker")
+            if not ticker:
+                continue
+            row = match_rows_by_ticker.get(ticker, market)
+            market_type = _basket_market_type(row) or _basket_market_type(market)
+            if market_type not in BASKET_MARKET_TYPES:
+                continue
+            if ticker not in tickers:
+                tickers.append(str(ticker))
+            event_ticker = row.get("event_ticker") or market.get("event_ticker")
+            if event_ticker:
+                event_ids.append(str(event_ticker))
+            market_rows.append({
+                "ticker": ticker,
+                "candidate_id": candidate_id,
+                "event_ticker": event_ticker,
+                "market_type": market_type,
+                "title": row.get("title") or market.get("title"),
+            })
+    tickers = sorted(dict.fromkeys(tickers))
+    event_ids = sorted(dict.fromkeys(event_ids))
+    news_ids = [
+        str(value)
+        for value in (
+            hit.get("id"),
+            hit.get("news_item_id"),
+            hit.get("content_hash"),
+        )
+        if value
+    ]
+    created_at = utc_now()
+    basket_id = f"basket-{_norm_text(team) or 'team'}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+    return {
+        "basket_id": basket_id,
+        "team": team,
+        "canonical_name": hit.get("canonical_name"),
+        "created_at": created_at,
+        "reason": reason,
+        "hit": hit,
+        "event_ids": event_ids,
+        "news_item_ids": sorted(dict.fromkeys(news_ids)),
+        "tickers": tickers,
+        "market_rows": market_rows,
+        "empty": not bool(tickers),
+    }
+
+
+def active_market_basket(ctx: Any) -> dict[str, Any] | None:
+    basket = ctx.read_json("active_market_basket.json") or {}
+    if not isinstance(basket, dict) or not basket.get("basket_id"):
+        return None
+    return basket
+
+
+def basket_metadata_for_ticker(basket: dict[str, Any] | None, ticker: str | None) -> dict[str, Any]:
+    if not basket or not ticker or ticker not in set(basket.get("tickers") or []):
+        return {}
+    return {
+        "basket_id": basket.get("basket_id"),
+        "event_ids": basket.get("event_ids") or [],
+        "news_item_ids": basket.get("news_item_ids") or [],
+    }
+
+
 def _first_external_candidate_id(match: dict[str, Any]) -> str | None:
     for item in match.get("external_matches") or []:
         candidate_id = item.get("candidate_id") if isinstance(item, dict) else None
@@ -989,6 +1109,33 @@ def _book_metrics(ctx: Any) -> dict[str, dict[str, Any]]:
     return metrics
 
 
+def _rank_entry_price(rank: dict[str, Any], fallback: Any) -> Any:
+    executable = rank.get("executable_price") if isinstance(rank.get("executable_price"), dict) else {}
+    if executable.get("price_cents") is not None:
+        return executable.get("price_cents")
+    for key in ("vwap_cents", "ask_cents", "bid_cents"):
+        if executable.get(key) is not None:
+            return executable.get(key)
+    return fallback
+
+
+def _rank_edge_fields(rank: dict[str, Any], fallback_edge: float | None) -> dict[str, Any]:
+    raw_edge = rank.get("raw_edge")
+    if raw_edge is None:
+        raw_edge = fallback_edge
+    net_edge = rank.get("net_edge")
+    if net_edge is None:
+        net_edge = rank.get("edge", fallback_edge)
+    return {
+        "raw_edge": round(float(raw_edge), 5) if raw_edge is not None else None,
+        "net_edge": round(float(net_edge), 5) if net_edge is not None else None,
+        "edge": round(float(net_edge), 5) if net_edge is not None else None,
+        "expected_fee_cents": rank.get("expected_fee_cents"),
+        "expected_fee_prob": rank.get("expected_fee_prob"),
+        "liquidity_role": rank.get("liquidity_role") or "maker",
+    }
+
+
 def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any]) -> dict[str, Any]:
     snapshot = ctx.read_json("market_snapshot.json") or {}
     rows = snapshot.get("rows") or []
@@ -1004,6 +1151,7 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
         for row in ranker.get("rows", [])
         if row.get("ticker")
     }
+    active_basket = active_market_basket(ctx)
     input_freshness = artifact_freshness(ctx, (
         "market_snapshot.json",
         "slate_candidates.json",
@@ -1052,6 +1200,7 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
         book = metrics.get(ticker, {})
         match = match_by_ticker.get(ticker, {})
         rank = rank_by_ticker.get(ticker, {}) or {}
+        edge_fields = _rank_edge_fields(rank, edge)
         candidate_id = (
             row.get("candidate_id")
             or rank.get("candidate_id")
@@ -1072,9 +1221,9 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
             "execution_min_edge",
             getattr(ctx.settings, "min_edge", 0.05),
         ))
-        if edge is None:
+        if edge_fields["edge"] is None:
             blockers.append("missing model-vs-market edge")
-        elif edge < min_edge:
+        elif float(edge_fields["edge"]) < min_edge:
             blockers.append(f"edge below configured minimum {min_edge:.3f}")
         if row.get("sgp_adjusted_prob") is None:
             blockers.append("missing SGP-adjusted scenario probability")
@@ -1096,12 +1245,12 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
             "label": row.get("label"),
             "side": row.get("side"),
             "captured_at": row.get("captured_at"),
-            "entry_price_cents": row.get("entry_price_cents"),
+            "entry_price_cents": _rank_entry_price(rank, row.get("entry_price_cents")),
             "bid": row.get("bid"),
             "ask": row.get("ask"),
             "implied": implied,
             "prior_p": prior,
-            "edge": round(edge, 5) if edge is not None else None,
+            **edge_fields,
             "sgp_adjusted_prob": row.get("sgp_adjusted_prob"),
             "risk": row.get("risk"),
             "book_metrics": book,
@@ -1112,6 +1261,9 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
             "signal_source": rank.get("signal_source") or "consensus",
             "qual_signal": rank.get("qual_signal"),
             "qual_vs_consensus_delta": rank.get("qual_vs_consensus_delta"),
+            "qaq_investigation": rank.get("qaq_investigation"),
+            "qaq_evidence": rank.get("qaq_evidence"),
+            "signal_engine": rank.get("signal_engine"),
             "confluence": rank.get("confluence"),
             "confluence_verdict": rank.get("confluence_verdict") or "none",
             "confluence_shadow": bool(rank.get("confluence_shadow")),
@@ -1127,6 +1279,7 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
                 "Structured slate verification is required before execution.",
                 "Existing risk.py remains the final execution gate.",
             ],
+            **basket_metadata_for_ticker(active_basket, ticker),
         }
         performance_learner.annotate_candidate(
             candidate_row,
@@ -1146,6 +1299,7 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
             candidate_id = candidate.get("candidate_id") or rank.get("candidate_id")
             model_prob = rank.get("model_prob")
             rank_edge = rank.get("edge")
+            edge_fields = _rank_edge_fields(rank, rank.get("raw_edge"))
             sgp_adjusted_prob = rank.get("sgp_adjusted_prob")
             if sgp_adjusted_prob is None and model_prob is not None and not rank.get("is_composite"):
                 sgp_adjusted_prob = model_prob
@@ -1178,7 +1332,7 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
                 "label": market.get("title"),
                 "side": "yes",
                 "captured_at": match.get("captured_at") or market.get("captured_at"),
-                "entry_price_cents": market.get("ask") or market.get("mid"),
+                "entry_price_cents": _rank_entry_price(rank, market.get("ask") or market.get("mid")),
                 "bid": market.get("bid"),
                 "ask": market.get("ask"),
                 "implied": market.get("implied"),
@@ -1188,10 +1342,13 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
                 "signal_source": rank.get("signal_source") or "consensus",
                 "qual_signal": rank.get("qual_signal"),
                 "qual_vs_consensus_delta": rank.get("qual_vs_consensus_delta"),
+                "qaq_investigation": rank.get("qaq_investigation"),
+                "qaq_evidence": rank.get("qaq_evidence"),
+                "signal_engine": rank.get("signal_engine"),
                 "confluence": rank.get("confluence"),
                 "confluence_verdict": rank.get("confluence_verdict") or "none",
                 "confluence_shadow": bool(rank.get("confluence_shadow")),
-                "edge": rank_edge,
+                **edge_fields,
                 "required_edge": rank.get("required_edge"),
                 "book_count": rank.get("book_count"),
                 "disagreement_std": rank.get("disagreement_std"),
@@ -1215,6 +1372,7 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
                     "Single-market paper/demo execution uses the ranker model probability as the SGP-adjusted probability.",
                     "Live execution still requires explicit live gates and risk.py approval.",
                 ],
+                **basket_metadata_for_ticker(active_basket, ticker),
             }
             performance_learner.annotate_candidate(
                 candidate_row,

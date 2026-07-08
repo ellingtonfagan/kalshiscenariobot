@@ -47,6 +47,18 @@ class TradeIntent:
     signal_source: str = "consensus"
     confluence_verdict: str = "none"
     confluence: dict[str, Any] = field(default_factory=dict)
+    raw_edge: float | None = None
+    net_edge: float | None = None
+    required_edge: float | None = None
+    expected_fee_cents: float | None = None
+    expected_fee_prob: float | None = None
+    liquidity_role: str = "maker"
+    actual_fee_paid_cents: float | None = None
+    basket_id: str | None = None
+    event_ids: tuple[str, ...] = ()
+    news_item_ids: tuple[str, ...] = ()
+    signal_engine: str | None = None
+    qaq_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -58,19 +70,25 @@ class OrderRequest:
     order_type: str
     count: int
     price_cents: int
+    liquidity_role: str = "maker"
 
     def kalshi_v2_body(self) -> dict[str, Any]:
         order_side = "bid" if self.side == "yes" else "ask"
         price_cents = self.price_cents if self.side == "yes" else 100 - self.price_cents
-        return {
+        body = {
             "client_order_id": self.client_order_id,
             "ticker": self.ticker,
             "side": order_side,
             "count": f"{self.count:.2f}",
             "price": f"{price_cents / 100:.4f}",
-            "time_in_force": "immediate_or_cancel",
-            "self_trade_prevention_type": "taker_at_cross",
         }
+        if self.liquidity_role == "taker":
+            body["time_in_force"] = "immediate_or_cancel"
+            body["self_trade_prevention_type"] = "taker_at_cross"
+        else:
+            body["time_in_force"] = "good_til_canceled"
+            body["self_trade_prevention_type"] = "cancel_newest"
+        return body
 
 
 @dataclass(frozen=True)
@@ -89,12 +107,24 @@ class PaperFill:
     contracts: int
     price_cents: int
     filled_at: str
+    fee_cents: float | None = None
+    liquidity_role: str = "maker"
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
         f.write(json.dumps(payload, sort_keys=True, default=str) + "\n")
+
+
+def _actual_fee_paid_cents(response: dict[str, Any] | None) -> float | None:
+    if not isinstance(response, dict):
+        return None
+    raw = response.get("average_fee_paid")
+    try:
+        return round(float(raw) * 100.0, 4) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _audit_research_override(intent: TradeIntent, audit: AuditTrail) -> None:
@@ -106,6 +136,10 @@ def _audit_research_override(intent: TradeIntent, audit: AuditTrail) -> None:
             "scenario_id": intent.scenario_id,
             "ticker": intent.ticker,
             "edge": intent.edge,
+            "raw_edge": intent.raw_edge,
+            "net_edge": intent.net_edge,
+            "expected_fee_cents": intent.expected_fee_cents,
+            "liquidity_role": intent.liquidity_role,
             "stake_units": intent.stake_units,
             "approved_by": intent.research_approved_by,
             "reason": intent.research_override_reason,
@@ -126,6 +160,7 @@ def client_order_id(intent: TradeIntent, mode: str) -> str:
         "contracts": intent.contracts,
         "price_cents": intent.price_cents,
         "signal_source": intent.signal_source,
+        "liquidity_role": intent.liquidity_role,
     }, sort_keys=True)
     return "nbabot-" + hashlib.sha256(raw.encode()).hexdigest()[:24]
 
@@ -141,6 +176,7 @@ def build_order_request(intent: TradeIntent, mode: str) -> OrderRequest:
         order_type="limit",
         count=int(intent.contracts),
         price_cents=int(intent.price_cents),
+        liquidity_role=str(getattr(intent, "liquidity_role", "maker") or "maker"),
     )
 
 
@@ -169,6 +205,8 @@ def execute_paper(intent: TradeIntent, decision: RiskDecision, settings: Any,
         contracts=request.count,
         price_cents=request.price_cents,
         filled_at=utc_now(),
+        fee_cents=float(intent.expected_fee_cents) if intent.expected_fee_cents is not None else None,
+        liquidity_role=request.liquidity_role,
     )
     receipt = OrderReceipt(request.client_order_id, "paper", "filled", asdict(fill))
     inserted = store.record_order("paper_orders", intent.game_id, intent, decision, request, receipt)
@@ -239,6 +277,7 @@ def execute_demo(intent: TradeIntent, decision: RiskDecision, settings: Any,
         raise
 
     receipt = OrderReceipt(request.client_order_id, "demo", "submitted", response)
+    actual_fee_cents = _actual_fee_paid_cents(response)
     inserted = store.record_order("demo_orders", intent.game_id, intent, decision, request, receipt)
     if inserted:
         _append_jsonl(settings.data_path("demo_orders.jsonl"), {
@@ -246,6 +285,7 @@ def execute_demo(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "decision": asdict(decision),
             "request": asdict(request),
             "receipt": asdict(receipt),
+            "actual_fee_paid_cents": actual_fee_cents,
         })
     audit.log(
         "DEMO_ORDER",
@@ -253,6 +293,7 @@ def execute_demo(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "signal_source": intent.signal_source,
             "confluence_verdict": intent.confluence_verdict,
             "inserted": inserted,
+            "actual_fee_paid_cents": actual_fee_cents,
             **asdict(receipt),
         },
         intent.game_id,
@@ -264,8 +305,8 @@ def execute_live(intent: TradeIntent, decision: RiskDecision, settings: Any,
                  store: ResearchStore, audit: AuditTrail, kalshi: Any) -> OrderReceipt:
     if settings.execution_mode != "live":
         raise RuntimeError("live execution requires NBABOT_EXECUTION_MODE=live")
-    if str(getattr(intent, "signal_source", "consensus") or "consensus") == "qual":
-        raise RuntimeError("live execution blocks qual-sourced intents")
+    if str(getattr(intent, "signal_source", "consensus") or "consensus") in {"qual", "qual_activated_quant"}:
+        raise RuntimeError("qual-sourced intents are hard-blocked in live mode")
     if getattr(settings, "dry_run", True):
         raise RuntimeError("live execution requires NBABOT_DRY_RUN=0")
     if getattr(settings, "live_trading_ack", "") != "LIVE_TRADES_REAL_MONEY":
@@ -318,6 +359,7 @@ def execute_live(intent: TradeIntent, decision: RiskDecision, settings: Any,
         raise
 
     receipt = OrderReceipt(request.client_order_id, "live", "submitted", response)
+    actual_fee_cents = _actual_fee_paid_cents(response)
     inserted = store.record_order("live_orders", intent.game_id, intent, decision, request, receipt)
     if inserted:
         _append_jsonl(settings.data_path("live_orders.jsonl"), {
@@ -325,6 +367,7 @@ def execute_live(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "decision": asdict(decision),
             "request": asdict(request),
             "receipt": asdict(receipt),
+            "actual_fee_paid_cents": actual_fee_cents,
         })
     audit.log(
         "LIVE_ORDER",
@@ -332,6 +375,7 @@ def execute_live(intent: TradeIntent, decision: RiskDecision, settings: Any,
             "signal_source": intent.signal_source,
             "confluence_verdict": intent.confluence_verdict,
             "inserted": inserted,
+            "actual_fee_paid_cents": actual_fee_cents,
             **asdict(receipt),
         },
         intent.game_id,

@@ -1477,3 +1477,78 @@ were changed, and no scheduler or cron work was added.
   choosing scenario `0` and a Yankees / MLB moneyline lesson with hit count `1`.
 - No live execution env vars were set to live values and no live orders were
   placed.
+
+---
+
+## Round 20 - 2026-07-07 - Phase 16 fee-adjusted edges, QAQ, fallback, and baskets
+
+### What changed in code
+
+- Added a pure Kalshi fee model in `fees.py` and threaded fee-adjusted `net_edge`
+  through the edge engine, ranker, research candidates, trade intents, order
+  records, audit records, and paper/demo fill metadata. Scheduled-cycle ranking
+  now defaults to maker pricing; taker IOC remains available for triggered orders.
+- Changed all edge-vs-floor checks to use net edge while preserving raw edge for
+  diagnostics. `ExecutablePrice.as_dict()` now includes computed `price_cents` and
+  `price_prob` so downstream orders use the same maker/taker price the ranker
+  evaluated.
+- Retired the flat confluence agreement bonus. Agreement diagnostics still persist,
+  but `edge_bonus` is zero and agreement no longer lowers the demo/paper floor.
+  The disagreement veto and shadow-trade path remain active.
+- Added first-class `qual_activated_quant` plumbing through ranker rows, risk,
+  intents, order ledgers, settlement learning families, and live hard blocks.
+  QAQ can only remove the dynamic edge-floor blocker after a justified near-miss
+  investigation; identity, freshness, spread, plausible-edge, composite, and
+  disagreement-veto blockers remain hard blockers.
+- Added near-miss selection with `NBABOT_NEAR_MISS_WINDOW`,
+  `NBABOT_NEAR_MISS_INVESTIGATIONS_PER_CYCLE`, and `NBABOT_QAQ_FLOOR_BONUS`.
+  Verdicts are strict JSON, citation-gated, persisted in SQLite, and fail soft.
+- Added Claude fallback support through the official `anthropic` SDK dependency.
+  The shared runner covers qual research, near-miss investigations, and
+  postmortems. Empty `ANTHROPIC_API_KEY` keeps the previous codex-only fail-soft
+  behavior.
+- Added news-trigger market baskets. `news-watch` now builds and records targeted
+  baskets for a triggered team's game markets, activates the basket during the
+  scheduled demo cycle, and falls back to the full cycle if the basket is empty.
+
+### Tests
+
+- Full suite: `.venv/bin/pytest -q` -> `146 passed in 2.23s`.
+- Compile pass: `.venv/bin/python -m compileall src/nbabot tests/test_smoke.py`.
+- `git diff --check` passed.
+- Deliberately rewritten expectations:
+  - `test_demo_execution_builds_v2_payload` now expects default maker GTC payloads.
+  - Edge/ranker floor tests now assert `raw_edge` plus fee-adjusted `net_edge`.
+  - `test_candidate_ranker_confluence_agreement_does_not_lower_demo_required_base`
+    replaces the old agreement-boost expectation because Phase 16 removed that
+    flat bonus.
+- Unweakened behavior verified: fuzzy matches still never pass, plausible-edge
+  guard still blocks absurd edges, demo floor semantics still pass/block around
+  the fee-adjusted threshold, and qual/QAQ are hard-blocked in live.
+
+### Real behavior check
+
+- Official Kalshi fee schedule was checked during implementation: current public
+  factors are taker `0.07` and maker `0.0175`.
+- Existing real fee evidence in this checkout is live-order data, not demo-order
+  data with `average_fee_paid`. The requested 44c fill comparison used the real
+  recorded 44c order in `data/SLATE-2026-JUN29-JUL01.live_orders.jsonl`: observed
+  average fee `1.7200c` vs model taker prediction `1.7248c` per contract
+  (`-0.0048c` difference). A 42c recorded fill was similarly close:
+  observed `1.7000c` vs predicted `1.7052c`.
+- Isolated paper/dry-run real cycle ran in `/tmp/nbabot-phase16-MLwAeX` with
+  `NBABOT_EXECUTION_MODE=paper`, `NBABOT_DRY_RUN=1`, and no live ack vars. It
+  produced `200` ranked candidates, `4` edge passes, `4` trade-eligible rows, and
+  no order artifacts. Top ranked rows showed raw-vs-net fee adjustment, e.g.
+  `KXMLBGAME-26JUL082210COLLAD-LAD` raw edge `0.14620`, net edge `0.14233`,
+  fee probability `0.003869`, maker role.
+- The isolated cycle selected `2` near misses and persisted `2` investigation
+  rows. Both verdicts were not justified (`confidence=0.0`), so there were `0`
+  QAQ upgrades in real data.
+- Real qual research in that isolated cycle failed soft under the verification
+  timeout cap: `status=unavailable`, `reason=timeout`, `engine=codex`, `accepted=0`.
+- `ANTHROPIC_API_KEY` is empty by choice. A real no-key invocation returned
+  `status=unavailable`, `reason=command not found`, `engine=codex`, `signals=0`;
+  Claude was not invoked and no key material was printed.
+- No live execution env vars were set to live values and no live orders were
+  placed.

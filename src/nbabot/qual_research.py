@@ -20,6 +20,69 @@ USAGE_LIMIT_RE = re.compile(r"(usage limit|quota|rate limit|limit reached|too ma
 QUAL_PROMPT_VERSION = "qual-scenario-v1"
 SCENARIO_EVENT_SUM_TOLERANCE = 0.025
 SCENARIO_PROB_SUM_TOLERANCE = 0.015
+PRIMARY_UNAVAILABLE_REASONS = {"usage-limit", "timeout", "command not found", "missing command"}
+
+
+QUAL_SIGNAL_ARRAY_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "ticker",
+            "base_rate",
+            "qual_prob",
+            "confidence",
+            "rationale",
+            "scenarios",
+            "citation_urls",
+            "news_item_ids_used",
+        ],
+        "properties": {
+            "ticker": {"type": "string"},
+            "base_rate": {"type": "number"},
+            "qual_prob": {"type": "number"},
+            "confidence": {"type": "number"},
+            "rationale": {"type": "string"},
+            "scenarios": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["event", "p_event", "p_outcome_given_event", "citations"],
+                    "properties": {
+                        "event": {"type": "string"},
+                        "p_event": {"type": "number"},
+                        "p_outcome_given_event": {"type": "number"},
+                        "citations": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            },
+            "citation_urls": {"type": "array", "items": {"type": "string"}},
+            "news_item_ids_used": {"type": "array", "items": {"type": "string"}},
+        },
+    },
+}
+
+NEAR_MISS_INVESTIGATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "justified",
+        "direction_consistent",
+        "confidence",
+        "rationale",
+        "citation_urls",
+    ],
+    "properties": {
+        "justified": {"type": "boolean"},
+        "direction_consistent": {"type": "boolean"},
+        "confidence": {"type": "number"},
+        "rationale": {"type": "string"},
+        "citation_urls": {"type": "array", "items": {"type": "string"}},
+        "news_item_ids_used": {"type": "array", "items": {"type": "string"}},
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -234,6 +297,102 @@ def invoke_codex_cli(command: str, prompt: str, *, timeout_seconds: int) -> tupl
     return True, proc.stdout, ""
 
 
+def _primary_unavailable_reason(reason: str) -> bool:
+    reason = str(reason or "")
+    return reason in PRIMARY_UNAVAILABLE_REASONS or reason.startswith("timeout")
+
+
+def _anthropic_output_text(message: Any) -> str:
+    direct = getattr(message, "output_text", None)
+    if direct:
+        return str(direct)
+    content = getattr(message, "content", None)
+    if content is None and isinstance(message, dict):
+        content = message.get("content")
+    parts: list[str] = []
+    for block in content or []:
+        if isinstance(block, dict):
+            if block.get("text") is not None:
+                parts.append(str(block["text"]))
+            elif block.get("input") is not None:
+                return json.dumps(block["input"], sort_keys=True)
+            continue
+        text = getattr(block, "text", None)
+        if text is not None:
+            parts.append(str(text))
+            continue
+        block_input = getattr(block, "input", None)
+        if block_input is not None:
+            return json.dumps(block_input, sort_keys=True)
+    return "\n".join(parts).strip()
+
+
+def invoke_claude_api(
+    prompt: str,
+    *,
+    schema: dict[str, Any],
+    model: str,
+    client_factory: Any | None = None,
+) -> tuple[bool, str, str]:
+    try:
+        import anthropic
+    except Exception:
+        return False, "", "anthropic-sdk-unavailable"
+    try:
+        client = client_factory() if client_factory is not None else anthropic.Anthropic()
+        message = client.messages.create(
+            model=model,
+            max_tokens=16000,
+            thinking={"type": "adaptive"},
+            messages=[{"role": "user", "content": prompt}],
+            output_config={
+                "format": {
+                    "type": "json_schema",
+                    "schema": schema,
+                }
+            },
+        )
+        output = _anthropic_output_text(message)
+        return True, output, ""
+    except (
+        getattr(anthropic, "RateLimitError", Exception),
+        getattr(anthropic, "APIStatusError", Exception),
+        getattr(anthropic, "APIConnectionError", Exception),
+    ) as exc:
+        return False, "", exc.__class__.__name__
+    except Exception as exc:
+        return False, "", exc.__class__.__name__
+
+
+def run_llm_with_fallback(
+    *,
+    command: str,
+    prompt: str,
+    timeout_seconds: int,
+    schema: dict[str, Any],
+    fallback_model: str,
+    invoker: Any = invoke_codex_cli,
+    claude_invoker: Any = invoke_claude_api,
+    anthropic_api_key: str | None = None,
+) -> dict[str, Any]:
+    ok, output, reason = invoker(command, prompt, timeout_seconds=timeout_seconds)
+    if ok:
+        return {"ok": True, "output": output, "reason": "", "engine": "codex"}
+    if not _primary_unavailable_reason(reason):
+        return {"ok": False, "output": output, "reason": reason or "codex-cli-failed", "engine": "codex"}
+    key = os.environ.get("ANTHROPIC_API_KEY", "") if anthropic_api_key is None else anthropic_api_key
+    if not str(key or "").strip():
+        return {"ok": False, "output": output, "reason": reason or "codex-cli-failed", "engine": "codex"}
+    ok2, output2, reason2 = claude_invoker(
+        prompt,
+        schema=schema,
+        model=fallback_model,
+    )
+    if ok2:
+        return {"ok": True, "output": output2, "reason": "", "engine": "claude"}
+    return {"ok": False, "output": "", "reason": reason2 or "claude-api-failed", "engine": "claude"}
+
+
 def parse_strict_json(raw: str) -> Any:
     text = str(raw or "").strip()
     if not text:
@@ -305,6 +464,7 @@ def validate_qual_output(
     url_to_news_item_ids: dict[str, list[str]] | None = None,
     market_by_ticker: dict[str, dict[str, Any]] | None = None,
     created_at: str | None = None,
+    engine: str = "codex",
 ) -> QualValidationResult:
     parsed = parse_strict_json(raw_output)
     if not isinstance(parsed, list):
@@ -372,6 +532,7 @@ def validate_qual_output(
             "prompt_version": QUAL_PROMPT_VERSION,
             "market": market_by_ticker.get(ticker, {}),
             "created_at": created_at,
+            "engine": engine,
         }
         accepted.append({
             "ticker": ticker,
@@ -384,11 +545,280 @@ def validate_qual_output(
             "scenarios": scenarios or [],
             "analysis": analysis,
             "created_at": created_at,
+            "engine": engine,
             "model_run_id": model_run_id,
             "prompt_version": QUAL_PROMPT_VERSION,
             "signal_source": "qual",
         })
     return QualValidationResult(accepted=accepted, discarded=discarded, retry_error=retry_error)
+
+
+def build_near_miss_prompt(
+    *,
+    news_items: list[dict[str, Any]],
+    candidate: dict[str, Any],
+    calibration_lines: list[str] | None = None,
+    retry_error: str | None = None,
+) -> str:
+    schema = (
+        '{"justified":false,"direction_consistent":false,"confidence":0.0,'
+        '"rationale":"One or two sentences.",'
+        '"citation_urls":["https://..."],"news_item_ids_used":["..."]}'
+    )
+    payload = {
+        "market": {
+            "ticker": candidate.get("ticker"),
+            "title": candidate.get("label") or candidate.get("title"),
+            "market_identity": candidate.get("market_identity"),
+            "consensus_prob": candidate.get("model_prob"),
+            "kalshi_price_prob": (
+                (candidate.get("executable_price") or {}).get("price_prob")
+                if isinstance(candidate.get("executable_price"), dict) else
+                None
+            ),
+            "kalshi_price_cents": (
+                (candidate.get("executable_price") or {}).get("price_cents")
+                if isinstance(candidate.get("executable_price"), dict) else
+                candidate.get("entry_price_cents")
+            ),
+            "raw_edge": candidate.get("raw_edge"),
+            "net_edge": candidate.get("net_edge"),
+            "required_edge": candidate.get("required_edge"),
+            "gap": candidate.get("near_miss_gap"),
+        },
+        "news_items": news_items,
+        "allowed_citation_urls": sorted({row["url"] for row in news_items if row.get("url")}),
+        "allowed_news_item_ids": sorted({row["id"] for row in news_items if row.get("id")}),
+        "calibration": calibration_lines or [],
+        "prompt_version": "near-miss-qaq-v1",
+    }
+    retry_line = f"\nPrevious output was invalid: {retry_error}\n" if retry_error else ""
+    return (
+        "You are investigating a near-miss quantitative Kalshi sports edge. "
+        "Use only the provided recent news items. Decide whether there is specific, "
+        "citable news that justifies the observed price gap, and whether that news "
+        "supports the same direction as the quantitative edge. "
+        "Return STRICT JSON only, no markdown and no prose wrapper. "
+        "If evidence is not specific, set justified=false. "
+        "Every citation_url must be copied from allowed_citation_urls.\n"
+        f"Schema: {schema}\n"
+        f"{retry_line}"
+        f"Input JSON:\n{json.dumps(payload, sort_keys=True)}"
+    )
+
+
+def validate_near_miss_output(
+    raw_output: str,
+    *,
+    allowed_urls: set[str],
+    allowed_news_item_ids: set[str],
+    url_to_news_item_ids: dict[str, list[str]],
+    news_by_id: dict[str, dict[str, Any]],
+    candidate: dict[str, Any],
+    model_run_id: str,
+    engine: str = "codex",
+) -> dict[str, Any]:
+    parsed = parse_strict_json(raw_output)
+    if not isinstance(parsed, dict):
+        raise ValueError("top-level JSON must be an object")
+    confidence = _safe_float(parsed.get("confidence"))
+    if confidence is None:
+        raise ValueError("missing confidence")
+    citations = _valid_citations(parsed.get("citation_urls"), allowed_urls)
+    justified = bool(parsed.get("justified"))
+    direction_consistent = bool(parsed.get("direction_consistent"))
+    if justified and not citations:
+        raise ValueError("justified near-miss requires valid citations")
+    news_item_ids = [
+        str(item_id).strip()
+        for item_id in (parsed.get("news_item_ids_used") or [])
+        if str(item_id).strip() in allowed_news_item_ids
+    ]
+    if not news_item_ids:
+        for url in citations:
+            news_item_ids.extend(url_to_news_item_ids.get(url, []))
+    news_item_ids = sorted(dict.fromkeys(news_item_ids))
+    first_seen_at = None
+    source = None
+    for item_id in news_item_ids:
+        item = news_by_id.get(item_id) or {}
+        first_seen_at = item.get("published_at") or item.get("fetched_at") or first_seen_at
+        source = item.get("source") or source
+        if first_seen_at and source:
+            break
+    return {
+        "ticker": candidate.get("ticker"),
+        "candidate_id": candidate.get("candidate_id"),
+        "status": "ok",
+        "justified": justified,
+        "direction_consistent": direction_consistent,
+        "confidence": round(min(max(confidence, 0.0), 1.0), 6),
+        "rationale": str(parsed.get("rationale") or "")[:700],
+        "citation_urls": sorted(dict.fromkeys(citations)),
+        "news_item_ids": news_item_ids,
+        "first_seen_at": first_seen_at,
+        "source": source,
+        "gap": candidate.get("near_miss_gap"),
+        "net_edge": candidate.get("net_edge"),
+        "required_edge": candidate.get("required_edge"),
+        "consensus_prob": candidate.get("model_prob"),
+        "kalshi_price_cents": (
+            (candidate.get("executable_price") or {}).get("price_cents")
+            if isinstance(candidate.get("executable_price"), dict) else
+            candidate.get("entry_price_cents")
+        ),
+        "model_run_id": model_run_id,
+        "engine": engine,
+        "signal_source": "qual_activated_quant",
+        "created_at": utc_now(),
+    }
+
+
+def run_near_miss_investigations(
+    *,
+    command: str,
+    news_items: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    timeout_seconds: int,
+    calibration_lines: list[str] | None = None,
+    invoker: Any = invoke_codex_cli,
+    claude_invoker: Any = invoke_claude_api,
+    fallback_model: str = "claude-opus-4-8",
+    anthropic_api_key: str | None = None,
+) -> dict[str, Any]:
+    model_run_id = "near-miss-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    if not candidates:
+        return {
+            "status": "ok",
+            "reason": "no-near-miss-candidates",
+            "model_run_id": model_run_id,
+            "investigations": [],
+        }
+    allowed_urls = {str(row.get("url")) for row in news_items if row.get("url")}
+    allowed_news_item_ids = {str(row.get("id")) for row in news_items if row.get("id")}
+    url_to_news_item_ids: dict[str, list[str]] = {}
+    news_by_id: dict[str, dict[str, Any]] = {}
+    for item in news_items:
+        if item.get("id"):
+            news_by_id[str(item["id"])] = item
+        if item.get("url") and item.get("id"):
+            url_to_news_item_ids.setdefault(str(item["url"]), []).append(str(item["id"]))
+    if not news_items:
+        return {
+            "status": "ok",
+            "reason": "no-recent-news-items",
+            "model_run_id": model_run_id,
+            "investigations": [
+                {
+                    "ticker": row.get("ticker"),
+                    "candidate_id": row.get("candidate_id"),
+                    "status": "blocked",
+                    "reason": "no-recent-news-items",
+                    "justified": False,
+                    "direction_consistent": False,
+                    "confidence": 0.0,
+                    "rationale": "No recent citable news items were available for investigation.",
+                    "citation_urls": [],
+                    "news_item_ids": [],
+                    "gap": row.get("near_miss_gap"),
+                    "net_edge": row.get("net_edge"),
+                    "required_edge": row.get("required_edge"),
+                    "model_run_id": model_run_id,
+                    "engine": "codex",
+                    "signal_source": "qual_activated_quant",
+                    "created_at": utc_now(),
+                }
+                for row in candidates
+            ],
+        }
+
+    investigations: list[dict[str, Any]] = []
+    unavailable = 0
+    for candidate in candidates:
+        retry_error = None
+        last_reason = None
+        for attempt in (1, 2):
+            prompt = build_near_miss_prompt(
+                news_items=news_items,
+                candidate=candidate,
+                calibration_lines=calibration_lines,
+                retry_error=retry_error,
+            )
+            run = run_llm_with_fallback(
+                command=command,
+                prompt=prompt,
+                timeout_seconds=timeout_seconds,
+                schema=NEAR_MISS_INVESTIGATION_SCHEMA,
+                fallback_model=fallback_model,
+                invoker=invoker,
+                claude_invoker=claude_invoker,
+                anthropic_api_key=anthropic_api_key,
+            )
+            engine = str(run.get("engine") or "codex")
+            if not run.get("ok"):
+                unavailable += 1
+                investigations.append({
+                    "ticker": candidate.get("ticker"),
+                    "candidate_id": candidate.get("candidate_id"),
+                    "status": "unavailable",
+                    "reason": run.get("reason") or "codex-cli-failed",
+                    "justified": False,
+                    "direction_consistent": False,
+                    "confidence": 0.0,
+                    "rationale": "Near-miss investigation engine unavailable.",
+                    "citation_urls": [],
+                    "news_item_ids": [],
+                    "gap": candidate.get("near_miss_gap"),
+                    "net_edge": candidate.get("net_edge"),
+                    "required_edge": candidate.get("required_edge"),
+                    "model_run_id": model_run_id,
+                    "engine": engine,
+                    "signal_source": "qual_activated_quant",
+                    "created_at": utc_now(),
+                })
+                break
+            try:
+                investigations.append(validate_near_miss_output(
+                    str(run.get("output") or ""),
+                    allowed_urls=allowed_urls,
+                    allowed_news_item_ids=allowed_news_item_ids,
+                    url_to_news_item_ids=url_to_news_item_ids,
+                    news_by_id=news_by_id,
+                    candidate=candidate,
+                    model_run_id=model_run_id,
+                    engine=engine,
+                ))
+                break
+            except ValueError as exc:
+                last_reason = str(exc)
+                retry_error = last_reason
+                if attempt == 2:
+                    investigations.append({
+                        "ticker": candidate.get("ticker"),
+                        "candidate_id": candidate.get("candidate_id"),
+                        "status": "invalid",
+                        "reason": f"malformed-json-after-retry: {last_reason}",
+                        "justified": False,
+                        "direction_consistent": False,
+                        "confidence": 0.0,
+                        "rationale": "Near-miss investigation output failed validation.",
+                        "citation_urls": [],
+                        "news_item_ids": [],
+                        "gap": candidate.get("near_miss_gap"),
+                        "net_edge": candidate.get("net_edge"),
+                        "required_edge": candidate.get("required_edge"),
+                        "model_run_id": model_run_id,
+                        "engine": engine,
+                        "signal_source": "qual_activated_quant",
+                        "created_at": utc_now(),
+                    })
+    return {
+        "status": "unavailable" if unavailable == len(candidates) else "ok",
+        "reason": "engine-unavailable" if unavailable == len(candidates) else None,
+        "model_run_id": model_run_id,
+        "investigation_count": len(investigations),
+        "investigations": investigations,
+    }
 
 
 def run_qual_model(
@@ -400,6 +830,9 @@ def run_qual_model(
     lessons: list[dict[str, Any]] | None = None,
     calibration_lines: list[str] | None = None,
     invoker: Any = invoke_codex_cli,
+    claude_invoker: Any = invoke_claude_api,
+    fallback_model: str = "claude-opus-4-8",
+    anthropic_api_key: str | None = None,
 ) -> dict[str, Any]:
     model_run_id = "qual-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     allowed_tickers = {str(row.get("ticker")) for row in markets if row.get("ticker")}
@@ -438,14 +871,26 @@ def run_qual_model(
             calibration_lines=calibration_lines,
             retry_error=retry_error,
         )
-        ok, output, reason = invoker(command, prompt, timeout_seconds=timeout_seconds)
+        run = run_llm_with_fallback(
+            command=command,
+            prompt=prompt,
+            timeout_seconds=timeout_seconds,
+            schema=QUAL_SIGNAL_ARRAY_SCHEMA,
+            fallback_model=fallback_model,
+            invoker=invoker,
+            claude_invoker=claude_invoker,
+            anthropic_api_key=anthropic_api_key,
+        )
+        output = str(run.get("output") or "")
+        engine = str(run.get("engine") or "codex")
         last_output = output
-        if not ok:
+        if not run.get("ok"):
             return {
                 "status": "unavailable",
-                "reason": reason or "codex-cli-failed",
+                "reason": run.get("reason") or "codex-cli-failed",
                 "model_run_id": model_run_id,
                 "attempts": attempt,
+                "engine": engine,
                 "signals": [],
                 "discarded": [],
             }
@@ -458,6 +903,7 @@ def run_qual_model(
                 allowed_news_item_ids=allowed_news_item_ids,
                 url_to_news_item_ids=url_to_news_item_ids,
                 market_by_ticker=market_by_ticker,
+                engine=engine,
             )
         except ValueError as exc:
             last_reason = str(exc)
@@ -472,6 +918,7 @@ def run_qual_model(
             "reason": None,
             "model_run_id": model_run_id,
             "attempts": attempt,
+            "engine": engine,
             "signals": validation.accepted,
             "discarded": validation.discarded,
         }
@@ -483,6 +930,7 @@ def run_qual_model(
         "reason": f"malformed-json-after-retry: {last_reason or 'invalid output'}",
         "model_run_id": model_run_id,
         "attempts": 2,
+        "engine": "codex",
         "signals": [],
         "discarded": [],
     }

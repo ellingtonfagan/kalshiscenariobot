@@ -28,6 +28,7 @@ from nbabot import (  # noqa: E402
     cli,
     edge_engine,
     execution,
+    fees,
     guardrails,
     market_identity,
     market_matcher as market_matcher_core,
@@ -611,6 +612,33 @@ def _write_test_private_key(path: Path):
     return key
 
 
+def test_fee_model_curve_and_total_fee_round_up():
+    assert fees.expected_fee(50, maker=False) == pytest.approx(1.75)
+    assert fees.expected_fee(50, maker=True) == pytest.approx(0.4375)
+    assert fees.expected_fee(1, maker=False) == pytest.approx(fees.expected_fee(99, maker=False))
+    assert fees.expected_fee(1, maker=False) > fees.expected_fee(1, maker=True)
+    assert fees.expected_fee_prob(50, maker=False) == pytest.approx(0.0175)
+    assert fees.expected_total_fee_cents(50, 1, maker=False) == pytest.approx(2.0)
+
+
+def test_order_request_uses_taker_ioc_when_requested():
+    request = execution.OrderRequest(
+        client_order_id="cid",
+        ticker="KXTEST",
+        action="buy",
+        side="yes",
+        order_type="limit",
+        count=1,
+        price_cents=50,
+        liquidity_role="taker",
+    )
+
+    body = request.kalshi_v2_body()
+
+    assert body["time_in_force"] == "immediate_or_cancel"
+    assert body["self_trade_prevention_type"] == "taker_at_cross"
+
+
 def _settlement_fixture(
     idx,
     *,
@@ -1173,6 +1201,165 @@ def test_qual_model_cli_failure_is_unavailable():
 
     assert result["status"] == "unavailable"
     assert result["reason"] == "command not found"
+
+
+def test_qual_model_primary_unavailable_uses_claude_when_key_set():
+    calls = {"codex": 0, "claude": 0}
+    raw = json.dumps([
+        {
+            "ticker": "KXQUAL1",
+            "base_rate": 0.50,
+            "qual_prob": 0.60,
+            "confidence": 0.70,
+            "rationale": "Claude fallback.",
+            "citation_urls": ["https://example.com/a"],
+            "news_item_ids_used": ["news-a"],
+            "scenarios": [
+                {"event": "A", "p_event": 0.50, "p_outcome_given_event": 0.70, "citations": ["https://example.com/a"]},
+                {"event": "B", "p_event": 0.50, "p_outcome_given_event": 0.50, "citations": ["https://example.com/a"]},
+            ],
+        }
+    ])
+
+    def invoker(command, prompt, timeout_seconds):
+        calls["codex"] += 1
+        return False, "", "usage-limit"
+
+    def claude_invoker(prompt, schema, model):
+        calls["claude"] += 1
+        assert schema == qual_research_core.QUAL_SIGNAL_ARRAY_SCHEMA
+        assert model == "claude-test"
+        return True, raw, ""
+
+    result = qual_research_core.run_qual_model(
+        command="/fake/codex exec",
+        news_items=[{"id": "news-a", "url": "https://example.com/a", "title": "Yankees", "summary": "news"}],
+        markets=[{"ticker": "KXQUAL1", "title": "Yankees win"}],
+        timeout_seconds=1,
+        invoker=invoker,
+        claude_invoker=claude_invoker,
+        fallback_model="claude-test",
+        anthropic_api_key="test-key",
+    )
+
+    assert calls == {"codex": 1, "claude": 1}
+    assert result["status"] == "ok"
+    assert result["engine"] == "claude"
+    assert result["signals"][0]["engine"] == "claude"
+
+
+def test_qual_model_empty_key_keeps_primary_unavailable_behavior():
+    called = {"claude": False}
+
+    def invoker(command, prompt, timeout_seconds):
+        return False, "", "usage-limit"
+
+    def claude_invoker(prompt, schema, model):
+        called["claude"] = True
+        return True, "[]", ""
+
+    result = qual_research_core.run_qual_model(
+        command="/fake/codex exec",
+        news_items=[{"id": "news-a", "url": "https://example.com/a", "title": "Yankees", "summary": "news"}],
+        markets=[{"ticker": "KXQUAL1", "title": "Yankees win"}],
+        timeout_seconds=1,
+        invoker=invoker,
+        claude_invoker=claude_invoker,
+        anthropic_api_key="",
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["engine"] == "codex"
+    assert called["claude"] is False
+
+
+def test_near_miss_investigation_justified_output_validates():
+    candidate = {
+        "ticker": "KXEDGE",
+        "candidate_id": "mlb:yankees:redsox",
+        "model_prob": 0.529,
+        "net_edge": 0.04463,
+        "required_edge": 0.055,
+        "near_miss_gap": 0.01037,
+        "executable_price": {"price_cents": 48, "price_prob": 0.48},
+    }
+    raw = json.dumps({
+        "justified": True,
+        "direction_consistent": True,
+        "confidence": 0.67,
+        "rationale": "Specific cited lineup news supports the same side.",
+        "citation_urls": ["https://example.com/a"],
+        "news_item_ids_used": ["news-a"],
+    })
+
+    result = qual_research_core.validate_near_miss_output(
+        raw,
+        allowed_urls={"https://example.com/a"},
+        allowed_news_item_ids={"news-a"},
+        url_to_news_item_ids={"https://example.com/a": ["news-a"]},
+        news_by_id={"news-a": {"id": "news-a", "source": "mlb_rss", "published_at": "2026-07-07T12:00:00+00:00"}},
+        candidate=candidate,
+        model_run_id="near-1",
+        engine="claude",
+    )
+
+    assert result["signal_source"] == "qual_activated_quant"
+    assert result["justified"] is True
+    assert result["direction_consistent"] is True
+    assert result["confidence"] == pytest.approx(0.67)
+    assert result["news_item_ids"] == ["news-a"]
+    assert result["engine"] == "claude"
+
+
+def test_market_basket_builds_targeted_team_game_markets():
+    now = "2026-07-07T12:00:00+00:00"
+    slate_payload = {
+        "candidates": [
+            {
+                "candidate_id": "mlb:newyorkyankees:bostonredsox",
+                "sport": "mlb",
+                "away_team": "New York Yankees",
+                "home_team": "Boston Red Sox",
+                "kalshi_markets": [
+                    {"ticker": "KXMLBGAME-26JUL07NYYBOS-NYY", "series_ticker": "KXMLBGAME", "title": "Yankees winner?"},
+                    {"ticker": "KXMLBSPREAD-26JUL07NYYBOS-NYY", "series_ticker": "KXMLBSPREAD", "title": "Yankees run line?"},
+                    {"ticker": "KXMLBTOTAL-26JUL07NYYBOS-9", "series_ticker": "KXMLBTOTAL", "title": "Total runs?"},
+                    {"ticker": "KXMLBCORNERS-IGNORED", "series_ticker": "KXMLBCORNERS", "title": "Corners?"},
+                ],
+            }
+        ],
+    }
+    matches = {"rows": [
+        {
+            "ticker": "KXMLBGAME-26JUL07NYYBOS-NYY",
+            "candidate_id": "mlb:newyorkyankees:bostonredsox",
+            "event_ticker": "KXMLBGAME-26JUL07NYYBOS",
+            "series_ticker": "KXMLBGAME",
+            "title": "Yankees winner?",
+        }
+    ]}
+
+    basket = slate.build_market_basket(
+        team="yankees",
+        hit={
+            "canonical_name": "New York Yankees",
+            "content_hash": "news-a",
+            "headline": "Yankees lineup change",
+            "published_at": now,
+        },
+        slate=slate_payload,
+        market_matches=matches,
+        reason="fixture",
+    )
+
+    assert basket["empty"] is False
+    assert basket["news_item_ids"] == ["news-a"]
+    assert "mlb:newyorkyankees:bostonredsox" in basket["event_ids"]
+    assert basket["tickers"] == [
+        "KXMLBGAME-26JUL07NYYBOS-NYY",
+        "KXMLBSPREAD-26JUL07NYYBOS-NYY",
+        "KXMLBTOTAL-26JUL07NYYBOS-9",
+    ]
 
 
 def test_qual_signal_full_analysis_persists_round_trip(tmp_path):
@@ -2119,6 +2306,19 @@ def test_live_execution_hard_blocks_qual_intents_even_when_gated(tmp_path):
     with pytest.raises(RuntimeError, match="qual-sourced intents"):
         execution.execute_live(intent, decision, settings, store, audit, DummyKalshi())
 
+    qaq_intent = _intent(
+        signal_source="qual_activated_quant",
+        edge=0.04,
+        net_edge=0.04,
+        required_edge=0.035,
+        model_prob=0.58,
+    )
+    qaq_decision = risk.evaluate_trade_intent(qaq_intent, settings)
+    assert not qaq_decision.approved
+    assert "qual-sourced intents are hard-blocked in live mode" in qaq_decision.reasons
+    with pytest.raises(RuntimeError, match="qual-sourced intents"):
+        execution.execute_live(qaq_intent, qaq_decision, settings, store, audit, DummyKalshi())
+
 
 def test_performance_learner_suggests_shrink_only_overrides():
     shrinking_family = [
@@ -2175,7 +2375,8 @@ def test_demo_execution_builds_v2_payload(tmp_path):
     assert kalshi.body["side"] == "bid"
     assert kalshi.body["price"] == "0.5000"
     assert kalshi.body["count"] == "1.00"
-    assert kalshi.body["time_in_force"] == "immediate_or_cancel"
+    assert kalshi.body["time_in_force"] == "good_til_canceled"
+    assert kalshi.body["self_trade_prevention_type"] == "cancel_newest"
     assert "action" not in kalshi.body
     assert "type" not in kalshi.body
     assert store.count_orders("demo_orders") == 1
@@ -3133,7 +3334,7 @@ def test_edge_engine_dynamic_required_edge_and_blockers(tmp_path):
 
 def test_demo_and_paper_edge_floor_passes_between_demo_and_live_thresholds(tmp_path):
     consensus = {
-        "fair_prob": 0.549,
+        "fair_prob": 0.553,
         "book_count": 6,
         "sources": ["pinnacle", "circa", "draftkings"],
         "disagreement_std": 0.0,
@@ -3158,7 +3359,9 @@ def test_demo_and_paper_edge_floor_passes_between_demo_and_live_thresholds(tmp_p
         settings,
         base_min_edge=settings.execution_min_edge,
     )
-    assert demo.edge == pytest.approx(0.049)
+    assert demo.raw_edge == pytest.approx(0.053)
+    assert demo.edge == pytest.approx(0.0355)
+    assert demo.net_edge == pytest.approx(0.0355)
     assert demo.required_edge == pytest.approx(0.035)
     assert demo.passes_edge is True
 
@@ -3203,7 +3406,7 @@ def test_demo_edge_floor_still_blocks_below_demo_threshold(tmp_path):
     result = edge_engine.evaluate_market(
         {"ticker": "KXEDGE", "match_type": "exact"},
         {
-            "fair_prob": 0.532,
+        "fair_prob": 0.552,
             "book_count": 6,
             "sources": ["pinnacle", "circa", "draftkings"],
             "disagreement_std": 0.0,
@@ -3213,7 +3416,8 @@ def test_demo_edge_floor_still_blocks_below_demo_threshold(tmp_path):
         base_min_edge=settings.execution_min_edge,
     )
 
-    assert result.edge == pytest.approx(0.032)
+    assert result.raw_edge == pytest.approx(0.052)
+    assert result.edge == pytest.approx(0.0345)
     assert result.required_edge == pytest.approx(0.035)
     assert result.passes_edge is False
     assert "edge below dynamic required edge" in result.blockers
@@ -3248,13 +3452,14 @@ def test_edge_engine_blocks_implausibly_large_edge(tmp_path):
         base_min_edge=settings.execution_min_edge,
     )
 
-    assert large.edge == pytest.approx(0.45)
+    assert large.raw_edge == pytest.approx(0.45)
+    assert large.edge == pytest.approx(0.44863)
     assert large.passes_edge is False
     assert edge_engine.IMPLAUSIBLE_EDGE_BLOCKER in large.blockers
 
     normal = edge_engine.evaluate_market(
         match,
-        {**consensus, "fair_prob": 0.54},
+        {**consensus, "fair_prob": 0.56},
         edge_engine.ExecutablePrice(
             side="yes",
             bid_cents=48,
@@ -3268,7 +3473,8 @@ def test_edge_engine_blocks_implausibly_large_edge(tmp_path):
         base_min_edge=settings.execution_min_edge,
     )
 
-    assert normal.edge == pytest.approx(0.04)
+    assert normal.raw_edge == pytest.approx(0.06)
+    assert normal.edge == pytest.approx(0.0425)
     assert normal.passes_edge is True
     assert edge_engine.IMPLAUSIBLE_EDGE_BLOCKER not in normal.blockers
 
@@ -3299,7 +3505,8 @@ def test_edge_engine_plausible_guard_blocks_absurd_edge_in_demo(tmp_path):
         base_min_edge=settings.execution_min_edge,
     )
 
-    assert result.edge == pytest.approx(0.45)
+    assert result.raw_edge == pytest.approx(0.45)
+    assert result.edge == pytest.approx(0.44863)
     assert result.passes_edge is False
     assert edge_engine.IMPLAUSIBLE_EDGE_BLOCKER in result.blockers
 
@@ -3684,7 +3891,7 @@ def test_candidate_ranker_demo_floor_passes_marginal_edge_while_live_is_unchange
 
     def fixed_consensus(_rows, target_name=None):
         return {
-            "fair_prob": 0.549,
+            "fair_prob": 0.529,
             "book_count": 6,
             "sources": ["pinnacle", "circa", "draftkings"],
             "disagreement_std": 0.0,
@@ -3706,7 +3913,8 @@ def test_candidate_ranker_demo_floor_passes_marginal_edge_while_live_is_unchange
     )
     demo_row = demo["rows"][0]
     assert demo["edge_pass_count"] == 1
-    assert demo_row["edge"] == pytest.approx(0.049)
+    assert demo_row["raw_edge"] == pytest.approx(0.049)
+    assert demo_row["edge"] == pytest.approx(0.04463)
     assert demo_row["required_edge"] == pytest.approx(0.035)
     assert demo_row["passes_edge"] is True
 
@@ -3814,7 +4022,8 @@ def test_candidate_ranker_qual_prices_unconsensused_demo_rows_at_higher_floor(tm
 
     assert row["signal_source"] == "qual"
     assert row["model_prob"] == pytest.approx(0.57)
-    assert row["edge"] == pytest.approx(0.07)
+    assert row["raw_edge"] == pytest.approx(0.09)
+    assert row["edge"] == pytest.approx(0.08563)
     assert row["required_edge"] == pytest.approx(0.065)
     assert row["passes_edge"] is True
     assert row["trade_eligible"] is True
@@ -3828,7 +4037,7 @@ def test_candidate_ranker_qual_prices_unconsensused_demo_rows_at_higher_floor(tm
         qual_signals={
             "KXQUAL-NYY": {
                 "ticker": "KXQUAL-NYY",
-                "qual_prob": 0.55,
+                "qual_prob": 0.549,
                 "confidence": 0.70,
                 "rationale": "Not enough edge.",
                 "citation_urls": ["https://example.com/yankees-lineup"],
@@ -3841,6 +4050,68 @@ def test_candidate_ranker_qual_prices_unconsensused_demo_rows_at_higher_floor(tm
     assert blocked["rows"][0]["signal_source"] == "qual"
     assert blocked["rows"][0]["passes_edge"] is False
     assert "edge below dynamic required edge" in blocked["rows"][0]["blockers"]
+
+
+def test_candidate_ranker_near_miss_qaq_upgrade_lowers_floor_with_evidence(tmp_path, monkeypatch):
+    now_dt = datetime(2026, 7, 7, 19, 0, tzinfo=timezone.utc)
+    now = now_dt.isoformat()
+    slate_payload, market_matches = _ranker_fixture(now)
+
+    def fixed_consensus(_rows, target_name=None):
+        return {
+            "fair_prob": 0.518,
+            "book_count": 6,
+            "sources": ["pinnacle", "circa", "draftkings"],
+            "disagreement_std": 0.0,
+        }
+
+    monkeypatch.setattr(candidate_ranker_core, "consensus_prob", fixed_consensus)
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+    initial = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+    )
+    near_misses = candidate_ranker_core.select_near_miss_candidates(initial["rows"], settings)
+    assert len(near_misses) == 1
+    assert near_misses[0]["near_miss_gap"] == pytest.approx(0.00137)
+
+    upgraded = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        qaq_verdicts={
+            "KXEDGE": {
+                "ticker": "KXEDGE",
+                "justified": True,
+                "direction_consistent": True,
+                "confidence": 0.70,
+                "rationale": "Specific cited lineup news supports the quantitative side.",
+                "citation_urls": ["https://example.com/a"],
+                "news_item_ids": ["news-a"],
+                "first_seen_at": now,
+                "source": "mlb_rss",
+                "engine": "codex",
+            }
+        },
+    )
+    row = upgraded["rows"][0]
+
+    assert row["signal_source"] == "qual_activated_quant"
+    assert row["raw_edge"] == pytest.approx(0.038)
+    assert row["edge"] == pytest.approx(0.03363)
+    assert row["required_edge"] == pytest.approx(0.02)
+    assert row["passes_edge"] is True
+    assert row["qaq_evidence"]["news_item_ids"] == ["news-a"]
+    assert upgraded["signal_source_counts"]["qual_activated_quant"] == 1
 
 
 def test_candidate_ranker_logs_qual_delta_but_keeps_consensus_source(tmp_path):
@@ -3883,14 +4154,14 @@ def test_candidate_ranker_logs_qual_delta_but_keeps_consensus_source(tmp_path):
     assert row["qual_vs_consensus_delta"] == pytest.approx(0.04)
 
 
-def test_candidate_ranker_confluence_agreement_lowers_demo_required_base(tmp_path, monkeypatch):
+def test_candidate_ranker_confluence_agreement_does_not_lower_demo_required_base(tmp_path, monkeypatch):
     now_dt = datetime(2026, 7, 7, 19, 0, tzinfo=timezone.utc)
     now = now_dt.isoformat()
     slate_payload, market_matches = _ranker_fixture(now)
 
     def fixed_consensus(_rows, target_name=None):
         return {
-            "fair_prob": 0.53,
+            "fair_prob": 0.519,
             "book_count": 6,
             "sources": ["pinnacle", "circa", "draftkings"],
             "disagreement_std": 0.0,
@@ -3912,7 +4183,7 @@ def test_candidate_ranker_confluence_agreement_lowers_demo_required_base(tmp_pat
         qual_signals={
             "KXEDGE": {
                 "ticker": "KXEDGE",
-                "qual_prob": 0.525,
+                "qual_prob": 0.518,
                 "confidence": 0.80,
                 "citation_urls": ["https://example.com/a"],
             }
@@ -3922,10 +4193,12 @@ def test_candidate_ranker_confluence_agreement_lowers_demo_required_base(tmp_pat
 
     assert row["signal_source"] == "consensus"
     assert row["confluence_verdict"] == "agree"
-    assert row["confluence"]["edge_bonus"] == pytest.approx(0.01)
-    assert row["confluence"]["effective_base_min_edge"] == pytest.approx(0.02)
-    assert row["required_edge"] == pytest.approx(0.025)
-    assert row["passes_edge"] is True
+    assert row["confluence"]["edge_bonus"] == pytest.approx(0.0)
+    assert row["confluence"]["effective_base_min_edge"] == pytest.approx(0.03)
+    assert row["raw_edge"] == pytest.approx(0.039)
+    assert row["edge"] == pytest.approx(0.03463)
+    assert row["required_edge"] == pytest.approx(0.035)
+    assert row["passes_edge"] is False
 
     neutral = candidate_ranker_core.build_candidate_rankings(
         DummyContext(settings),
@@ -3955,16 +4228,17 @@ def test_candidate_ranker_confluence_agreement_lowers_demo_required_base(tmp_pat
         qual_signals={
             "KXEDGE": {
                 "ticker": "KXEDGE",
-                "qual_prob": 0.525,
+                "qual_prob": 0.518,
                 "confidence": 0.80,
                 "citation_urls": ["https://example.com/a"],
             }
         },
     )
     floor_row = floored["rows"][0]
-    assert floor_row["confluence"]["edge_bonus"] == pytest.approx(0.005)
-    assert floor_row["confluence"]["effective_base_min_edge"] == pytest.approx(0.02)
-    assert floor_row["required_edge"] == pytest.approx(0.025)
+    assert floor_row["confluence"]["edge_bonus"] == pytest.approx(0.0)
+    assert floor_row["confluence"]["effective_base_min_edge"] == pytest.approx(0.025)
+    assert floor_row["required_edge"] == pytest.approx(0.03)
+    assert floor_row["passes_edge"] is True
 
 
 def test_candidate_ranker_confluence_disagreement_vetoes_demo_and_records_shadow(tmp_path, monkeypatch):
@@ -4009,7 +4283,8 @@ def test_candidate_ranker_confluence_disagreement_vetoes_demo_and_records_shadow
     )
     rank_row = result["rows"][0]
 
-    assert rank_row["edge"] == pytest.approx(0.04)
+    assert rank_row["raw_edge"] == pytest.approx(0.06)
+    assert rank_row["edge"] == pytest.approx(0.05563)
     assert rank_row["required_edge"] == pytest.approx(0.035)
     assert rank_row["passes_edge"] is False
     assert rank_row["confluence_verdict"] == "disagree"
@@ -4081,9 +4356,9 @@ def test_candidate_ranker_confluence_disagreement_vetoes_demo_and_records_shadow
     assert shadows[0]["ticker"] == "KXEDGE"
     assert shadows[0]["side"] == "yes"
     assert shadows[0]["contracts"] == pytest.approx(1.0)
-    assert shadows[0]["price_cents"] == pytest.approx(50.0)
-    assert shadows[0]["stake_units"] == pytest.approx(0.5)
-    assert shadows[0]["edge"] == pytest.approx(0.04)
+    assert shadows[0]["price_cents"] == pytest.approx(48.0)
+    assert shadows[0]["stake_units"] == pytest.approx(0.48)
+    assert shadows[0]["edge"] == pytest.approx(0.05563)
     assert shadows[0]["reason"] == confluence.VETO_REASON
     assert shadows[0]["confluence_verdict"] == "disagree"
 
@@ -4252,7 +4527,8 @@ def test_edge_engine_fuzzy_match_never_passes_even_with_large_edge(tmp_path):
         base_min_edge=settings.execution_min_edge,
     )
 
-    assert result.edge == pytest.approx(0.12)
+    assert result.raw_edge == pytest.approx(0.12)
+    assert result.edge == pytest.approx(0.1032)
     assert result.passes_edge is False
     assert "identity match is not exact" in result.blockers
 

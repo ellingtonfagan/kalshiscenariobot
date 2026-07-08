@@ -9,7 +9,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .performance_learner import market_family
-from .qual_research import USAGE_LIMIT_RE, invoke_codex_cli, parse_strict_json
+from .qual_research import USAGE_LIMIT_RE, invoke_codex_cli, invoke_claude_api, parse_strict_json, run_llm_with_fallback
 from .research import utc_now
 from .research_news import (
     ResearchTeam,
@@ -21,6 +21,35 @@ from .research_news import (
 
 
 POSTMORTEM_PROMPT_VERSION = "qual-postmortem-v1"
+POSTMORTEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "which_scenario_occurred",
+        "event_prediction_grade",
+        "conditional_grade",
+        "what_was_missed",
+        "lessons",
+    ],
+    "properties": {
+        "which_scenario_occurred": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+        "event_prediction_grade": {"type": "string"},
+        "conditional_grade": {"type": "string"},
+        "what_was_missed": {"type": "string"},
+        "lessons": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["lesson", "evidence_cite"],
+                "properties": {
+                    "lesson": {"type": "string"},
+                    "evidence_cite": {"type": "string"},
+                },
+            },
+        },
+    },
+}
 RECAP_TERMS = (
     "recap", "beat", "beats", "defeat", "defeats", "defeated", "top",
     "tops", "edge", "edges", "walk-off", "rout", "shut out", "wins",
@@ -359,6 +388,9 @@ def run_postmortem_model(
     settlement: dict[str, Any],
     timeout_seconds: int,
     invoker: Any = invoke_codex_cli,
+    claude_invoker: Any = invoke_claude_api,
+    fallback_model: str = "claude-opus-4-8",
+    anthropic_api_key: str | None = None,
 ) -> dict[str, Any]:
     scenarios = analysis.get("scenarios") if isinstance(analysis.get("scenarios"), list) else []
     scenario_count = len(scenarios)
@@ -375,13 +407,24 @@ def run_postmortem_model(
             settlement=settlement,
             retry_error=retry_error,
         )
-        ok, output, reason = invoker(command, prompt, timeout_seconds=timeout_seconds)
+        run = run_llm_with_fallback(
+            command=command,
+            prompt=prompt,
+            timeout_seconds=timeout_seconds,
+            schema=POSTMORTEM_SCHEMA,
+            fallback_model=fallback_model,
+            invoker=invoker,
+            claude_invoker=claude_invoker,
+            anthropic_api_key=anthropic_api_key,
+        )
+        output = str(run.get("output") or "")
         last_output = output
-        if not ok:
+        if not run.get("ok"):
             return {
                 "status": "unavailable",
-                "reason": reason or "codex-cli-failed",
+                "reason": run.get("reason") or "codex-cli-failed",
                 "attempts": attempt,
+                "engine": run.get("engine"),
                 "postmortem": None,
             }
         try:
@@ -394,6 +437,7 @@ def run_postmortem_model(
             "status": "ok",
             "reason": None,
             "attempts": attempt,
+            "engine": run.get("engine"),
             "postmortem": postmortem,
         }
     if USAGE_LIMIT_RE.search(last_output):
@@ -402,6 +446,7 @@ def run_postmortem_model(
         "status": "unavailable",
         "reason": f"malformed-json-after-retry: {last_reason or 'invalid output'}",
         "attempts": 2,
+        "engine": "codex",
         "postmortem": None,
     }
 

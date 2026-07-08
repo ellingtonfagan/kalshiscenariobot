@@ -6,7 +6,7 @@ from dataclasses import asdict
 from .. import guardrails
 from ..alerts import deliver
 from ..audit import AuditTrail
-from ..confluence import MIN_EFFECTIVE_BASE, VETO_REASON
+from ..confluence import VETO_REASON
 from ..execution import TradeIntent, client_order_id, execute_paper
 from ..research import ResearchStore
 from ..risk import (
@@ -54,19 +54,13 @@ def _row_confluence_verdict(row: dict, meta: dict) -> str:
 
 
 def _effective_row_min_edge(settings: object, signal_source: str, row: dict, meta: dict) -> float:
-    base = _row_min_edge(settings, signal_source)
-    confluence = _row_confluence(row, meta)
-    mode = str(getattr(settings, "execution_mode", "paper") or "paper").lower()
-    if (
-        mode in {"paper", "demo"}
-        and signal_source == "consensus"
-        and _row_confluence_verdict(row, meta) == "agree"
-    ):
-        try:
-            return max(float(confluence.get("effective_base_min_edge")), MIN_EFFECTIVE_BASE)
-        except (TypeError, ValueError):
-            return base
-    return base
+    if signal_source == "qual_activated_quant":
+        required = row.get("required_edge")
+        if required is None:
+            required = meta.get("required_edge")
+        if required is not None:
+            return float(required)
+    return _row_min_edge(settings, signal_source)
 
 
 def _candidate_is_broad_slate(row: dict, settings: object) -> bool:
@@ -104,6 +98,9 @@ def execution_limits(ctx: Context, store: ResearchStore, table: str) -> dict[str
         "qual_daily_trade_count": store.daily_order_count(
             ("paper_orders", "demo_orders"),
             signal_source="qual",
+        ) + store.daily_order_count(
+            ("paper_orders", "demo_orders"),
+            signal_source="qual_activated_quant",
         ),
         "qual_daily_trade_cap": int(getattr(
             ctx.settings,
@@ -137,7 +134,19 @@ def _intent_from_row(
         or row.get("scenario_id")
         or ticker
     )
-    edge = float(row.get("edge")) if row.get("edge") is not None else float(prior) - float(implied)
+    raw_edge = (
+        float(row.get("raw_edge"))
+        if row.get("raw_edge") is not None else
+        float(prior) - float(implied)
+    )
+    net_edge = (
+        float(row.get("net_edge"))
+        if row.get("net_edge") is not None else
+        float(row.get("edge"))
+        if row.get("edge") is not None else
+        raw_edge
+    )
+    edge = net_edge
     research_override = bool(row.get("research_override", False))
     signal_source = _row_signal_source(row, meta)
     min_edge = _effective_row_min_edge(ctx.settings, signal_source, row, meta)
@@ -183,6 +192,13 @@ def _intent_from_row(
 
     risk = int(row.get("risk", 0) or 0)
     validated = bool(meta.get("validated") or meta.get("market_type_verdict") == "validated")
+    qaq_evidence = (
+        row.get("qaq_evidence")
+        if isinstance(row.get("qaq_evidence"), dict) else
+        meta.get("qaq_evidence")
+        if isinstance(meta.get("qaq_evidence"), dict) else
+        {}
+    )
     return TradeIntent(
         game_id=ctx.settings.game_id,
         scenario_id=str(row.get("scenario_id") or meta.get("candidate_id") or ticker),
@@ -195,6 +211,12 @@ def _intent_from_row(
         model_prob=float(prior),
         market_prob=float(implied),
         edge=edge,
+        raw_edge=raw_edge,
+        net_edge=net_edge,
+        required_edge=row.get("required_edge"),
+        expected_fee_cents=row.get("expected_fee_cents"),
+        expected_fee_prob=row.get("expected_fee_prob"),
+        liquidity_role=str(row.get("liquidity_role") or meta.get("liquidity_role") or "maker"),
         sgp_adjusted_prob=row.get("sgp_adjusted_prob"),
         risk=risk,
         hope_bet=guardrails.is_hope_bet(risk),
@@ -220,6 +242,21 @@ def _intent_from_row(
         signal_source=signal_source,
         confluence_verdict=_row_confluence_verdict(row, meta),
         confluence=_row_confluence(row, meta),
+        basket_id=row.get("basket_id") or meta.get("basket_id"),
+        event_ids=tuple(
+            row.get("event_ids")
+            or meta.get("event_ids")
+            or qaq_evidence.get("event_ids")
+            or ()
+        ),
+        news_item_ids=tuple(
+            row.get("news_item_ids")
+            or meta.get("news_item_ids")
+            or qaq_evidence.get("news_item_ids")
+            or ()
+        ),
+        signal_engine=row.get("signal_engine") or meta.get("signal_engine"),
+        qaq_evidence=qaq_evidence,
     )
 
 
@@ -404,7 +441,7 @@ def run(ctx: Context | None = None) -> dict:
             if intent.broad_slate:
                 broad_slate_count += 1
                 paper_demo_broad_slate_count += 1
-            if intent.signal_source == "qual":
+            if intent.signal_source in {"qual", "qual_activated_quant"}:
                 qual_daily_trade_count += 1
         if (
             game_exposure >= ctx.settings.max_game_exposure_units
@@ -431,7 +468,7 @@ def run(ctx: Context | None = None) -> dict:
     out = (
         f"[paper] {status}: {intent['scenario_id']} {intent['ticker']} "
         f"{intent['contracts']} {intent['side'].upper()} @ {intent['price_cents']}c "
-        f"stake={intent['stake_units']:.3f}u edge={intent['edge']:+.3f} "
+        f"stake={intent['stake_units']:.3f}u net_edge={intent['edge']:+.3f} "
         f"SGP-adjusted scenario p={intent['sgp_adjusted_prob']:.3f}{hope}"
     )
     deliver(guardrails.with_footer(out), ctx.settings.deliver_to)

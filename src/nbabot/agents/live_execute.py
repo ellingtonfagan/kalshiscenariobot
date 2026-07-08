@@ -26,9 +26,9 @@ def _blocked_reason(ctx: Context, intent: object | None = None) -> str | None:
         return f"set NBABOT_LIVE_TRADING_ACK={LIVE_ACK}"
     if (
         intent is not None
-        and getattr(intent, "signal_source", "consensus") == "qual"
+        and getattr(intent, "signal_source", "consensus") in {"qual", "qual_activated_quant"}
     ):
-        return "qual-sourced intents are hard-blocked in live mode"
+        return "qual/QAQ-sourced intents are hard-blocked in live mode"
     if (
         intent is not None
         and getattr(intent, "broad_slate", False)
@@ -87,7 +87,7 @@ def run(ctx: Context | None = None) -> dict:
         out = (
             f"[live-execute] {receipt.status}: {intent.scenario_id} {intent.ticker} "
             f"{intent.contracts} {intent.side.upper()} @ {intent.price_cents}c "
-            f"stake={intent.stake_units:.3f}u edge={intent.edge:+.3f} "
+            f"stake={intent.stake_units:.3f}u net_edge={intent.edge:+.3f} "
             f"SGP-adjusted scenario p={intent.sgp_adjusted_prob:.3f}{hope}"
         )
         deliver(guardrails.with_footer(out), ctx.settings.deliver_to)

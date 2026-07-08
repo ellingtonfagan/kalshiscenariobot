@@ -59,6 +59,11 @@ class Settings:
     min_edge: float
     demo_min_edge: float
     qual_min_edge: float
+    kalshi_taker_fee_factor: float
+    kalshi_maker_fee_factor: float
+    near_miss_window: float
+    near_miss_investigations_per_cycle: int
+    qaq_floor_bonus: float
     confluence_agree_delta: float
     confluence_edge_bonus: float
     confluence_veto_delta: float
@@ -66,6 +71,7 @@ class Settings:
     qual_lessons_top_n: int
     qual_llm_cmd: str
     qual_llm_timeout_seconds: int
+    qual_fallback_model: str
     research_teams_path: Path
     news_window_hours: float
     news_user_agent: str
@@ -195,6 +201,13 @@ def load_settings(game_id: str | None = None) -> Settings:
         min_edge=float(os.environ.get("NBABOT_MIN_EDGE", "0.05")),
         demo_min_edge=float(os.environ.get("NBABOT_DEMO_MIN_EDGE", "0.03")),
         qual_min_edge=float(os.environ.get("NBABOT_QUAL_MIN_EDGE", "0.06")),
+        kalshi_taker_fee_factor=float(os.environ.get("NBABOT_KALSHI_TAKER_FEE_FACTOR", "0.07")),
+        kalshi_maker_fee_factor=float(os.environ.get("NBABOT_KALSHI_MAKER_FEE_FACTOR", "0.0175")),
+        near_miss_window=float(os.environ.get("NBABOT_NEAR_MISS_WINDOW", "0.02")),
+        near_miss_investigations_per_cycle=int(
+            os.environ.get("NBABOT_NEAR_MISS_INVESTIGATIONS_PER_CYCLE", "5")
+        ),
+        qaq_floor_bonus=float(os.environ.get("NBABOT_QAQ_FLOOR_BONUS", "0.015")),
         confluence_agree_delta=float(os.environ.get("NBABOT_CONFLUENCE_AGREE_DELTA", "0.05")),
         confluence_edge_bonus=float(os.environ.get("NBABOT_CONFLUENCE_EDGE_BONUS", "0.01")),
         confluence_veto_delta=float(os.environ.get("NBABOT_CONFLUENCE_VETO_DELTA", "0.08")),
@@ -205,6 +218,7 @@ def load_settings(game_id: str | None = None) -> Settings:
             "~/.codex/plugins/.plugin-appserver/codex exec",
         ),
         qual_llm_timeout_seconds=int(os.environ.get("NBABOT_QUAL_LLM_TIMEOUT_SECONDS", "600")),
+        qual_fallback_model=os.environ.get("NBABOT_QUAL_FALLBACK_MODEL", "claude-opus-4-8"),
         research_teams_path=research_teams_path,
         news_window_hours=float(os.environ.get("NBABOT_NEWS_WINDOW_HOURS", "48")),
         news_user_agent=os.environ.get("NBABOT_NEWS_USER_AGENT", "nbabot-research/0.1"),

@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .fees import fee_details
+
 DEFAULT_MAX_PLAUSIBLE_EDGE = 0.15
 IMPLAUSIBLE_EDGE_BLOCKER = "edge exceeds plausible maximum; likely identity/line mismatch"
 
@@ -18,10 +20,18 @@ class ExecutablePrice:
     fillable_contracts: int
     vwap_cents: float | None
     captured_at: str | None
+    liquidity_role: str = "taker"
+
+    @property
+    def maker(self) -> bool:
+        return self.liquidity_role == "maker"
 
     @property
     def price_cents(self) -> int | None:
-        price = self.vwap_cents if self.vwap_cents is not None else self.ask_cents
+        if self.maker:
+            price = self.bid_cents
+        else:
+            price = self.vwap_cents if self.vwap_cents is not None else self.ask_cents
         return int(round(price)) if price is not None else None
 
     @property
@@ -30,10 +40,19 @@ class ExecutablePrice:
         return price / 100.0 if price is not None else None
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["price_cents"] = self.price_cents
+        payload["price_prob"] = self.price_prob
+        return payload
 
     @classmethod
-    def from_orderbook_metrics(cls, metrics: dict[str, Any], side: str = "yes") -> "ExecutablePrice":
+    def from_orderbook_metrics(
+        cls,
+        metrics: dict[str, Any],
+        side: str = "yes",
+        *,
+        maker: bool = False,
+    ) -> "ExecutablePrice":
         side_metrics = metrics.get(side) if isinstance(metrics, dict) else None
         side_metrics = side_metrics if isinstance(side_metrics, dict) else {}
         return cls(
@@ -44,6 +63,7 @@ class ExecutablePrice:
             fillable_contracts=int(side_metrics.get("fillable_contracts") or 0),
             vwap_cents=side_metrics.get("vwap_cents"),
             captured_at=side_metrics.get("captured_at"),
+            liquidity_role="maker" if maker else "taker",
         )
 
 
@@ -54,7 +74,12 @@ class EdgeCandidate:
     model_prob: float | None
     model_prob_sources: list[str]
     executable_price: dict[str, Any]
+    raw_edge: float | None
+    net_edge: float | None
     edge: float | None
+    expected_fee_cents: float | None
+    expected_fee_prob: float | None
+    liquidity_role: str
     required_edge: float
     passes_edge: bool
     time_to_close_seconds: int | None
@@ -152,6 +177,13 @@ def evaluate_market(
         if model_prob is not None and price_prob is not None
         else None
     )
+    fee = fee_details(executable.price_cents, maker=executable.maker, settings=settings)
+    fee_prob = fee.get("expected_fee_prob")
+    net_edge = (
+        round(float(edge) - float(fee_prob), 6)
+        if edge is not None and fee_prob is not None
+        else edge
+    )
     blockers = []
     match_type = str(identity_match.get("match_type") or "none")
     if require_exact_match and match_type != "exact":
@@ -162,15 +194,15 @@ def evaluate_market(
         blockers.append("insufficient sportsbook consensus")
     if executable.price_cents is None:
         blockers.append("missing executable Kalshi price")
-    if executable.fillable_contracts <= 0:
+    if not executable.maker and executable.fillable_contracts <= 0:
         blockers.append("no fillable contracts at observed limit")
     if executable.spread_cents is None or executable.spread_cents > int(settings.max_spread_cents):
         blockers.append("spread missing or wider than configured max")
     if _stale(executable.captured_at, int(settings.stale_market_seconds), now):
         blockers.append("stale executable orderbook data")
-    if edge is None:
+    if net_edge is None:
         blockers.append("missing edge")
-    elif edge < required:
+    elif net_edge < required:
         blockers.append("edge below dynamic required edge")
     if edge is not None and edge > _max_plausible_edge(settings):
         blockers.append(IMPLAUSIBLE_EDGE_BLOCKER)
@@ -181,7 +213,12 @@ def evaluate_market(
         model_prob=model_prob,
         model_prob_sources=list(consensus.get("sources") or []),
         executable_price=executable.as_dict(),
-        edge=round(edge, 5) if edge is not None else None,
+        raw_edge=round(edge, 5) if edge is not None else None,
+        net_edge=round(net_edge, 5) if net_edge is not None else None,
+        edge=round(net_edge, 5) if net_edge is not None else None,
+        expected_fee_cents=fee.get("expected_fee_cents"),
+        expected_fee_prob=fee.get("expected_fee_prob"),
+        liquidity_role=str(fee.get("liquidity_role") or executable.liquidity_role),
         required_edge=required,
         passes_edge=passes,
         time_to_close_seconds=time_to_close_seconds(identity_match.get("close_time"), now),
@@ -197,7 +234,7 @@ def rank_candidates(candidates: list[EdgeCandidate]) -> list[EdgeCandidate]:
         candidates,
         key=lambda item: (
             not item.passes_edge,
-            -(item.edge if item.edge is not None else -999.0),
+            -(item.net_edge if item.net_edge is not None else -999.0),
             item.required_edge,
         ),
     )
