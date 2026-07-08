@@ -2375,8 +2375,8 @@ def test_demo_execution_builds_v2_payload(tmp_path):
     assert kalshi.body["side"] == "bid"
     assert kalshi.body["price"] == "0.5000"
     assert kalshi.body["count"] == "1.00"
-    assert kalshi.body["time_in_force"] == "good_til_canceled"
-    assert kalshi.body["self_trade_prevention_type"] == "cancel_newest"
+    assert kalshi.body["time_in_force"] == "good_till_canceled"
+    assert kalshi.body["self_trade_prevention_type"] == "taker_at_cross"
     assert "action" not in kalshi.body
     assert "type" not in kalshi.body
     assert store.count_orders("demo_orders") == 1

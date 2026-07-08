@@ -86,8 +86,11 @@ class OrderRequest:
             body["time_in_force"] = "immediate_or_cancel"
             body["self_trade_prevention_type"] = "taker_at_cross"
         else:
-            body["time_in_force"] = "good_til_canceled"
-            body["self_trade_prevention_type"] = "cancel_newest"
+            # Kalshi's CreateOrderV2 enums, confirmed against the real demo API
+            # 2026-07-08: "good_till_canceled" (double L) and "taker_at_cross"
+            # are the accepted values; "good_til_canceled"/"cancel_newest" 400.
+            body["time_in_force"] = "good_till_canceled"
+            body["self_trade_prevention_type"] = "taker_at_cross"
         return body
 
 
