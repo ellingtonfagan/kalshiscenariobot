@@ -8,6 +8,12 @@ import json
 import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+
+
+def _fresh_pubdate() -> str:
+    """RFC-822 pubDate ~1h ago, so news-window tests never age out."""
+    return (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+
 from pathlib import Path
 
 import pytest
@@ -947,9 +953,9 @@ teams:
     <title>Yankees announce charity event</title>
     <link>https://example.com/yankees-charity</link>
     <description>No roster impact.</description>
-    <pubDate>Tue, 07 Jul 2026 17:45:00 GMT</pubDate>
+    <pubDate>__FRESH_PUBDATE__</pubDate>
   </item>
-</channel></rss>"""
+</channel></rss>""".replace(b"__FRESH_PUBDATE__", _fresh_pubdate().encode())
 
     cycle_calls = []
     messages = []
@@ -1005,9 +1011,9 @@ teams:
     <title>Yankees lineup change before first pitch</title>
     <link>https://example.com/yankees-lineup-change</link>
     <description>Confirmed lineup change for Yankees.</description>
-    <pubDate>Tue, 07 Jul 2026 17:45:00 GMT</pubDate>
+    <pubDate>__FRESH_PUBDATE__</pubDate>
   </item>
-</channel></rss>"""
+</channel></rss>""".replace(b"__FRESH_PUBDATE__", _fresh_pubdate().encode())
 
     cycle_calls = []
     messages = []
