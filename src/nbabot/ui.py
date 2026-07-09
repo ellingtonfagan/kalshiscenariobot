@@ -366,6 +366,26 @@ def _signal_engine_rows(ctx: Context) -> list[dict[str, Any]]:
     return rows
 
 
+def _fill_rate_rows(ctx: Context) -> list[dict[str, Any]]:
+    try:
+        buckets = ResearchStore(ctx.settings.research_db_path).fill_rate_summary().get("buckets") or []
+    except Exception:
+        buckets = []
+    rows = []
+    for row in buckets:
+        placed = int(row.get("placed") or 0)
+        filled = int(row.get("filled") or 0)
+        rows.append({
+            "signal_source": row.get("signal_source"),
+            "liquidity_role": row.get("liquidity_role"),
+            "placed": placed,
+            "filled": filled,
+            "fill_rate": "n/a" if placed <= 0 else f"{filled / placed * 100:.1f}%",
+            "canceled_unfilled": row.get("canceled_unfilled", 0),
+        })
+    return rows
+
+
 def _qual_learning(ctx: Context) -> dict[str, Any]:
     try:
         return ResearchStore(ctx.settings.research_db_path).qual_learning_summary()
@@ -410,6 +430,7 @@ def render_dashboard(ctx: Context) -> str:
     validated = _validated_families(learning)
     settlement_rows, settlement_count = _settlement_rows(ctx, artifacts)
     signal_engine_rows = _signal_engine_rows(ctx)
+    fill_rate_rows = _fill_rate_rows(ctx)
     qual_learning = _qual_learning(ctx)
     candidates = _candidate_rows(ranker)
     total_candidates = int(ranker.get("candidate_count") or len(candidates))
@@ -511,6 +532,7 @@ def render_dashboard(ctx: Context) -> str:
     <div class="metrics">{metrics_html}</div>
     <section class="block"><h2>Edge Candidates</h2>{_render_edge_table(candidates)}</section>
     <section class="block"><h2>Signal Engines</h2>{_table(signal_engine_rows, ["engine","trades_placed","settled","brier","clv_beat_rate","clv_available"])}</section>
+    <section class="block"><h2>Fill Rate</h2>{_table(fill_rate_rows, ["signal_source","liquidity_role","placed","filled","fill_rate","canceled_unfilled"])}</section>
     <section class="block"><h2>Qual Learning</h2>{_table(_qual_calibration_rows(qual_learning), ["bucket","count","correct","correct_rate","observed_rate","brier"])}</section>
     <section class="block"><h2>Data Source Health</h2>{_table(provider_rows, ["provider","configured","state","rows","remaining_credits","detail"])}</section>
     <section class="block"><h2>Recent Settlements</h2>{_render_settlements(settlement_rows)}</section>

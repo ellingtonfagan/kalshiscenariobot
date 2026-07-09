@@ -59,6 +59,9 @@ class TradeIntent:
     news_item_ids: tuple[str, ...] = ()
     signal_engine: str | None = None
     qaq_evidence: dict[str, Any] = field(default_factory=dict)
+    unit_size_dollars: float = 1.0
+    units_staked: float | None = None
+    stake_dollars: float | None = None
 
 
 @dataclass(frozen=True)

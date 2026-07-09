@@ -53,6 +53,10 @@ class Settings:
     kalshi_demo_private_key_path: Path
     paper_demo_daily_trade_cap: int
     qual_daily_trade_cap: int
+    unit_fraction: float
+    paper_bankroll_usd: float
+    max_order_notional_fraction: float
+    resting_order_max_age_minutes: int
     max_daily_loss_units: float
     max_daily_exposure_units: float
     max_game_exposure_units: float
@@ -191,6 +195,14 @@ def load_settings(game_id: str | None = None) -> Settings:
         kalshi_demo_private_key_path=demo_pk_path,
         paper_demo_daily_trade_cap=int(os.environ.get("NBABOT_PAPER_DEMO_DAILY_TRADE_CAP", "50")),
         qual_daily_trade_cap=int(os.environ.get("NBABOT_QUAL_DAILY_TRADE_CAP", "10")),
+        unit_fraction=float(os.environ.get("NBABOT_UNIT_FRACTION", "0.015")),
+        paper_bankroll_usd=float(os.environ.get("NBABOT_PAPER_BANKROLL", "1000")),
+        max_order_notional_fraction=float(
+            os.environ.get("NBABOT_MAX_ORDER_NOTIONAL_FRACTION", "0.10")
+        ),
+        resting_order_max_age_minutes=int(
+            os.environ.get("NBABOT_RESTING_ORDER_MAX_AGE_MINUTES", "90")
+        ),
         max_daily_loss_units=float(os.environ.get("NBABOT_MAX_DAILY_LOSS_UNITS", "2")),
         max_daily_exposure_units=float(
             os.environ.get("NBABOT_MAX_DAILY_EXPOSURE_UNITS", str(MAX_STAKE_UNITS))

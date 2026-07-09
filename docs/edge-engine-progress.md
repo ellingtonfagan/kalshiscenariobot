@@ -1480,6 +1480,61 @@ were changed, and no scheduler or cron work was added.
 
 ---
 
+## Round 21 - 2026-07-09 - Demo late-fill reconciliation and bankroll sizing
+
+### What changed in code
+
+- Added demo order reconciliation with post-hoc status/fill refresh from Kalshi
+  demo, idempotent fill recording, lifecycle status storage, and maker
+  cancellation for stale resting orders using
+  `DELETE /portfolio/events/orders/{id}`.
+- Wired reconciliation into `settlement-audit` so late fills are captured before
+  grading, while terminal unfilled cancellations are excluded from CLV/Brier
+  settlement grading and included in fill-rate metrics.
+- Added bankroll-based unit sizing: one unit is the clamped
+  `NBABOT_UNIT_FRACTION` of active bankroll, paper falls back to
+  `NBABOT_PAPER_BANKROLL`, demo reads the synced demo balance, and every intent
+  persists unit size, units staked, stake dollars, and contracts.
+- Added `NBABOT_MAX_ORDER_NOTIONAL_FRACTION` as a hard per-order notional
+  backstop and kept existing 5-unit, daily, per-game, and live-gate controls.
+- Added fill-rate visibility to status, dashboard, and scheduled demo reports.
+
+### Tests
+
+- Full suite: `.venv/bin/pytest` -> `149 passed in 2.01s`.
+- Added mocked coverage for late-fill reconciliation, settlement grading from
+  reconciled fills, idempotent reruns, unfilled cancellation exclusion, correct
+  cancel path behavior, unit-fraction clamping, contract floor math, and notional
+  backstop blocking.
+
+### Real behavior check
+
+- Real demo portfolio sync read `balance_dollars=999.9827`, positions `0`, from
+  the Kalshi demo account. The active unit size was `$14.9997` at
+  `NBABOT_UNIT_FRACTION=0.015`.
+- Real demo reconciliation first canceled `2` stale resting maker orders. After
+  adding support for the real `/portfolio/fills` schema, the corrected pass
+  inserted `3` late fills from executed demo orders:
+  - `KXMLBTOTAL-26JUL081840NYYTB-7` YES `1` @ `58c`, fee `0c`.
+  - `KXMLBTOTAL-26JUL081840NYYTB-8` YES `1` @ `45c`, fee `0c`.
+  - `KXMLBTOTAL-26JUL081910KCNYM-6` YES `1` @ `53c`, fee `0c`.
+- Real settlement audit graded those `3` fills: `1` win, `2` losses, total P&L
+  `-56c`, entry-model Brier `0.252867`, CLV unavailable because no pre-close
+  consensus snapshot existed for those tickers.
+- Balance checksum did not fully reconcile from these three fills alone:
+  account balance is `999.9827` (`-1.73c` from `$1000`), while these newly
+  graded fills net to `-56c`. The demo `/portfolio/settlements` endpoint also
+  reports an older 44c/fee 1.73c settled fill whose order is not present in the
+  current six recorded demo-order rows, so the account-level delta includes
+  activity outside the current demo order ledger.
+- One real scheduled demo cycle ran with `NBABOT_EXECUTION_MODE=demo`: `200`
+  candidates, `0` edge passes, `0` trade-eligible, `0` demo orders placed,
+  `blocked=no-candidates`, `hard_error=none`.
+- No live execution env vars were set to live values and no live orders were
+  placed.
+
+---
+
 ## Round 20 - 2026-07-07 - Phase 16 fee-adjusted edges, QAQ, fallback, and baskets
 
 ### What changed in code

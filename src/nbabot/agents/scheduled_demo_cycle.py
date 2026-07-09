@@ -177,6 +177,7 @@ def _format_report(payload: dict[str, Any]) -> str:
     hard_error = payload.get("hard_error") or "none"
     blocked = payload.get("blocked_reason") or "none"
     settlement = payload.get("settlement") or {}
+    reconciliation = settlement.get("reconciliation") or {}
     postmortem = payload.get("qual_postmortem") or {}
     news_counts = payload.get("news_counts") or {}
     news_text = ",".join(f"{team}:{count}" for team, count in sorted(news_counts.items())) or "none"
@@ -209,6 +210,11 @@ def _format_report(payload: dict[str, Any]) -> str:
             f"settled={settlement.get('settled_count', 0)} "
             f"pending={settlement.get('pending_count', 0)} "
             f"errors={settlement.get('error_count', 0)}"
+        ),
+        (
+            f"reconcile checked={reconciliation.get('checked_count', 0)} "
+            f"fills={reconciliation.get('fills_inserted_count', 0)} "
+            f"canceled={reconciliation.get('canceled_count', 0)}"
         ),
         (
             f"postmortems completed={postmortem.get('completed_count', 0)} "
@@ -288,6 +294,7 @@ def run(ctx: Context | None = None) -> dict:
             "pending_count": _count(settlement, "pending_count"),
             "error_count": _count(settlement, "error_count"),
             "settled_count": _count(summary, "settled_count"),
+            "reconciliation": settlement.get("reconciliation") if isinstance(settlement, dict) else {},
         },
         "qual_postmortem": {
             "checked_count": _count(postmortem, "checked_count"),

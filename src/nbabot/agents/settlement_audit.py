@@ -35,6 +35,11 @@ def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
     store = ResearchStore(ctx.settings.research_db_path)
     audit = AuditTrail(ctx.settings.data_dir, store)
+    reconciliation = None
+    if ctx.settings.execution_mode == "demo":
+        from ..order_reconciliation import reconcile_demo_orders
+
+        reconciliation = reconcile_demo_orders(ctx, store, audit)
     orders = store.list_execution_orders(unsettled_only=True)
     shadows = store.list_shadow_intents(unsettled_only=True)
 
@@ -151,6 +156,7 @@ def run(ctx: Context | None = None) -> dict:
         "shadow_skipped_count": len(shadow_skipped),
         "shadow_error_count": len(shadow_errors),
         "summary": summarize(records),
+        "reconciliation": reconciliation,
         "shadow_summary": summarize(shadow_records),
         "records": records,
         "shadow_records": shadow_records,

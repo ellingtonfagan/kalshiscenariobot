@@ -151,11 +151,18 @@ def _fill_contracts(fill: dict[str, Any]) -> float | None:
         fill.get("count"),
         fill.get("fill_count"),
         fill.get("filled_count"),
+        fill.get("count_fp"),
+        fill.get("quantity"),
     ))
 
 
 def _fill_price(fill: dict[str, Any]) -> float | None:
-    for key in ("price_cents", "average_fill_price", "avg_price", "price"):
+    side = str(fill.get("side") or fill.get("outcome_side") or "yes").lower()
+    side_price_key = "yes_price_dollars" if side == "yes" else "no_price_dollars"
+    for key in (
+        "price_cents", "average_fill_price", "avg_price", "price",
+        side_price_key, "yes_price_dollars", "no_price_dollars",
+    ):
         price = _price_cents(fill.get(key))
         if price is not None:
             return price
@@ -165,6 +172,8 @@ def _fill_price(fill: dict[str, Any]) -> float | None:
 def _aggregate_fill(fill_docs: list[dict[str, Any]]) -> dict[str, Any] | None:
     weighted = 0.0
     contracts = 0.0
+    fees = 0.0
+    has_fee = False
     for fill in fill_docs:
         count = _fill_contracts(fill)
         price = _fill_price(fill)
@@ -172,6 +181,10 @@ def _aggregate_fill(fill_docs: list[dict[str, Any]]) -> dict[str, Any] | None:
             continue
         contracts += count
         weighted += count * price
+        fee = _num(fill.get("fee_cents"))
+        if fee is not None:
+            fees += fee
+            has_fee = True
     if contracts <= 0:
         return None
     first = fill_docs[0] if fill_docs else {}
@@ -179,6 +192,7 @@ def _aggregate_fill(fill_docs: list[dict[str, Any]]) -> dict[str, Any] | None:
         "contracts": contracts,
         "entry_price_cents": round(weighted / contracts, 4),
         "filled_at": first.get("filled_at"),
+        "fee_cents": round(fees, 4) if has_fee else None,
         "source": "fills",
     }
 
@@ -239,6 +253,7 @@ def normalized_order(order: dict[str, Any]) -> dict[str, Any] | None:
         "entry_price_cents": fill["entry_price_cents"],
         "filled_at": fill.get("filled_at"),
         "fill_source": fill.get("source"),
+        "fee_cents": fill.get("fee_cents"),
         "scenario_id": intent.get("scenario_id"),
         "entry_model_prob": _prob(intent.get("model_prob")),
         "entry_market_prob": _prob(intent.get("market_prob")),
@@ -379,8 +394,13 @@ def settlement_record(
     outcome = int(winning_side == order["side"])
     contracts = float(order["contracts"])
     entry_price = float(order["entry_price_cents"])
+    fee_cents = float(order.get("fee_cents") or 0.0)
     payout_cents = 100.0 * contracts if outcome else 0.0
-    pnl_cents = payout_cents - (entry_price * contracts)
+    pnl_cents = payout_cents - (entry_price * contracts) - fee_cents
+    unit_size_dollars = _num((order.get("intent") or {}).get("unit_size_dollars"))
+    pnl_units = None
+    if unit_size_dollars and unit_size_dollars > 0:
+        pnl_units = round((pnl_cents / 100.0) / unit_size_dollars, 6)
 
     closing_prob = consensus.get("prob") if consensus.get("available") else None
     closing_cents = consensus.get("price_cents") if consensus.get("available") else None
@@ -421,6 +441,9 @@ def settlement_record(
         "outcome": outcome,
         "payout_cents": round(payout_cents, 4),
         "pnl_cents": round(pnl_cents, 4),
+        "fee_cents": round(fee_cents, 4),
+        "unit_size_dollars": unit_size_dollars,
+        "pnl_units": pnl_units,
         "entry_model_prob": model_prob,
         "entry_market_prob": order.get("entry_market_prob"),
         "closing_consensus_prob": closing_prob,

@@ -201,6 +201,29 @@ class KalshiClient:
             private_key=self._demo_private_key(),
         )
 
+    def demo_get_to_base(self, base: str, api_path: str, params: dict | None = None) -> dict:
+        """GET from Kalshi demo using the demo credential pair only."""
+        root, path = self._base_and_signed_path(base, api_path)
+        return self._request(
+            "GET",
+            path,
+            params=params,
+            base=root,
+            api_key=self.demo_api_key,
+            private_key=self._demo_private_key(),
+        )
+
+    def demo_delete_to_base(self, base: str, api_path: str) -> dict:
+        """DELETE from Kalshi demo using the demo credential pair only."""
+        root, path = self._base_and_signed_path(base, api_path)
+        return self._request(
+            "DELETE",
+            path,
+            base=root,
+            api_key=self.demo_api_key,
+            private_key=self._demo_private_key(),
+        )
+
     # ── account ─────────────────────────────────────────────────────────────────
     def balance_cents(self) -> int:
         return int(self._get("/trade-api/v2/portfolio/balance").get("balance", 0))
@@ -292,6 +315,28 @@ class KalshiClient:
     def demo_place_order(self, demo_api_base: str, body: dict) -> dict:
         """Submit a gated demo order."""
         return self.demo_post_to_base(demo_api_base, "/portfolio/events/orders", body)
+
+    def demo_balance_cents(self, demo_api_base: str) -> int:
+        return int(self.demo_get_to_base(demo_api_base, "/portfolio/balance").get("balance", 0))
+
+    def demo_positions(self, demo_api_base: str) -> dict[str, int]:
+        out: dict[str, int] = {}
+        data = self.demo_get_to_base(demo_api_base, "/portfolio/positions", {"limit": 500})
+        for p in data.get("market_positions", []):
+            pos = int(float(p.get("position_fp", "0")))
+            if pos:
+                out[p.get("ticker", "")] = pos
+        return out
+
+    def demo_order(self, demo_api_base: str, order_id: str) -> dict:
+        return self.demo_get_to_base(demo_api_base, f"/portfolio/orders/{order_id}")
+
+    def demo_fills(self, demo_api_base: str, **params: object) -> dict:
+        clean = {k: v for k, v in params.items() if v not in (None, "")}
+        return self.demo_get_to_base(demo_api_base, "/portfolio/fills", clean or None)
+
+    def demo_cancel_event_order(self, demo_api_base: str, order_id: str) -> dict:
+        return self.demo_delete_to_base(demo_api_base, f"/portfolio/events/orders/{order_id}")
 
     def place_order(self, body: dict) -> dict:
         """Submit a gated live order to the configured production API base."""

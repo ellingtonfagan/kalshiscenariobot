@@ -11,9 +11,21 @@ def run(ctx: Context | None = None) -> dict:
     store = ResearchStore(ctx.settings.research_db_path)
     store.upsert_game(ctx.settings.game_id, ctx.game_tag)
 
+    mode = str(getattr(ctx.settings, "execution_mode", "paper") or "paper").lower()
     try:
-        balance_cents = ctx.kalshi.balance_cents()
-        positions = ctx.kalshi.positions()
+        balance_usd_exact = None
+        if mode == "demo":
+            balance_payload = ctx.kalshi.demo_get_to_base(ctx.settings.demo_api_base, "/portfolio/balance")
+            balance_cents = int(float(balance_payload.get("balance", 0)))
+            if balance_payload.get("balance_dollars") is not None:
+                balance_usd_exact = float(balance_payload["balance_dollars"])
+            positions = ctx.kalshi.demo_positions(ctx.settings.demo_api_base)
+            balance_source = "kalshi-demo"
+        else:
+            balance_cents = ctx.kalshi.balance_cents()
+            positions = ctx.kalshi.positions()
+            balance_source = "kalshi-live"
+            balance_usd_exact = balance_cents / 100.0
     except Exception as e:
         payload = {
             "game_id": ctx.settings.game_id,
@@ -29,8 +41,11 @@ def run(ctx: Context | None = None) -> dict:
         "game_id": ctx.settings.game_id,
         "synced_at": utc_now(),
         "ok": True,
+        "mode": mode,
+        "balance_source": balance_source,
         "balance_cents": balance_cents,
-        "balance_usd": round(balance_cents / 100, 2),
+        "balance_usd": round(float(balance_usd_exact), 4),
+        "balance_usd_exact": float(balance_usd_exact),
         "positions": positions,
         "open_positions": len(positions),
     }

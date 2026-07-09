@@ -42,6 +42,7 @@ from nbabot import (  # noqa: E402
     qual_research as qual_research_core,
     research_news,
     news_watch as news_watch_core,
+    order_reconciliation,
     research,
     risk,
     scenarios,
@@ -556,6 +557,10 @@ class _ExecSettings:
     stale_market_seconds = 90
     max_spread_cents = 10
     unit_usd = 1.0
+    unit_fraction = 0.015
+    paper_bankroll_usd = 1000.0
+    max_order_notional_fraction = 0.10
+    resting_order_max_age_minutes = 90
     deliver_to = "stdout"
 
     def __init__(self, tmp_path):
@@ -795,7 +800,7 @@ def test_news_ingest_parses_dedups_and_fails_soft(tmp_path):
     assert payload["team_counts"]["yankees"]["ignored_old"] == 1
     assert second["team_counts"]["yankees"]["inserted"] == 0
     assert any(row["status"] == "http_429" for row in payload["source_status"])
-    recent = store.recent_news_items(["yankees"], window_hours=48)
+    recent = store.recent_news_items(["yankees"], window_hours=96)
     assert {row["url"] for row in recent} == {
         "https://example.com/yankees-lineup",
         "https://reddit.example/yankees-bullpen",
@@ -1628,6 +1633,162 @@ def test_capped_kelly_uses_five_unit_default_cap():
 
     assert result.stake_units == guardrails.MAX_STAKE_UNITS
     assert result.contracts == 10
+
+
+def test_unit_sizing_clamps_and_contract_math():
+    unit = sizing.unit_sizing(1000.0, 0.03)
+    assert unit.unit_fraction == pytest.approx(0.02)
+    assert unit.unit_size_dollars == pytest.approx(20.0)
+    assert unit.warning and "outside" in unit.warning
+
+    sized = sizing.contracts_for_units(
+        1.25,
+        44,
+        sizing.unit_sizing(1000.0, 0.015),
+        max_order_notional_fraction=0.10,
+    )
+    assert sized.contracts == 42
+    assert sized.stake_dollars == pytest.approx(18.48)
+    assert sized.units_staked == pytest.approx(1.232)
+
+    blocked = sizing.contracts_for_units(
+        5.0,
+        99,
+        sizing.unit_sizing(1000.0, 0.02),
+        max_order_notional_fraction=0.02,
+    )
+    assert blocked.contracts == 0
+    assert "bankroll cap" in blocked.skipped_reason
+
+
+def _record_demo_order(store, settings, intent=None):
+    intent = intent or _intent(
+        contracts=1,
+        price_cents=44,
+        stake_units=0.029333,
+        unit_size_dollars=15.0,
+        units_staked=0.029333,
+        stake_dollars=0.44,
+        liquidity_role="maker",
+    )
+    request = execution.build_order_request(intent, "demo")
+    exchange_id = "EX-2" if intent.ticker == "KXREST" else "EX-1"
+    receipt = execution.OrderReceipt(
+        request.client_order_id,
+        "demo",
+        "submitted",
+        {"order": {"id": exchange_id, "status": "resting", "ticker": intent.ticker}},
+    )
+    decision = risk.RiskDecision(True, [])
+    assert store.record_order("demo_orders", settings.game_id, intent, decision, request, receipt)
+    return request.client_order_id
+
+
+def test_reconciliation_records_late_fill_and_is_idempotent(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    store = research.ResearchStore(settings.research_db_path)
+    client_order_id = _record_demo_order(store, settings)
+
+    class FakeKalshi:
+        def demo_order(self, base, order_id):
+            assert order_id == "EX-1"
+            return {"order": {"id": order_id, "status": "executed", "filled_count": 1, "ticker": "KXTEST"}}
+
+        def demo_fills(self, base, **params):
+            assert params == {"order_id": "EX-1"}
+            return {
+                "fills": [
+                    {
+                        "id": "FILL-1",
+                        "ticker": "KXTEST",
+                        "side": "yes",
+                        "count": 1,
+                        "price": "0.44",
+                        "fee": "0.0001",
+                        "created_time": "2026-07-08T12:00:00Z",
+                    }
+                ]
+            }
+
+    ctx = type("Ctx", (), {})()
+    ctx.kalshi = FakeKalshi()
+    ctx.settings = settings
+
+    first = order_reconciliation.reconcile_demo_orders(ctx, store)
+    second = order_reconciliation.reconcile_demo_orders(ctx, store)
+    orders = store.list_execution_orders(unsettled_only=True)
+    norm = settlement_audit_core.normalized_order(orders[0])
+
+    assert first["fills_inserted_count"] == 1
+    assert second["fills_inserted_count"] == 0
+    assert norm["contracts"] == pytest.approx(1)
+    assert norm["entry_price_cents"] == pytest.approx(44)
+    assert norm["fee_cents"] == pytest.approx(0.01)
+    assert store.fill_rate_summary()["buckets"][0]["filled"] == 1
+    assert client_order_id == orders[0]["client_order_id"]
+
+
+def test_reconciliation_grades_late_fill_and_excludes_unfilled_canceled(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    store = research.ResearchStore(settings.research_db_path)
+    _record_demo_order(store, settings)
+    unfilled = _intent(scenario_id="S2", ticker="KXREST", price_cents=40, liquidity_role="maker")
+    unfilled_id = _record_demo_order(store, settings, unfilled)
+    old = (datetime.now(timezone.utc) - timedelta(minutes=120)).isoformat()
+    with store.connect() as db:
+        db.execute("UPDATE demo_orders SET created_at = ? WHERE client_order_id = ?", (old, unfilled_id))
+
+    class FakeKalshi:
+        canceled = []
+
+        def demo_order(self, base, order_id):
+            if order_id == "EX-1":
+                return {"order": {"id": order_id, "status": "executed", "filled_count": 1, "price": "0.44", "ticker": "KXTEST"}}
+            return {"order": {"id": order_id, "status": "resting", "ticker": "KXREST"}}
+
+        def demo_fills(self, base, **params):
+            if params["order_id"] == "EX-1":
+                return {"fills": [{"id": "FILL-1", "count": 1, "price": "0.44"}]}
+            return {"fills": []}
+
+        def demo_cancel_event_order(self, base, order_id):
+            self.canceled.append((base, order_id))
+            return {"order": {"id": order_id, "status": "canceled"}}
+
+        def market(self, ticker):
+            return {"ticker": ticker, "status": "settled", "settlement_value": 100}
+
+    ctx = type("Ctx", (), {})()
+    ctx.kalshi = FakeKalshi()
+    ctx.settings = settings
+
+    recon = order_reconciliation.reconcile_demo_orders(ctx, store)
+    open_orders = store.list_execution_orders(unsettled_only=True)
+    records = []
+    for raw in open_orders:
+        order = settlement_audit_core.normalized_order(raw)
+        if order is None:
+            continue
+        market = ctx.kalshi.market(order["ticker"])
+        resolution = settlement_audit_core.market_resolution(market)
+        records.append(settlement_audit_core.settlement_record(
+            order,
+            market,
+            resolution,
+            {"available": False},
+        ))
+
+    assert recon["canceled_count"] == 1
+    assert ctx.kalshi.canceled[0][1] == "EX-2"
+    assert len(records) == 1
+    assert records[0]["outcome"] == 1
+    assert records[0]["pnl_cents"] == pytest.approx(56.0)
+    fill_rate = store.fill_rate_summary()["buckets"][0]
+    assert fill_rate["placed"] == 2
+    assert fill_rate["filled"] == 1
+    assert fill_rate["canceled_unfilled"] == 1
 
 
 def test_soccer_expected_goals_fit_and_scoreline_probability():
@@ -4357,7 +4518,7 @@ def test_candidate_ranker_confluence_disagreement_vetoes_demo_and_records_shadow
     assert shadows[0]["side"] == "yes"
     assert shadows[0]["contracts"] == pytest.approx(1.0)
     assert shadows[0]["price_cents"] == pytest.approx(48.0)
-    assert shadows[0]["stake_units"] == pytest.approx(0.48)
+    assert shadows[0]["stake_units"] == pytest.approx(0.032)
     assert shadows[0]["edge"] == pytest.approx(0.05563)
     assert shadows[0]["reason"] == confluence.VETO_REASON
     assert shadows[0]["confluence_verdict"] == "disagree"
@@ -5197,7 +5358,9 @@ def test_demo_ranker_passed_open_market_flows_to_one_contract_intent(tmp_path):
     assert intent.ticker == ticker
     assert intent.contracts == 1
     assert intent.price_cents == 44
-    assert intent.stake_units == pytest.approx(0.088)
+    assert intent.unit_size_dollars == pytest.approx(15.0)
+    assert intent.stake_dollars == pytest.approx(0.44)
+    assert intent.stake_units == pytest.approx(0.029333, abs=0.000001)
     assert intent.sgp_adjusted_prob == pytest.approx(0.48552)
     assert intent.broad_slate is True
     assert decision.approved

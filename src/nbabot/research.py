@@ -228,8 +228,23 @@ class ResearchStore:
                     client_order_id TEXT NOT NULL,
                     game_id TEXT NOT NULL,
                     filled_at TEXT NOT NULL,
+                    fill_key TEXT,
                     fill_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS order_lifecycle (
+                    client_order_id TEXT PRIMARY KEY,
+                    game_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    terminal INTEGER NOT NULL DEFAULT 0,
+                    filled_count REAL NOT NULL DEFAULT 0,
+                    canceled_at TEXT,
+                    cancel_reason TEXT,
+                    checked_at TEXT NOT NULL,
+                    raw_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_order_lifecycle_mode_status
+                    ON order_lifecycle(mode, status);
                 CREATE TABLE IF NOT EXISTS settlement_records (
                     client_order_id TEXT PRIMARY KEY,
                     game_id TEXT NOT NULL,
@@ -481,6 +496,14 @@ class ResearchStore:
             self._ensure_column(db, "demo_orders", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
             self._ensure_column(db, "live_orders", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
             self._ensure_column(db, "settlement_records", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
+            self._ensure_column(db, "fills", "fill_key", "TEXT")
+            db.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_order_key
+                    ON fills(client_order_id, fill_key)
+                    WHERE fill_key IS NOT NULL AND fill_key != ''
+                """
+            )
             self._ensure_column(db, "qual_signals", "base_rate", "REAL")
             self._ensure_column(db, "qual_signals", "scenarios_json", "TEXT")
             self._ensure_column(db, "qual_signals", "analysis_json", "TEXT")
@@ -1375,16 +1398,86 @@ class ResearchStore:
             )
         return cur.rowcount == 1
 
-    def record_fill(self, game_id: str, client_order_id: str, fill: Any) -> None:
+    @staticmethod
+    def _fill_key(fill: Any) -> str:
+        if isinstance(fill, dict):
+            for key in ("fill_id", "id", "trade_id", "transaction_id"):
+                value = fill.get(key)
+                if value not in (None, ""):
+                    return str(value)
+            pieces = [
+                fill.get("ticker"),
+                fill.get("side"),
+                fill.get("filled_at") or fill.get("created_time") or fill.get("created_at"),
+                fill.get("contracts") or fill.get("count") or fill.get("fill_count"),
+                fill.get("price_cents") or fill.get("price") or fill.get("average_fill_price"),
+            ]
+            return "|".join(str(piece) for piece in pieces if piece not in (None, ""))
+        return ""
+
+    def record_fill(self, game_id: str, client_order_id: str, fill: Any) -> bool:
+        self.init_schema()
+        fill_key = self._fill_key(fill)
+        with self.connect() as db:
+            cur = db.execute(
+                """
+                INSERT OR IGNORE INTO fills(client_order_id, game_id, filled_at, fill_key, fill_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (client_order_id, game_id, utc_now(), fill_key, to_json(fill)),
+            )
+        return cur.rowcount == 1
+
+    def record_order_lifecycle(
+        self,
+        *,
+        client_order_id: str,
+        game_id: str,
+        mode: str,
+        status: str,
+        terminal: bool,
+        filled_count: float = 0.0,
+        canceled_at: str | None = None,
+        cancel_reason: str | None = None,
+        raw: dict[str, Any] | None = None,
+    ) -> None:
         self.init_schema()
         with self.connect() as db:
             db.execute(
                 """
-                INSERT INTO fills(client_order_id, game_id, filled_at, fill_json)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO order_lifecycle(
+                    client_order_id, game_id, mode, status, terminal, filled_count,
+                    canceled_at, cancel_reason, checked_at, raw_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(client_order_id) DO UPDATE SET
+                    status=excluded.status,
+                    terminal=excluded.terminal,
+                    filled_count=excluded.filled_count,
+                    canceled_at=COALESCE(excluded.canceled_at, order_lifecycle.canceled_at),
+                    cancel_reason=COALESCE(excluded.cancel_reason, order_lifecycle.cancel_reason),
+                    checked_at=excluded.checked_at,
+                    raw_json=excluded.raw_json
                 """,
-                (client_order_id, game_id, utc_now(), to_json(fill)),
+                (
+                    client_order_id,
+                    game_id,
+                    mode,
+                    status,
+                    int(bool(terminal)),
+                    float(filled_count or 0.0),
+                    canceled_at,
+                    cancel_reason,
+                    utc_now(),
+                    to_json(raw or {}),
+                ),
             )
+
+    def order_lifecycle_map(self) -> dict[str, dict[str, Any]]:
+        self.init_schema()
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM order_lifecycle").fetchall()
+        return {row["client_order_id"]: dict(row) for row in rows}
 
     def list_execution_orders(self, unsettled_only: bool = True) -> list[dict[str, Any]]:
         self.init_schema()
@@ -1406,6 +1499,7 @@ class ResearchStore:
             fills_by_order: dict[str, list[dict[str, Any]]] = {}
             for fill in fills:
                 fills_by_order.setdefault(fill["client_order_id"], []).append(dict(fill))
+            lifecycle_map = self.order_lifecycle_map()
 
             for table in sorted(ORDER_TABLES):
                 mode = table.removesuffix("_orders")
@@ -1425,8 +1519,82 @@ class ResearchStore:
                     payload["mode"] = mode
                     payload["order_table"] = table
                     payload["fills"] = fills_by_order.get(client_order_id, [])
+                    lifecycle = lifecycle_map.get(client_order_id)
+                    payload["lifecycle"] = lifecycle
+                    if lifecycle and int(lifecycle.get("terminal") or 0) and not payload["fills"]:
+                        continue
                     rows.append(payload)
         return rows
+
+    def list_order_records(self, mode: str = "demo", include_terminal: bool = False) -> list[dict[str, Any]]:
+        table = f"{mode}_orders"
+        if table not in ORDER_TABLES:
+            raise ValueError(f"unsupported order mode: {mode}")
+        self.init_schema()
+        lifecycle = self.order_lifecycle_map()
+        rows: list[dict[str, Any]] = []
+        with self.connect() as db:
+            for row in db.execute(
+                f"""
+                SELECT client_order_id, game_id, created_at, signal_source,
+                       confluence_verdict, intent_json, decision_json,
+                       request_json, receipt_json
+                FROM {table}
+                ORDER BY created_at ASC
+                """
+            ):
+                item = dict(row)
+                item["mode"] = mode
+                item["order_table"] = table
+                item["lifecycle"] = lifecycle.get(item["client_order_id"])
+                if (
+                    not include_terminal
+                    and item["lifecycle"]
+                    and int(item["lifecycle"].get("terminal") or 0)
+                ):
+                    continue
+                rows.append(item)
+        return rows
+
+    def fill_rate_summary(self) -> dict[str, Any]:
+        self.init_schema()
+        summary: dict[str, dict[str, Any]] = {}
+        with self.connect() as db:
+            lifecycle = {
+                row["client_order_id"]: dict(row)
+                for row in db.execute("SELECT * FROM order_lifecycle")
+            }
+            fill_ids = {
+                row["client_order_id"]
+                for row in db.execute("SELECT DISTINCT client_order_id FROM fills")
+            }
+            for table in sorted(ORDER_TABLES):
+                for row in db.execute(f"SELECT client_order_id, intent_json, signal_source FROM {table}"):
+                    try:
+                        intent = json.loads(row["intent_json"])
+                    except (json.JSONDecodeError, TypeError):
+                        intent = {}
+                    source = str(intent.get("signal_source") or row["signal_source"] or "consensus")
+                    role = str(intent.get("liquidity_role") or "maker")
+                    key = f"{source}:{role}"
+                    bucket = summary.setdefault(key, {
+                        "signal_source": source,
+                        "liquidity_role": role,
+                        "placed": 0,
+                        "filled": 0,
+                        "canceled_unfilled": 0,
+                        "terminal_unfilled": 0,
+                    })
+                    bucket["placed"] += 1
+                    cid = row["client_order_id"]
+                    lc = lifecycle.get(cid) or {}
+                    if cid in fill_ids or float(lc.get("filled_count") or 0) > 0:
+                        bucket["filled"] += 1
+                    elif int(lc.get("terminal") or 0):
+                        bucket["terminal_unfilled"] += 1
+                        if "cancel" in str(lc.get("status") or "").lower():
+                            bucket["canceled_unfilled"] += 1
+        return {"buckets": list(summary.values())}
 
     def settlement_exists(self, client_order_id: str) -> bool:
         self.init_schema()

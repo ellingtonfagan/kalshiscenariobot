@@ -95,6 +95,7 @@ def build_status(ctx: Context) -> dict[str, Any]:
             "live": _count_orders(store, "live_orders"),
         },
         "signal_engines": store.signal_engine_summary(),
+        "fill_rate": store.fill_rate_summary(),
         "qual_learning": store.qual_learning_summary(),
         "latest_risk_snapshot": latest_risk[0] if latest_risk else None,
         "latest_live_order": latest_live[0] if latest_live else None,
@@ -112,6 +113,11 @@ def _format_status(status: dict[str, Any]) -> str:
     consensus = engines.get("consensus") or {}
     qual = engines.get("qual") or {}
     learning = status.get("qual_learning") or {}
+    fill_buckets = (status.get("fill_rate") or {}).get("buckets") or []
+    fill_text = "; ".join(
+        f"{row.get('signal_source')}:{row.get('liquidity_role')} {row.get('filled', 0)}/{row.get('placed', 0)} filled"
+        for row in fill_buckets[:3]
+    ) or "n/a"
     exposure = risk.get("game_exposure_units")
     daily_pnl = risk.get("daily_pnl_units")
     exposure_label = f"{exposure}u" if exposure is not None else "n/a"
@@ -132,6 +138,7 @@ def _format_status(status: dict[str, Any]) -> str:
             f"recaps_found={learning.get('recaps_found', 0)} "
             f"recaps_missing={learning.get('recaps_missing', 0)}"
         ),
+        f"  fill_rate {fill_text}",
         (
             "  risk "
             f"exposure={exposure_label} "

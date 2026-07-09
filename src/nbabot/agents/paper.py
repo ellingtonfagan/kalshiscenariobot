@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from typing import Any
 
 from .. import guardrails
 from ..alerts import deliver
@@ -14,7 +15,7 @@ from ..risk import (
     broad_slate_daily_trade_limit,
     evaluate_trade_intent,
 )
-from ..sizing import capped_kelly
+from ..sizing import ContractSizing, UnitSizing, capped_kelly, contracts_for_units, unit_sizing
 from ..slate import configured_game_candidate_id
 from .base import Context, load_context
 
@@ -78,6 +79,39 @@ def _paper_demo_mode(settings: object) -> bool:
     return mode in {"paper", "demo"}
 
 
+def _latest_balance_usd(ctx: Context) -> tuple[float, str, str | None]:
+    mode = str(getattr(ctx.settings, "execution_mode", "paper") or "paper").lower()
+    if mode == "paper":
+        return float(getattr(ctx.settings, "paper_bankroll_usd", 1000.0)), "paper-bankroll", None
+    sync = ctx.read_json("portfolio_sync.json") or {}
+    if sync.get("ok") and sync.get("balance_usd_exact") is not None:
+        return float(sync["balance_usd_exact"]), "portfolio-sync", None
+    if sync.get("ok") and sync.get("balance_usd") is not None:
+        return float(sync["balance_usd"]), "portfolio-sync", None
+    if sync.get("ok") and sync.get("balance_cents") is not None:
+        return float(sync["balance_cents"]) / 100.0, "portfolio-sync", None
+    try:
+        cents = ctx.kalshi.demo_balance_cents(ctx.settings.demo_api_base)
+        return float(cents) / 100.0, "demo-api", None
+    except Exception as exc:
+        if sync.get("balance_cents") is not None:
+            return float(sync["balance_cents"]) / 100.0, "last-known-portfolio-sync", str(exc)
+        return float(getattr(ctx.settings, "paper_bankroll_usd", 1000.0)), "paper-bankroll-fallback", str(exc)
+
+
+def sizing_context(ctx: Context) -> dict[str, Any]:
+    bankroll, source, error = _latest_balance_usd(ctx)
+    unit = unit_sizing(bankroll, float(getattr(ctx.settings, "unit_fraction", 0.015)))
+    return {
+        "bankroll_usd": bankroll,
+        "bankroll_source": source,
+        "balance_error": error,
+        "unit": unit,
+        "unit_cents": max(int(round(unit.unit_size_dollars * 100)), 1),
+        "warning": unit.warning,
+    }
+
+
 def execution_limits(ctx: Context, store: ResearchStore, table: str) -> dict[str, float | int]:
     research = ctx.read_json("research_bundle.json") or {}
     learning = research.get("performance_learning") or {}
@@ -115,7 +149,7 @@ def _intent_from_row(
     row: dict,
     meta: dict,
     group_counts: dict[str, int],
-    unit_cents: int,
+    unit: UnitSizing,
 ) -> TradeIntent | None:
     implied = row.get("implied")
     ticker = row.get("ticker")
@@ -152,16 +186,26 @@ def _intent_from_row(
     min_edge = _effective_row_min_edge(ctx.settings, signal_source, row, meta)
     if edge < min_edge and not research_override:
         return None
+    minimum_contracts = 1 if _paper_demo_mode(ctx.settings) else 0
+    max_notional_fraction = float(getattr(ctx.settings, "max_order_notional_fraction", 0.10))
+    contract_size: ContractSizing
     if research_override:
         target_units = min(
             float(row.get("research_override_stake_units", 0.25)),
             float(getattr(ctx.settings, "research_override_max_units", 1.0)),
             1.0,
         )
-        contracts = int(target_units * unit_cents) // int(entry)
-        if contracts <= 0:
+        contract_size = contracts_for_units(
+            target_units,
+            int(entry),
+            unit,
+            minimum_contracts=minimum_contracts,
+            max_order_notional_fraction=max_notional_fraction,
+        )
+        if contract_size.contracts <= 0:
             return None
-        stake_units = (contracts * int(entry)) / max(unit_cents, 1)
+        contracts = contract_size.contracts
+        stake_units = contract_size.units_staked
         side = row.get("side") or "yes"
         entry_price_cents = int(entry)
     else:
@@ -170,25 +214,32 @@ def _intent_from_row(
             edge=edge,
             market_prob=float(implied),
             entry_price_cents=int(entry),
-            unit_cents=unit_cents,
+            unit_cents=max(int(round(unit.unit_size_dollars * 100)), 1),
             max_units=guardrails.MAX_STAKE_UNITS,
             min_edge=min_edge,
             validated=validated,
             correlation_group_size=group_counts.get(group, 1),
         )
-        if size.contracts <= 0:
+        if size.skipped_reason and size.stake_units <= 0:
             broad_slate = _candidate_is_broad_slate(meta, ctx.settings)
             if not (_paper_demo_mode(ctx.settings) and broad_slate):
                 return None
-            contracts = 1
-            entry_price_cents = int(entry)
-            stake_units = entry_price_cents / max(unit_cents, 1)
-            side = row.get("side") or size.side
+            target_units = int(entry) / max(unit.unit_size_dollars * 100, 1)
         else:
-            contracts = size.contracts
-            stake_units = size.stake_units
-            side = row.get("side") or size.side
-            entry_price_cents = size.entry_price_cents
+            target_units = size.stake_units
+        contract_size = contracts_for_units(
+            target_units,
+            int(entry),
+            unit,
+            minimum_contracts=minimum_contracts,
+            max_order_notional_fraction=max_notional_fraction,
+        )
+        if contract_size.contracts <= 0:
+            return None
+        contracts = contract_size.contracts
+        stake_units = contract_size.units_staked
+        side = row.get("side") or size.side
+        entry_price_cents = size.entry_price_cents
 
     risk = int(row.get("risk", 0) or 0)
     validated = bool(meta.get("validated") or meta.get("market_type_verdict") == "validated")
@@ -208,6 +259,9 @@ def _intent_from_row(
         contracts=contracts,
         price_cents=entry_price_cents,
         stake_units=stake_units,
+        unit_size_dollars=unit.unit_size_dollars,
+        units_staked=stake_units,
+        stake_dollars=contract_size.stake_dollars,
         model_prob=float(prior),
         market_prob=float(implied),
         edge=edge,
@@ -290,7 +344,8 @@ def _candidate_intents(ctx: Context) -> list[TradeIntent]:
         group_counts[group] = group_counts.get(group, 0) + 1
     intents: list[TradeIntent] = []
     intent_keys = set()
-    unit_cents = int(round(ctx.settings.unit_usd * 100))
+    sizing = sizing_context(ctx)
+    unit = sizing["unit"]
     for row in rows:
         ticker = row.get("ticker")
         if not ticker:
@@ -299,7 +354,7 @@ def _candidate_intents(ctx: Context) -> list[TradeIntent]:
         if research_gate_active and key not in allowed:
             continue
         meta = allowed_meta.get(key, {})
-        intent = _intent_from_row(ctx, row, meta, group_counts, unit_cents)
+        intent = _intent_from_row(ctx, row, meta, group_counts, unit)
         if intent is None:
             continue
         intents.append(intent)
@@ -310,7 +365,7 @@ def _candidate_intents(ctx: Context) -> list[TradeIntent]:
         key = (meta.get("ticker"), meta.get("scenario_id"), meta.get("market"))
         if key in intent_keys:
             continue
-        intent = _intent_from_row(ctx, meta, meta, group_counts, unit_cents)
+        intent = _intent_from_row(ctx, meta, meta, group_counts, unit)
         if intent is None:
             continue
         intents.append(intent)
@@ -343,10 +398,11 @@ def _shadow_intents(ctx: Context) -> list[TradeIntent]:
         and str(row.get("signal_source") or "consensus") == "consensus"
     ]
     group_counts = _candidate_group_counts(research.get("market_candidates") or [])
-    unit_cents = int(round(ctx.settings.unit_usd * 100))
+    sizing = sizing_context(ctx)
+    unit = sizing["unit"]
     intents = []
     for row in research_candidates:
-        intent = _intent_from_row(ctx, row, row, group_counts, unit_cents)
+        intent = _intent_from_row(ctx, row, row, group_counts, unit)
         if intent is not None:
             intents.append(intent)
     return intents
