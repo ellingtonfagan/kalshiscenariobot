@@ -102,12 +102,18 @@ def capped_kelly(edge: float, market_prob: float, entry_price_cents: int,
                  unit_cents: int, max_units: float = MAX_STAKE_UNITS,
                  multiplier: float | None = None, min_edge: float = 0.05,
                  validated: bool = False,
-                 correlation_group_size: int = 1) -> KellyResult:
+                 correlation_group_size: int = 1,
+                 unit_fraction: float | None = None) -> KellyResult:
     """Fractional Kelly for a binary edge, hard-capped in units.
 
     Unvalidated market types default to quarter-Kelly. Validated market types may
     use half-Kelly. Concurrent correlated candidates reduce the multiplier
     proportionally, floored at one-eighth of the selected Kelly fraction.
+
+    Kelly yields a fraction OF BANKROLL; a unit is `unit_fraction` of bankroll,
+    so the unit stake is fraction / unit_fraction. When unit_fraction is None
+    (legacy callers whose unit IS the bankroll basis), the fraction is used as
+    units directly.
     """
     side = "yes" if edge >= 0 else "no"
     abs_edge = abs(edge)
@@ -128,7 +134,8 @@ def capped_kelly(edge: float, market_prob: float, entry_price_cents: int,
     correlation_reduction = max(1.0 / group_size, 0.125)
     fraction = edge / (1 - market_prob) if side == "yes" else abs_edge / market_prob
     adjusted = max(fraction * selected_multiplier * correlation_reduction, 0.0)
-    stake_units = min(adjusted, max_units)
+    units = adjusted / unit_fraction if unit_fraction else adjusted
+    stake_units = min(units, max_units)
     stake_cents = int(stake_units * unit_cents)
     contracts = stake_cents // entry_price_cents
     if contracts <= 0:

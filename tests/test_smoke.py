@@ -4522,9 +4522,9 @@ def test_candidate_ranker_confluence_disagreement_vetoes_demo_and_records_shadow
     assert bundle["market_candidates"][0]["confluence_shadow"] is True
     assert shadows[0]["ticker"] == "KXEDGE"
     assert shadows[0]["side"] == "yes"
-    assert shadows[0]["contracts"] == pytest.approx(1.0)
+    assert shadows[0]["contracts"] == pytest.approx(57.0)
     assert shadows[0]["price_cents"] == pytest.approx(48.0)
-    assert shadows[0]["stake_units"] == pytest.approx(0.032)
+    assert shadows[0]["stake_units"] == pytest.approx(57 * 0.48 / 15.0, abs=0.001)
     assert shadows[0]["edge"] == pytest.approx(0.05563)
     assert shadows[0]["reason"] == confluence.VETO_REASON
     assert shadows[0]["confluence_verdict"] == "disagree"
@@ -5362,11 +5362,11 @@ def test_demo_ranker_passed_open_market_flows_to_one_contract_intent(tmp_path):
     decision = risk.evaluate_trade_intent(intent, settings)
 
     assert intent.ticker == ticker
-    assert intent.contracts == 1
+    assert intent.contracts == 45
     assert intent.price_cents == 44
     assert intent.unit_size_dollars == pytest.approx(15.0)
-    assert intent.stake_dollars == pytest.approx(0.44)
-    assert intent.stake_units == pytest.approx(0.029333, abs=0.000001)
+    assert intent.stake_dollars == pytest.approx(45 * 0.44)
+    assert intent.stake_units == pytest.approx(45 * 0.44 / 15.0, abs=0.000001)
     assert intent.sgp_adjusted_prob == pytest.approx(0.48552)
     assert intent.broad_slate is True
     assert decision.approved

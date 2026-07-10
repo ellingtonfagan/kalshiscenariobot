@@ -219,6 +219,7 @@ def _intent_from_row(
             min_edge=min_edge,
             validated=validated,
             correlation_group_size=group_counts.get(group, 1),
+            unit_fraction=unit.unit_fraction,
         )
         if size.skipped_reason and size.stake_units <= 0:
             broad_slate = _candidate_is_broad_slate(meta, ctx.settings)
@@ -226,11 +227,7 @@ def _intent_from_row(
                 return None
             target_units = int(entry) / max(unit.unit_size_dollars * 100, 1)
         else:
-            # capped_kelly's adjusted_fraction is a fraction OF BANKROLL; a unit
-            # is unit_fraction of bankroll, so units = fraction / unit_fraction.
-            # Using stake_units directly understated stakes ~66x (observed
-            # 2026-07-09: $0.42 staked where quarter-Kelly implied ~$28).
-            target_units = size.adjusted_fraction / max(unit.unit_fraction, 1e-9)
+            target_units = size.stake_units
         contract_size = contracts_for_units(
             target_units,
             int(entry),
