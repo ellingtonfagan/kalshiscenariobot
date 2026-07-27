@@ -9,7 +9,10 @@ from ..audit import AuditTrail
 from ..research import ResearchStore, utc_now
 from ..settlement_audit import (
     SETTLEMENT_EVENT_TYPE,
+    _loads,
     closing_consensus,
+    closing_consensus_from_snapshot,
+    clv_metrics,
     market_resolution,
     normalized_order,
     normalized_shadow_intent,
@@ -29,6 +32,54 @@ def _format(payload: dict[str, Any]) -> str:
         f"clv_available={summary.get('clv_available_count', 0)} "
         f"clv_beat_rate={summary.get('clv_beat_rate')}"
     )
+
+
+def _backfill_missing_clv(ctx: Context, store: ResearchStore) -> dict[str, Any]:
+    checked = 0
+    updated = 0
+    unrecoverable = 0
+    rows = store.list_settlement_records()
+    for row in rows:
+        if row.get("clv_cents") is not None:
+            continue
+        checked += 1
+        record = _loads(row.get("record_json"), {}) or dict(row)
+        market = _loads(row.get("market_json"), {}) or record.get("market") or {}
+        order = {
+            **record,
+            "client_order_id": row["client_order_id"],
+            "ticker": row["ticker"],
+            "side": row["side"],
+            "action": record.get("action") or "buy",
+            "contracts": row["contracts"],
+            "entry_price_cents": row["entry_price_cents"],
+            "fee_cents": record.get("fee_cents"),
+            "intent": record.get("intent") if isinstance(record.get("intent"), dict) else {},
+        }
+        snapshot = store.latest_closing_snapshot(row["ticker"])
+        consensus = closing_consensus_from_snapshot(snapshot, row["side"])
+        if not consensus.get("available"):
+            consensus = closing_consensus(
+                ctx.settings.data_dir,
+                row["ticker"],
+                row["side"],
+                market,
+            )
+        clv = clv_metrics(order, consensus)
+        record.update({
+            "closing_consensus": consensus,
+            **clv,
+        })
+        if clv.get("clv_cents") is None:
+            unrecoverable += 1
+            continue
+        if store.update_settlement_clv(row["client_order_id"], record):
+            updated += 1
+    return {
+        "checked_missing_clv_count": checked,
+        "updated_count": updated,
+        "unrecoverable_count": unrecoverable,
+    }
 
 
 def run(ctx: Context | None = None) -> dict:
@@ -82,12 +133,15 @@ def run(ctx: Context | None = None) -> dict:
             })
             continue
 
-        consensus = closing_consensus(
-            ctx.settings.data_dir,
-            order["ticker"],
-            order["side"],
-            market,
-        )
+        snapshot = store.latest_closing_snapshot(order["ticker"])
+        consensus = closing_consensus_from_snapshot(snapshot, order["side"])
+        if not consensus.get("available"):
+            consensus = closing_consensus(
+                ctx.settings.data_dir,
+                order["ticker"],
+                order["side"],
+                market,
+            )
         record = settlement_record(order, market, resolution, consensus)
         inserted = store.record_settlement(record)
         record["inserted"] = inserted
@@ -131,18 +185,23 @@ def run(ctx: Context | None = None) -> dict:
                 "reason": "market not settled or winner side unavailable",
             })
             continue
-        consensus = closing_consensus(
-            ctx.settings.data_dir,
-            shadow["ticker"],
-            shadow["side"],
-            market,
-        )
+        snapshot = store.latest_closing_snapshot(shadow["ticker"])
+        consensus = closing_consensus_from_snapshot(snapshot, shadow["side"])
+        if not consensus.get("available"):
+            consensus = closing_consensus(
+                ctx.settings.data_dir,
+                shadow["ticker"],
+                shadow["side"],
+                market,
+            )
         record = settlement_record(shadow, market, resolution, consensus)
         inserted = store.record_shadow_settlement(record)
         record["inserted"] = inserted
         shadow_records.append(record)
         if inserted:
             audit.log("SHADOW_SETTLEMENT_AUDIT_RECORD", record, shadow["game_id"])
+
+    backfill = _backfill_missing_clv(ctx, store)
 
     payload = {
         "game_id": ctx.settings.game_id,
@@ -156,6 +215,7 @@ def run(ctx: Context | None = None) -> dict:
         "shadow_skipped_count": len(shadow_skipped),
         "shadow_error_count": len(shadow_errors),
         "summary": summarize(records),
+        "backfill": backfill,
         "reconciliation": reconciliation,
         "shadow_summary": summarize(shadow_records),
         "records": records,
@@ -169,7 +229,8 @@ def run(ctx: Context | None = None) -> dict:
         "notes": [
             "Read-only audit phase; no orders are placed or modified.",
             "Win/loss comes from Kalshi market settlement fields only.",
-            "CLV uses the latest available pre-close candidate-ranker consensus snapshot.",
+            "CLV prefers stored closing_snapshots and falls back only to a pre-close candidate-ranker artifact.",
+            "Existing records without a recoverable snapshot/artifact remain CLV-unmeasured.",
         ],
     }
     ctx.write_json("settlement_audit.json", payload)

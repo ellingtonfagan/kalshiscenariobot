@@ -57,6 +57,7 @@ from nbabot import (  # noqa: E402
     slate,
     soccer_research,
     sports,
+    validation_report as validation_report_core,
     ui,
 )
 from nbabot.adapters import get_adapter  # noqa: E402
@@ -64,6 +65,7 @@ from nbabot.agents import (  # noqa: E402
     PHASES,
     book_watch,
     candidate_ranker,
+    closing_snapshot,
     daily_cycle,
     demo_execute,
     discover_markets,
@@ -87,6 +89,7 @@ from nbabot.agents import (  # noqa: E402
     source_check,
     status,
     telegram_test,
+    validation_report as validation_report_agent,
 )
 from nbabot.config import load_settings  # noqa: E402
 from nbabot.kalshi import DEMO_CREDENTIALS_BLOCKED_REASON, KalshiClient, Quote, _TITLE_RE  # noqa: E402
@@ -567,6 +570,8 @@ class _ExecSettings:
     paper_bankroll_usd = 1000.0
     max_order_notional_fraction = 0.10
     resting_order_max_age_minutes = 90
+    closing_snapshot_window_minutes = 240
+    concentration_max_winner_share = 0.50
     deliver_to = "stdout"
 
     def __init__(self, tmp_path):
@@ -1896,7 +1901,8 @@ def test_settlement_audit_records_paper_outcome_and_clv(tmp_path, monkeypatch):
     assert result["summary"]["clv_beat_rate"] == 1.0
     assert result["records"][0]["outcome"] == 1
     assert result["records"][0]["closing_consensus_cents"] == 55.0
-    assert result["records"][0]["clv_cents"] == 15.0
+    assert result["records"][0]["clv_midpoint_cents"] == 15.0
+    assert result["records"][0]["clv_cents"] == pytest.approx(14.58)
     assert result["records"][0]["brier_entry_model"] == pytest.approx(0.16)
     assert rows[0]["client_order_id"] == receipt.client_order_id
     assert rows[0]["winning_side"] == "yes"
@@ -1904,6 +1910,96 @@ def test_settlement_audit_records_paper_outcome_and_clv(tmp_path, monkeypatch):
     assert any(row["type"] == settlement_audit_core.SETTLEMENT_EVENT_TYPE
                for row in audit_rows)
     assert (tmp_path / "TEST-GAME.settlement_audit.json").exists()
+
+
+def test_closing_snapshot_feeds_fee_adjusted_yes_and_no_clv(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    store = research.ResearchStore(settings.research_db_path)
+    audit = __import__("nbabot.audit", fromlist=["AuditTrail"]).AuditTrail(tmp_path, store)
+    yes_intent = _intent(
+        ticker="KXCLOSEYES",
+        price_cents=44,
+        side="yes",
+        market_prob=0.44,
+        model_prob=0.60,
+        bid_cents=42,
+        ask_cents=44,
+        liquidity_role="maker",
+    )
+    no_intent = _intent(
+        ticker="KXCLOSENO",
+        price_cents=35,
+        side="no",
+        market_prob=0.35,
+        model_prob=0.55,
+        bid_cents=33,
+        ask_cents=35,
+        liquidity_role="maker",
+    )
+    yes_receipt = execution.execute_paper(yes_intent, risk.evaluate_trade_intent(yes_intent, settings), settings, store, audit)
+    no_receipt = execution.execute_paper(no_intent, risk.evaluate_trade_intent(no_intent, settings), settings, store, audit)
+    close_time = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    settings.data_path("candidate_ranker.json").write_text(json.dumps({
+        "game_id": settings.game_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "rows": [
+            {"ticker": "KXCLOSEYES", "consensus": {"fair_prob": 0.60, "book_count": 2}},
+            {"ticker": "KXCLOSENO", "consensus": {"fair_prob": 0.60, "book_count": 2}},
+        ],
+    }))
+
+    class DummyKalshi:
+        settled = False
+
+        def market(self, ticker):
+            if not self.settled:
+                return {
+                    "ticker": ticker,
+                    "status": "open",
+                    "close_time": close_time,
+                    "yes_bid": 58,
+                    "yes_ask": 62,
+                }
+            return {
+                "ticker": ticker,
+                "status": "settled",
+                "result": "yes" if ticker == "KXCLOSEYES" else "no",
+                "settled_at": close_time,
+            }
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    ctx = DummyContext()
+    monkeypatch.setattr(closing_snapshot, "deliver", lambda *args, **kwargs: None)
+    monkeypatch.setattr(settlement_audit, "deliver", lambda *args, **kwargs: None)
+
+    snap = closing_snapshot.run(ctx)
+    ctx.kalshi.settled = True
+    result = settlement_audit.run(ctx)
+    rows = {row["ticker"]: row for row in store.latest_rows("settlement_records", 5)}
+
+    assert snap["recorded_count"] == 2
+    assert store.latest_closing_snapshot("KXCLOSEYES")["executable_cents"] == 58
+    assert result["summary"]["settled_count"] == 2
+    assert rows["KXCLOSEYES"]["client_order_id"] == yes_receipt.client_order_id
+    assert rows["KXCLOSENO"]["client_order_id"] == no_receipt.client_order_id
+    yes_record = json.loads(rows["KXCLOSEYES"]["record_json"])
+    no_record = json.loads(rows["KXCLOSENO"]["record_json"])
+    assert yes_record["clv_midpoint_cents"] == pytest.approx(16.0)
+    assert yes_record["clv_cents"] == pytest.approx(13.5688)
+    assert no_record["closing_consensus_cents"] == pytest.approx(40.0)
+    assert no_record["clv_midpoint_cents"] == pytest.approx(5.0)
+    assert no_record["clv_cents"] == pytest.approx(2.6019)
+    assert yes_record["clv_cents"] != yes_record["clv_midpoint_cents"]
+    assert no_record["clv_cents"] != no_record["clv_midpoint_cents"]
 
 
 def test_qual_signal_source_persists_through_order_and_settlement_without_fake_clv(tmp_path, monkeypatch):
@@ -2335,6 +2431,85 @@ def test_performance_learner_validates_family_after_thresholds():
     assert row["realized_vs_predicted_haircut"] == pytest.approx(0.952)
     assert row["validated"] is True
     assert row["market_type_verdict"] == "validated"
+
+
+def test_unmeasured_clv_does_not_satisfy_validation():
+    records = []
+    for i in range(120):
+        row = _settlement_fixture(
+            i,
+            outcome=1 if i < 80 else 0,
+            model_prob=0.70,
+            market_prob=0.50,
+        )
+        row["closing_consensus_prob"] = None
+        row["closing_consensus_cents"] = None
+        row["clv_cents"] = None
+        row["beat_closing_consensus"] = None
+        row["closing_consensus"] = {
+            "available": False,
+            "reason": "no stored closing snapshot for ticker",
+        }
+        records.append(row)
+
+    payload = performance_learner.learn(records)
+    row = payload["families"]["mlb moneyline"]
+
+    assert row["settled_count"] == 120
+    assert row["clv_available_count"] == 0
+    assert row["clv_beat_rate"] is None
+    assert row["validated"] is False
+    assert "CLV beat rate unavailable" in row["validation_blockers"]
+
+
+def test_validation_report_excludes_unmeasured_clv_and_flags_concentration(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    store = research.ResearchStore(settings.research_db_path)
+    records = [
+        _settlement_fixture(1, ticker="KXMLBGAME-26JUL06NYYBOS-NYY", outcome=1, clv_cents=4.0),
+        _settlement_fixture(2, ticker="KXMLBGAME-26JUL06NYYBOS-BOS", outcome=1, clv_cents=3.0),
+        _settlement_fixture(3, ticker="KXMLBGAME-26JUL06NYYBOS-NYY", outcome=0, clv_cents=-2.0),
+    ]
+    records[0]["pnl_cents"] = 10000.0
+    records[1]["pnl_cents"] = 1000.0
+    records[2]["pnl_cents"] = -500.0
+    records[2]["clv_cents"] = None
+    records[2]["beat_closing_consensus"] = None
+    for row in records:
+        store.record_settlement(row)
+
+    payload = validation_report_core.report(
+        store.list_settlement_records(),
+        default_sport="mlb",
+        concentration_max_winner_share=0.50,
+    )
+    group = payload["groups"][0]
+    even = validation_report_core.concentration_diagnostics([
+        {"pnl_cents": 1000}, {"pnl_cents": 1000}, {"pnl_cents": 1000},
+    ])
+
+    assert group["settled_count"] == 3
+    assert group["clv_measured_count"] == 2
+    assert group["clv_unmeasured_count"] == 1
+    assert group["clv_beat_rate"] == 1.0
+    assert "needs 98 more CLV-measured" in group["remaining_distance"]
+    assert payload["overall_concentration"]["concentration_flag"] is True
+    assert payload["overall_concentration"]["pnl_ex_largest_winner_cents"] == pytest.approx(500.0)
+    assert even["concentration_flag"] is False
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    monkeypatch.setattr(validation_report_agent, "deliver", lambda *args, **kwargs: None)
+    phase_payload = validation_report_agent.run(DummyContext())
+    assert phase_payload["settled_count"] == 3
+    assert (tmp_path / "TEST-GAME.validation_report.json").exists()
 
 
 def test_performance_learner_separates_qual_from_consensus_families():

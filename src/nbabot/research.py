@@ -275,6 +275,25 @@ class ResearchStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_settlement_records_game_time
                     ON settlement_records(game_id, audited_at DESC);
+                CREATE TABLE IF NOT EXISTS closing_snapshots (
+                    ticker TEXT PRIMARY KEY,
+                    game_id TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    market_close_time TEXT,
+                    seconds_to_close REAL,
+                    source TEXT NOT NULL,
+                    consensus_prob REAL,
+                    consensus_cents REAL,
+                    kalshi_mid_cents REAL,
+                    executable_cents REAL,
+                    book_count INTEGER,
+                    sources_json TEXT NOT NULL,
+                    market_json TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_closing_snapshots_game_time
+                    ON closing_snapshots(game_id, captured_at DESC);
                 CREATE TABLE IF NOT EXISTS positions (
                     position_id TEXT PRIMARY KEY,
                     game_id TEXT NOT NULL,
@@ -496,6 +515,10 @@ class ResearchStore:
             self._ensure_column(db, "demo_orders", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
             self._ensure_column(db, "live_orders", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
             self._ensure_column(db, "settlement_records", "confluence_verdict", "TEXT NOT NULL DEFAULT 'none'")
+            self._ensure_column(db, "settlement_records", "clv_midpoint_cents", "REAL")
+            self._ensure_column(db, "settlement_records", "closing_kalshi_mid_cents", "REAL")
+            self._ensure_column(db, "settlement_records", "closing_executable_cents", "REAL")
+            self._ensure_column(db, "settlement_records", "clv_unmeasured_reason", "TEXT")
             self._ensure_column(db, "fills", "fill_key", "TEXT")
             db.execute(
                 """
@@ -755,18 +778,33 @@ class ResearchStore:
         team_list = [str(team) for team in teams if str(team)]
         if not team_list:
             return []
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=float(window_hours))).isoformat()
         placeholders = ",".join("?" for _ in team_list)
         with self.connect() as db:
+            latest = db.execute(
+                f"""
+                SELECT MAX(fetched_at) AS fetched_at
+                FROM news_items
+                WHERE team IN ({placeholders})
+                """,
+                tuple(team_list),
+            ).fetchone()
+            latest_fetch = latest["fetched_at"] if latest else None
+            try:
+                anchor = datetime.fromisoformat(str(latest_fetch).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                anchor = datetime.now(timezone.utc)
+            if anchor.tzinfo is None:
+                anchor = anchor.replace(tzinfo=timezone.utc)
+            cutoff = (anchor - timedelta(hours=float(window_hours))).isoformat()
             rows = db.execute(
                 f"""
                 SELECT *
                 FROM news_items
                 WHERE team IN ({placeholders})
-                  AND (published_at IS NULL OR published_at >= ?)
+                  AND (published_at IS NULL OR published_at >= ? OR fetched_at >= ?)
                 ORDER BY published_at DESC, fetched_at DESC
                 """,
-                (*team_list, cutoff),
+                (*team_list, cutoff, cutoff),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1473,6 +1511,108 @@ class ResearchStore:
                 ),
             )
 
+    def record_closing_snapshot(self, snapshot: dict[str, Any]) -> bool:
+        self.init_schema()
+        with self.connect() as db:
+            cur = db.execute(
+                """
+                INSERT INTO closing_snapshots(
+                    ticker, game_id, side, captured_at, market_close_time,
+                    seconds_to_close, source, consensus_prob, consensus_cents,
+                    kalshi_mid_cents, executable_cents, book_count, sources_json,
+                    market_json, snapshot_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ticker) DO UPDATE SET
+                    game_id=excluded.game_id,
+                    side=excluded.side,
+                    captured_at=excluded.captured_at,
+                    market_close_time=excluded.market_close_time,
+                    seconds_to_close=excluded.seconds_to_close,
+                    source=excluded.source,
+                    consensus_prob=excluded.consensus_prob,
+                    consensus_cents=excluded.consensus_cents,
+                    kalshi_mid_cents=excluded.kalshi_mid_cents,
+                    executable_cents=excluded.executable_cents,
+                    book_count=excluded.book_count,
+                    sources_json=excluded.sources_json,
+                    market_json=excluded.market_json,
+                    snapshot_json=excluded.snapshot_json
+                """,
+                (
+                    snapshot["ticker"],
+                    snapshot["game_id"],
+                    snapshot["side"],
+                    snapshot["captured_at"],
+                    snapshot.get("market_close_time"),
+                    snapshot.get("seconds_to_close"),
+                    snapshot.get("source") or "candidate-ranker",
+                    snapshot.get("consensus_prob"),
+                    snapshot.get("consensus_cents"),
+                    snapshot.get("kalshi_mid_cents"),
+                    snapshot.get("executable_cents"),
+                    snapshot.get("book_count"),
+                    to_json(snapshot.get("sources") or []),
+                    to_json(snapshot.get("market") or {}),
+                    to_json(snapshot),
+                ),
+            )
+        return cur.rowcount is not None and cur.rowcount > 0
+
+    def latest_closing_snapshot(self, ticker: str) -> dict[str, Any] | None:
+        self.init_schema()
+        with self.connect() as db:
+            row = db.execute(
+                """
+                SELECT *
+                FROM closing_snapshots
+                WHERE ticker = ?
+                LIMIT 1
+                """,
+                (ticker,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        for source_key, target_key, default in (
+            ("sources_json", "sources", []),
+            ("market_json", "market", {}),
+            ("snapshot_json", "snapshot", {}),
+        ):
+            raw = item.pop(source_key, None)
+            try:
+                item[target_key] = json.loads(raw or to_json(default))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item[target_key] = default
+        return item
+
+    def list_closing_snapshots(self, limit: int | None = None) -> list[dict[str, Any]]:
+        self.init_schema()
+        query = "SELECT * FROM closing_snapshots ORDER BY captured_at DESC"
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (int(limit),)
+        with self.connect() as db:
+            rows = db.execute(query, params).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["sources"] = json.loads(item.pop("sources_json") or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item["sources"] = []
+            try:
+                item["market"] = json.loads(item.pop("market_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item["market"] = {}
+            try:
+                item["snapshot"] = json.loads(item.pop("snapshot_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item["snapshot"] = {}
+            out.append(item)
+        return out
+
     def order_lifecycle_map(self) -> dict[str, dict[str, Any]]:
         self.init_schema()
         with self.connect() as db:
@@ -1617,9 +1757,11 @@ class ResearchStore:
                     entry_model_prob, entry_market_prob, closing_consensus_prob,
                     closing_consensus_cents, clv_cents, beat_closing_consensus,
                     brier_entry_model, signal_source, confluence_verdict,
-                    market_json, consensus_json, record_json
+                    market_json, consensus_json, record_json,
+                    clv_midpoint_cents, closing_kalshi_mid_cents,
+                    closing_executable_cents, clv_unmeasured_reason
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record["client_order_id"], record["game_id"], record["mode"],
@@ -1641,9 +1783,50 @@ class ResearchStore:
                     to_json(record.get("market", {})),
                     to_json(record.get("closing_consensus", {})),
                     to_json(record),
+                    record.get("clv_midpoint_cents"),
+                    record.get("closing_kalshi_mid_cents"),
+                    record.get("closing_executable_cents"),
+                    record.get("clv_unmeasured_reason"),
                 ),
             )
         return cur.rowcount == 1
+
+    def update_settlement_clv(self, client_order_id: str, record: dict[str, Any]) -> bool:
+        self.init_schema()
+        with self.connect() as db:
+            cur = db.execute(
+                """
+                UPDATE settlement_records
+                SET closing_consensus_prob = ?,
+                    closing_consensus_cents = ?,
+                    clv_cents = ?,
+                    beat_closing_consensus = ?,
+                    consensus_json = ?,
+                    record_json = ?,
+                    clv_midpoint_cents = ?,
+                    closing_kalshi_mid_cents = ?,
+                    closing_executable_cents = ?,
+                    clv_unmeasured_reason = ?
+                WHERE client_order_id = ?
+                """,
+                (
+                    record.get("closing_consensus_prob"),
+                    record.get("closing_consensus_cents"),
+                    record.get("clv_cents"),
+                    (
+                        None if record.get("beat_closing_consensus") is None
+                        else int(bool(record.get("beat_closing_consensus")))
+                    ),
+                    to_json(record.get("closing_consensus", {})),
+                    to_json(record),
+                    record.get("clv_midpoint_cents"),
+                    record.get("closing_kalshi_mid_cents"),
+                    record.get("closing_executable_cents"),
+                    record.get("clv_unmeasured_reason"),
+                    client_order_id,
+                ),
+            )
+        return cur.rowcount is not None and cur.rowcount > 0
 
     def list_settlement_records(self, limit: int | None = None) -> list[dict[str, Any]]:
         self.init_schema()
@@ -1903,7 +2086,7 @@ class ResearchStore:
             "dead_letter_queue", "market_catalog", "orderbook_snapshots",
             "settlement_records", "news_items", "qual_signals",
             "qual_recaps", "qual_postmortems", "qual_lessons",
-            "market_baskets", "near_miss_investigations",
+            "market_baskets", "near_miss_investigations", "closing_snapshots",
         }
         if table not in allowed:
             raise ValueError(f"unsupported table: {table}")
@@ -1922,6 +2105,7 @@ class ResearchStore:
             "qual_lessons": "last_seen_at",
             "market_baskets": "created_at",
             "near_miss_investigations": "created_at",
+            "closing_snapshots": "captured_at",
         }.get(table, "id")
         with self.connect() as db:
             rows = db.execute(

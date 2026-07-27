@@ -28,7 +28,7 @@ def run(ctx: Context | None = None) -> dict:
     audit = AuditTrail(ctx.settings.data_dir, store)
     steps: list[dict[str, Any]] = []
 
-    from . import backtest, book_watch, candidate_ranker, discover_markets, market_matcher, news_ingest, portfolio_sync, qual_research, research_agent
+    from . import backtest, book_watch, candidate_ranker, closing_snapshot, discover_markets, market_matcher, news_ingest, portfolio_sync, qual_research, research_agent
     from . import slate_discovery, slate_verify, snapshot_market
     from . import source_check, status
 
@@ -337,6 +337,17 @@ def run(ctx: Context | None = None) -> dict:
                         dlq_type="DAILY_CYCLE_STEP",
                     )
 
+    run_activated_step(
+        ctx,
+        "closing-snapshot",
+        closing_snapshot.run,
+        steps,
+        audit,
+        activated_by="execution",
+        activates=("backtest",),
+        dlq_type="DAILY_CYCLE_STEP",
+    )
+
     if ctx.settings.data_path("log.jsonl").exists():
         run_activated_step(
             ctx,
@@ -344,7 +355,7 @@ def run(ctx: Context | None = None) -> dict:
             backtest.run,
             steps,
             audit,
-            activated_by="execution",
+            activated_by="closing-snapshot",
             activates=("status",),
             dlq_type="DAILY_CYCLE_STEP",
         )
@@ -352,7 +363,7 @@ def run(ctx: Context | None = None) -> dict:
         skip_activated_step(
             "backtest",
             steps,
-            activated_by="execution",
+            activated_by="closing-snapshot",
             reason="no learning log",
             activates=("status",),
         )

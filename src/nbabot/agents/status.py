@@ -8,6 +8,7 @@ from typing import Any
 from .. import guardrails
 from ..alerts import deliver
 from ..research import ResearchStore
+from ..validation_report import report as build_validation_report
 from .base import Context, load_context
 
 
@@ -80,6 +81,13 @@ def build_status(ctx: Context) -> dict[str, Any]:
     latest_risk = store.latest_rows("risk_snapshots", 1)
     latest_live = store.latest_rows("live_orders", 1)
     latest_audit = store.latest_rows("audit_events", 3)
+    validation = build_validation_report(
+        store.list_settlement_records(),
+        default_sport=ctx.settings.sport,
+        concentration_max_winner_share=float(
+            getattr(ctx.settings, "concentration_max_winner_share", 0.50)
+        ),
+    )
     return {
         "game_id": ctx.settings.game_id,
         "sport": ctx.settings.sport,
@@ -96,6 +104,7 @@ def build_status(ctx: Context) -> dict[str, Any]:
         },
         "signal_engines": store.signal_engine_summary(),
         "fill_rate": store.fill_rate_summary(),
+        "validation_report": validation,
         "qual_learning": store.qual_learning_summary(),
         "latest_risk_snapshot": latest_risk[0] if latest_risk else None,
         "latest_live_order": latest_live[0] if latest_live else None,
@@ -113,6 +122,10 @@ def _format_status(status: dict[str, Any]) -> str:
     consensus = engines.get("consensus") or {}
     qual = engines.get("qual") or {}
     learning = status.get("qual_learning") or {}
+    validation = status.get("validation_report") or {}
+    groups = validation.get("groups") or []
+    top_group = groups[0] if groups else {}
+    concentration = validation.get("overall_concentration") or {}
     fill_buckets = (status.get("fill_rate") or {}).get("buckets") or []
     fill_text = "; ".join(
         f"{row.get('signal_source')}:{row.get('liquidity_role')} {row.get('filled', 0)}/{row.get('placed', 0)} filled"
@@ -139,6 +152,17 @@ def _format_status(status: dict[str, Any]) -> str:
             f"recaps_missing={learning.get('recaps_missing', 0)}"
         ),
         f"  fill_rate {fill_text}",
+        (
+            "  validation "
+            f"settled={validation.get('settled_count', 0)} "
+            f"clv_measured={top_group.get('clv_measured_count', 0) if top_group else 0} "
+            f"distance={'; '.join(top_group.get('remaining_distance', ['n/a'])) if top_group else 'n/a'}"
+        ),
+        (
+            "  concentration "
+            f"pnl_ex_largest=${float(concentration.get('pnl_ex_largest_winner_cents') or 0) / 100:.2f} "
+            f"flag={bool(concentration.get('concentration_flag'))}"
+        ),
         (
             "  risk "
             f"exposure={exposure_label} "

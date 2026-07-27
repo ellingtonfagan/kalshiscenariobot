@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from . import calibration
+from .fees import expected_fee
 from .research import utc_now
 
 
@@ -384,6 +385,100 @@ def closing_consensus(
     }
 
 
+def closing_consensus_from_snapshot(snapshot: dict[str, Any] | None, side: str) -> dict[str, Any]:
+    if not snapshot:
+        return {
+            "available": False,
+            "reason": "no stored closing snapshot for ticker",
+        }
+    prob = _prob(snapshot.get("consensus_prob"))
+    cents = _price_cents(snapshot.get("consensus_cents"))
+    if prob is None and cents is not None:
+        prob = round(cents / 100.0, 6)
+    if cents is None and prob is not None:
+        cents = round(prob * 100.0, 4)
+    if prob is None or cents is None:
+        return {
+            "available": False,
+            "reason": "stored closing snapshot missing consensus probability",
+            "snapshot": snapshot,
+        }
+    snapshot_side = _side(snapshot.get("side")) or "yes"
+    if snapshot_side != side:
+        prob = round(1.0 - prob, 6)
+        cents = round(prob * 100.0, 4)
+    return {
+        "available": True,
+        "source": snapshot.get("source") or "closing-snapshot",
+        "artifact": snapshot.get("artifact"),
+        "generated_at": snapshot.get("captured_at"),
+        "prob": prob,
+        "price_cents": cents,
+        "kalshi_mid_cents": _price_cents(snapshot.get("kalshi_mid_cents")),
+        "executable_cents": _price_cents(snapshot.get("executable_cents")),
+        "book_count": snapshot.get("book_count"),
+        "sources": snapshot.get("sources") or [],
+        "raw_snapshot": snapshot,
+    }
+
+
+def _fee_per_contract(order: dict[str, Any]) -> float:
+    contracts = _num(order.get("contracts"))
+    fee_cents = _num(order.get("fee_cents"))
+    if contracts and contracts > 0 and fee_cents is not None:
+        return round(fee_cents / contracts, 4)
+    maker = str((order.get("intent") or {}).get("liquidity_role") or "maker").lower() == "maker"
+    try:
+        return expected_fee(float(order["entry_price_cents"]), maker=maker)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def clv_metrics(order: dict[str, Any], consensus: dict[str, Any]) -> dict[str, Any]:
+    if not consensus.get("available"):
+        return {
+            "closing_consensus_prob": None,
+            "closing_consensus_cents": None,
+            "closing_kalshi_mid_cents": None,
+            "closing_executable_cents": None,
+            "clv_midpoint_cents": None,
+            "clv_cents": None,
+            "beat_closing_consensus": None,
+            "clv_unmeasured_reason": consensus.get("reason") or "closing consensus unavailable",
+        }
+    closing_cents = _price_cents(consensus.get("price_cents"))
+    if closing_cents is None:
+        return {
+            "closing_consensus_prob": None,
+            "closing_consensus_cents": None,
+            "closing_kalshi_mid_cents": None,
+            "closing_executable_cents": None,
+            "clv_midpoint_cents": None,
+            "clv_cents": None,
+            "beat_closing_consensus": None,
+            "clv_unmeasured_reason": "closing consensus missing normalized price",
+        }
+    entry_price = float(order["entry_price_cents"])
+    action = str(order.get("action") or "buy").lower()
+    sign = -1.0 if action == "sell" else 1.0
+    midpoint_clv = round(sign * (closing_cents - entry_price), 4)
+    executable = _price_cents(consensus.get("executable_cents"))
+    fee_load = _fee_per_contract(order)
+    if executable is None:
+        executable = closing_cents
+    executable_clv = round(sign * (executable - entry_price) - fee_load, 4)
+    return {
+        "closing_consensus_prob": consensus.get("prob"),
+        "closing_consensus_cents": closing_cents,
+        "closing_kalshi_mid_cents": _price_cents(consensus.get("kalshi_mid_cents")),
+        "closing_executable_cents": executable,
+        "clv_midpoint_cents": midpoint_clv,
+        "clv_cents": executable_clv,
+        "beat_closing_consensus": executable_clv > 0,
+        "clv_unmeasured_reason": None,
+    }
+
+
 def settlement_record(
     order: dict[str, Any],
     market: dict[str, Any],
@@ -402,16 +497,7 @@ def settlement_record(
     if unit_size_dollars and unit_size_dollars > 0:
         pnl_units = round((pnl_cents / 100.0) / unit_size_dollars, 6)
 
-    closing_prob = consensus.get("prob") if consensus.get("available") else None
-    closing_cents = consensus.get("price_cents") if consensus.get("available") else None
-    clv_cents = None
-    beat_close = None
-    if closing_cents is not None:
-        if str(order.get("action") or "buy").lower() == "sell":
-            clv_cents = round(entry_price - float(closing_cents), 4)
-        else:
-            clv_cents = round(float(closing_cents) - entry_price, 4)
-        beat_close = clv_cents > 0
+    clv = clv_metrics(order, consensus)
 
     model_prob = order.get("entry_model_prob")
     brier_entry = None
@@ -446,10 +532,14 @@ def settlement_record(
         "pnl_units": pnl_units,
         "entry_model_prob": model_prob,
         "entry_market_prob": order.get("entry_market_prob"),
-        "closing_consensus_prob": closing_prob,
-        "closing_consensus_cents": closing_cents,
-        "clv_cents": clv_cents,
-        "beat_closing_consensus": beat_close,
+        "closing_consensus_prob": clv["closing_consensus_prob"],
+        "closing_consensus_cents": clv["closing_consensus_cents"],
+        "closing_kalshi_mid_cents": clv["closing_kalshi_mid_cents"],
+        "closing_executable_cents": clv["closing_executable_cents"],
+        "clv_midpoint_cents": clv["clv_midpoint_cents"],
+        "clv_cents": clv["clv_cents"],
+        "beat_closing_consensus": clv["beat_closing_consensus"],
+        "clv_unmeasured_reason": clv["clv_unmeasured_reason"],
         "brier_entry_model": brier_entry,
         "market": market,
         "closing_consensus": consensus,

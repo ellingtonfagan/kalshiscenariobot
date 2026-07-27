@@ -87,6 +87,8 @@ class Settings:
     orderbook_depth: int | None
     book_watch_iterations: int
     book_watch_interval_seconds: float
+    closing_snapshot_window_minutes: int
+    concentration_max_winner_share: float
     kill_switch_path: Path
     ui_host: str
     ui_port: int
@@ -247,6 +249,8 @@ def load_settings(game_id: str | None = None) -> Settings:
         ),
         book_watch_iterations=int(os.environ.get("NBABOT_BOOK_WATCH_ITERATIONS", "1")),
         book_watch_interval_seconds=float(os.environ.get("NBABOT_BOOK_WATCH_INTERVAL_SECONDS", "0")),
+        closing_snapshot_window_minutes=int(os.environ.get("NBABOT_CLOSING_SNAPSHOT_WINDOW_MINUTES", "240")),
+        concentration_max_winner_share=float(os.environ.get("NBABOT_CONCENTRATION_MAX_WINNER_SHARE", "0.50")),
         kill_switch_path=kill_switch_path,
         ui_host=os.environ.get("NBABOT_UI_HOST", "127.0.0.1"),
         ui_port=int(os.environ.get("NBABOT_UI_PORT", "8765")),

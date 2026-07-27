@@ -6,6 +6,7 @@ from . import (  # noqa: F401
     baseline,
     book_watch,
     candidate_ranker,
+    closing_snapshot,
     daily_cycle,
     demo_execute,
     discover_markets,
@@ -34,6 +35,7 @@ from . import (  # noqa: F401
     status,
     telegram_test,
     ui,
+    validation_report,
 )
 
 PHASES = {
@@ -42,6 +44,7 @@ PHASES = {
     "baseline": baseline.run,
     "book-watch": book_watch.run,
     "candidate-ranker": candidate_ranker.run,
+    "closing-snapshot": closing_snapshot.run,
     "daily-cycle": daily_cycle.run,
     "demo-execute": demo_execute.run,
     "discover-markets": discover_markets.run,
@@ -71,4 +74,5 @@ PHASES = {
     "status": status.run,
     "telegram-test": telegram_test.run,
     "ui": ui.run,
+    "validation-report": validation_report.run,
 }

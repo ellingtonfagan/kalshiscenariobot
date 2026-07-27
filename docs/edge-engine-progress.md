@@ -1480,6 +1480,67 @@ were changed, and no scheduler or cron work was added.
 
 ---
 
+## Round 22 - 2026-07-27 - Closing snapshots and honest validation reporting
+
+### What changed in code
+
+- Added a persistent `closing_snapshots` table and `closing-snapshot` phase. The
+  pass scans open unsettled exposure, checks whether each market is inside the
+  configurable close window, and stores the current candidate-ranker consensus
+  probability plus Kalshi midpoint/executable prices keyed by ticker.
+- Changed settlement audit to prefer stored closing snapshots for CLV, with a
+  last-resort fallback to a legitimate pre-close candidate-ranker artifact. Rows
+  with no recoverable close snapshot remain CLV-unmeasured instead of being
+  counted as CLV misses.
+- Added fee-adjusted executable CLV while preserving midpoint CLV diagnostics:
+  `clv_cents` is now the fee-adjusted executable metric, and
+  `clv_midpoint_cents`, `closing_kalshi_mid_cents`, and
+  `closing_executable_cents` are persisted for auditability.
+- Added `validation-report` with per-market-family and per-signal-source
+  performance, CLV measured counts, CLV beat rates, Brier-vs-baseline gaps,
+  explicit distance to live thresholds, and concentration diagnostics.
+- Added concentration visibility to status, scheduled demo-cycle reporting, and
+  the local dashboard. A track record carried by one winner is flagged when that
+  winner exceeds `NBABOT_CONCENTRATION_MAX_WINNER_SHARE` (default `0.50`).
+- Kept live gates unchanged. This round made CLV measurable going forward; it did
+  not lower validation thresholds, live env gates, qual/QAQ live hard blocks, or
+  edge/plausibility gates.
+
+### Tests
+
+- Full suite: `.venv/bin/pytest -q` -> `152 passed in 2.09s`.
+- Added tests for stored closing snapshots feeding settlement CLV on yes and no
+  sides, fee-adjusted executable CLV differing from midpoint CLV, unmeasured CLV
+  not validating a family, and concentration diagnostics firing only when one
+  winner dominates.
+- Added missing lightweight provider fixtures required by existing parser tests.
+- Existing guardrail and live-gate tests remained enabled and passing.
+
+### Real behavior check
+
+- Real SQLite before backfill: `27` settlement records, `27` missing
+  `closing_consensus_prob`, `27` missing `clv_cents`, and `0` stored
+  `closing_snapshots`.
+- Real `settlement-audit` backfill checked all `27` missing-CLV settlements and
+  recovered `0`. All `27` remain honestly unmeasurable because no stored closing
+  snapshots existed and no pre-close candidate-ranker artifact could recover the
+  close line.
+- Real measurable CLV beat rate remains unmeasured: `0` CLV-measured rows,
+  `0` beats, `avg_clv=None`.
+- Real validation report: `27` settled across `9` groups. Overall P&L is
+  `$43.23`; largest winner is `KXMLBGAME-26JUL101915BOSNYM-BOS` at `$47.60`;
+  P&L excluding that winner is `-$4.37`; largest-winner share is `110.1%`, so
+  the concentration flag is on.
+- Real scheduled demo cycle ran with `NBABOT_EXECUTION_MODE=demo` and
+  `NBABOT_DELIVER_TO=stdout`: `200` candidates, `2` edge passes, `2`
+  trade-eligible rows, `0` demo orders placed, `closing_snapshot checked=0
+  recorded=0 skipped=0`, and `hard_error=none`. Demo execution was blocked by
+  existing exposure gating (`game exposure 6.680 units <= max 5.000`).
+- No live execution env vars were set to live values and no live orders were
+  placed.
+
+---
+
 ## Round 21 - 2026-07-09 - Demo late-fill reconciliation and bankroll sizing
 
 ### What changed in code

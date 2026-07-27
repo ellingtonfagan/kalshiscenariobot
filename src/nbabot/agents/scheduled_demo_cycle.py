@@ -177,6 +177,9 @@ def _format_report(payload: dict[str, Any]) -> str:
     hard_error = payload.get("hard_error") or "none"
     blocked = payload.get("blocked_reason") or "none"
     settlement = payload.get("settlement") or {}
+    closing = payload.get("closing_snapshot") or {}
+    validation = payload.get("validation_report") or {}
+    concentration = validation.get("overall_concentration") or {}
     reconciliation = settlement.get("reconciliation") or {}
     postmortem = payload.get("qual_postmortem") or {}
     news_counts = payload.get("news_counts") or {}
@@ -212,6 +215,17 @@ def _format_report(payload: dict[str, Any]) -> str:
             f"errors={settlement.get('error_count', 0)}"
         ),
         (
+            f"closing_snapshot checked={closing.get('checked_count', 0)} "
+            f"recorded={closing.get('recorded_count', 0)} "
+            f"skipped={closing.get('skipped_count', 0)}"
+        ),
+        (
+            f"validation settled={validation.get('settled_count', 0)} "
+            f"groups={validation.get('group_count', 0)} "
+            f"pnl_ex_largest=${float(concentration.get('pnl_ex_largest_winner_cents') or 0) / 100:.2f} "
+            f"concentrated={bool(concentration.get('concentration_flag'))}"
+        ),
+        (
             f"reconcile checked={reconciliation.get('checked_count', 0)} "
             f"fills={reconciliation.get('fills_inserted_count', 0)} "
             f"canceled={reconciliation.get('canceled_count', 0)}"
@@ -231,13 +245,14 @@ def run(ctx: Context | None = None) -> dict:
     report_to = ctx.settings.deliver_to
     ctx.settings.execution_mode = "demo"
 
-    from . import daily_cycle, qual_postmortem, settlement_audit, status
+    from . import daily_cycle, qual_postmortem, settlement_audit, status, validation_report
 
     hard_errors: list[str] = []
     cycle: dict[str, Any] = {}
     settlement: dict[str, Any] = {}
     postmortem: dict[str, Any] = {}
     final_status: dict[str, Any] = {}
+    validation: dict[str, Any] = {}
 
     try:
         cycle = _run_muted(ctx, daily_cycle.run)
@@ -259,12 +274,18 @@ def run(ctx: Context | None = None) -> dict:
     except Exception as exc:
         hard_errors.append(f"status: {exc}")
 
+    try:
+        validation = _run_muted(ctx, validation_report.run)
+    except Exception as exc:
+        hard_errors.append(f"validation-report: {exc}")
+
     ranker = _step_result(cycle, "candidate-ranker")
     research = _step_result(cycle, "research-agent")
     orders_placed, tickers, blocked_reason = _demo_order_summary(cycle)
     qual_summary = _qual_summary(cycle)
     hard_errors = _hard_errors(cycle, hard_errors)
     summary = settlement.get("summary") if isinstance(settlement.get("summary"), dict) else {}
+    closing_step = _step_result(cycle, "closing-snapshot")
     exit_code = 1 if hard_errors else 0
 
     payload = {
@@ -296,6 +317,13 @@ def run(ctx: Context | None = None) -> dict:
             "settled_count": _count(summary, "settled_count"),
             "reconciliation": settlement.get("reconciliation") if isinstance(settlement, dict) else {},
         },
+        "closing_snapshot": {
+            "checked_count": _count(closing_step, "checked_count"),
+            "recorded_count": _count(closing_step, "recorded_count"),
+            "skipped_count": _count(closing_step, "skipped_count"),
+            "error_count": _count(closing_step, "error_count"),
+        },
+        "validation_report": validation,
         "qual_postmortem": {
             "checked_count": _count(postmortem, "checked_count"),
             "completed_count": _count(postmortem, "completed_count"),

@@ -53,6 +53,7 @@ def _load_artifacts(ctx: Context) -> dict[str, Any]:
         "candidate_ranker.json",
         "research_bundle.json",
         "performance_learner.json",
+        "validation_report.json",
         "slate_candidates.json",
         "source_check.json",
         "settlement_audit.json",
@@ -162,6 +163,42 @@ def _validated_families(learning: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         if row.get("validated") or row.get("market_type_verdict") == "validated":
             rows.append({"family": family, **row})
+    return rows
+
+
+def _validation_report(ctx: Context, artifacts: dict[str, Any]) -> dict[str, Any]:
+    direct = artifacts.get("validation_report") or {}
+    if isinstance(direct, dict) and direct.get("groups") is not None:
+        return direct
+    try:
+        from .validation_report import report as build_validation_report
+
+        return build_validation_report(
+            ResearchStore(ctx.settings.research_db_path).list_settlement_records(),
+            default_sport=ctx.settings.sport,
+            concentration_max_winner_share=float(
+                getattr(ctx.settings, "concentration_max_winner_share", 0.50)
+            ),
+        )
+    except Exception:
+        return {"settled_count": 0, "groups": [], "overall_concentration": {}}
+
+
+def _validation_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for row in report.get("groups") or []:
+        clv_rate = row.get("clv_beat_rate")
+        rows.append({
+            "market_family": row.get("market_family"),
+            "signal_source": row.get("signal_source"),
+            "settled": row.get("settled_count", 0),
+            "wins": row.get("win_count", 0),
+            "pnl": f"${float(row.get('total_pnl_cents') or 0) / 100:.2f}",
+            "clv_measured": row.get("clv_measured_count", 0),
+            "clv_beat_rate": "unmeasured" if clv_rate is None else f"{float(clv_rate) * 100:.1f}%",
+            "avg_clv": _fmt_cents(row.get("avg_clv_cents")),
+            "distance": "; ".join(str(item) for item in (row.get("remaining_distance") or [])),
+        })
     return rows
 
 
@@ -427,6 +464,7 @@ def render_dashboard(ctx: Context) -> str:
     artifacts = _load_artifacts(ctx)
     ranker = artifacts.get("candidate_ranker") or {}
     learning = _performance_learning(artifacts)
+    validation = _validation_report(ctx, artifacts)
     validated = _validated_families(learning)
     settlement_rows, settlement_count = _settlement_rows(ctx, artifacts)
     signal_engine_rows = _signal_engine_rows(ctx)
@@ -445,6 +483,7 @@ def render_dashboard(ctx: Context) -> str:
     sport_label = ", ".join(str(s) for s in sports) if sports else getattr(ctx.settings, "sport", "")
     generated_at = ranker.get("generated_at") or artifacts.get("slate_candidates", {}).get("generated_at") or "n/a"
     provider_rows = _provider_status_rows(artifacts)
+    concentration = validation.get("overall_concentration") or {}
 
     metrics_html = "".join([
         _metric("Candidates Priced", f"{priced_count:,} / {total_candidates:,}"),
@@ -452,6 +491,8 @@ def render_dashboard(ctx: Context) -> str:
         _metric("Flagged Suspect", f"{suspect_count:,}", "plausible-edge guard"),
         _metric("Validated Families", f"{len(validated):,}"),
         _metric("Settled Trades", f"{settlement_count:,}"),
+        _metric("CLV Measured", f"{sum(int(row.get('clv_measured_count') or 0) for row in validation.get('groups') or []):,}"),
+        _metric("Concentration", "flag" if concentration.get("concentration_flag") else "clear"),
         _metric("Qual Postmortems", f"{int(qual_learning.get('postmortems_completed') or 0):,}"),
         _metric("Qual Lessons", f"{int(qual_learning.get('lessons_stored') or 0):,}"),
     ])
@@ -532,6 +573,7 @@ def render_dashboard(ctx: Context) -> str:
     <div class="metrics">{metrics_html}</div>
     <section class="block"><h2>Edge Candidates</h2>{_render_edge_table(candidates)}</section>
     <section class="block"><h2>Signal Engines</h2>{_table(signal_engine_rows, ["engine","trades_placed","settled","brier","clv_beat_rate","clv_available"])}</section>
+    <section class="block"><h2>Validation</h2>{_table(_validation_rows(validation), ["market_family","signal_source","settled","wins","pnl","clv_measured","clv_beat_rate","avg_clv","distance"])}</section>
     <section class="block"><h2>Fill Rate</h2>{_table(fill_rate_rows, ["signal_source","liquidity_role","placed","filled","fill_rate","canceled_unfilled"])}</section>
     <section class="block"><h2>Qual Learning</h2>{_table(_qual_calibration_rows(qual_learning), ["bucket","count","correct","correct_rate","observed_rate","brier"])}</section>
     <section class="block"><h2>Data Source Health</h2>{_table(provider_rows, ["provider","configured","state","rows","remaining_credits","detail"])}</section>
