@@ -237,6 +237,10 @@ class KalshiClient:
                 out[p.get("ticker", "")] = pos
         return out
 
+    def orders(self, **params: object) -> dict:
+        clean = {k: v for k, v in params.items() if v not in (None, "")}
+        return self._get("/trade-api/v2/portfolio/orders", clean or None)
+
     # ── markets ──────────────────────────────────────────────────────────────────
     def list_markets(self, series: str | None = None, game_tag: str | None = None,
                      status: str = "open", max_pages: int = 6) -> list[dict]:
@@ -327,6 +331,10 @@ class KalshiClient:
             if pos:
                 out[p.get("ticker", "")] = pos
         return out
+
+    def demo_orders(self, demo_api_base: str, **params: object) -> dict:
+        clean = {k: v for k, v in params.items() if v not in (None, "")}
+        return self.demo_get_to_base(demo_api_base, "/portfolio/orders", clean or None)
 
     def demo_order(self, demo_api_base: str, order_id: str) -> dict:
         return self.demo_get_to_base(demo_api_base, f"/portfolio/orders/{order_id}")

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from .. import guardrails
 from ..alerts import deliver
+from ..cycle_health import record_cycle_finished, record_cycle_started, record_delivery_result
 from .base import Context, load_context
 
 
@@ -242,6 +243,7 @@ def _format_report(payload: dict[str, Any]) -> str:
 
 def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
+    started_at = record_cycle_started(ctx)
     report_to = ctx.settings.deliver_to
     ctx.settings.execution_mode = "demo"
 
@@ -340,5 +342,12 @@ def run(ctx: Context | None = None) -> dict:
         guardrails.with_footer(_format_report(payload)),
         report_to,
     )
+    payload["delivery_failures"] = record_delivery_result(
+        ctx.settings.data_dir,
+        ok=bool(payload["report_delivery_ok"]),
+        target=report_to,
+        phase="scheduled-demo-cycle",
+    )
     ctx.write_json("scheduled_demo_cycle.json", payload)
+    record_cycle_finished(ctx, started_at=started_at, payload=payload)
     return payload

@@ -7,6 +7,7 @@ from typing import Any
 
 from .. import guardrails
 from ..alerts import deliver
+from ..cycle_health import read_delivery_failures, read_health_status
 from ..research import ResearchStore
 from ..validation_report import report as build_validation_report
 from .base import Context, load_context
@@ -26,6 +27,22 @@ def _artifact_summary(ctx: Context, suffix: str) -> dict[str, Any]:
         "size_bytes": stat.st_size,
         "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
     }
+
+
+def _read_artifact(ctx: Context, suffix: str) -> dict[str, Any]:
+    reader = getattr(ctx, "read_json", None)
+    if callable(reader):
+        return reader(suffix) or {}
+    path = ctx.settings.data_path(suffix)
+    if not path.exists():
+        return {}
+    try:
+        import json
+
+        loaded = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _live_ready(ctx: Context) -> tuple[bool, list[str]]:
@@ -76,8 +93,14 @@ def build_status(ctx: Context) -> dict[str, Any]:
             "reconcile.json",
             "backtest.json",
             "historical_backtest.json",
+            "exposure_reconciliation.json",
+            "health_check.json",
         )
     }
+    health = read_health_status(ctx.settings.data_dir)
+    exposure_reconciliation = _read_artifact(ctx, "exposure_reconciliation.json")
+    if isinstance(health, dict) and isinstance(health.get("exposure_reconciliation"), dict):
+        exposure_reconciliation = health["exposure_reconciliation"]
     latest_risk = store.latest_rows("risk_snapshots", 1)
     latest_live = store.latest_rows("live_orders", 1)
     latest_audit = store.latest_rows("audit_events", 3)
@@ -109,6 +132,9 @@ def build_status(ctx: Context) -> dict[str, Any]:
         "latest_risk_snapshot": latest_risk[0] if latest_risk else None,
         "latest_live_order": latest_live[0] if latest_live else None,
         "latest_audit_events": latest_audit,
+        "health": health,
+        "delivery_failures": read_delivery_failures(ctx.settings.data_dir),
+        "exposure_reconciliation": exposure_reconciliation,
         "artifacts": artifacts,
     }
 
@@ -135,8 +161,28 @@ def _format_status(status: dict[str, Any]) -> str:
     daily_pnl = risk.get("daily_pnl_units")
     exposure_label = f"{exposure}u" if exposure is not None else "n/a"
     daily_pnl_label = f"{daily_pnl}u" if daily_pnl is not None else "n/a"
+    health = status.get("health") or {}
+    health_reasons = health.get("reasons") or []
+    health_line = "ok" if health.get("ok") else "ALERT " + "; ".join(str(reason) for reason in health_reasons[:3])
+    delivery_failures = status.get("delivery_failures") or {}
+    if delivery_failures.get("failing"):
+        delivery_line = (
+            f"alerts failing={delivery_failures.get('count', 0)} "
+            f"since={delivery_failures.get('first_failed_at', 'n/a')}"
+        )
+    else:
+        delivery_line = "alerts failing=0"
+    exposure_reconciliation = status.get("exposure_reconciliation") or {}
+    exposure_warnings = exposure_reconciliation.get("warnings") or []
+    exposure_line = (
+        "ok"
+        if not exposure_warnings else
+        "WARNING " + "; ".join(str(reason) for reason in exposure_warnings[:2])
+    )
     return "\n".join([
         f"[status] {status['game_id']} sport={status['sport']}",
+        f"  health {health_line}",
+        f"  {delivery_line}",
         f"  mode={status['execution_mode']} dry_run={status['dry_run']} live={live_line}",
         f"  orders paper={orders['paper']} demo={orders['demo']} live={orders['live']}",
         (
@@ -169,6 +215,7 @@ def _format_status(status: dict[str, Any]) -> str:
             f"daily_pnl={daily_pnl_label} "
             f"open_positions={risk.get('open_positions', 'n/a')}"
         ),
+        f"  exposure_reconciliation {exposure_line}",
         f"  kill_switch={'ON' if status['kill_switch_on'] else 'clear'}",
     ])
 

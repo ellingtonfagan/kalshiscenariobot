@@ -31,9 +31,11 @@ from nbabot import (  # noqa: E402
     calibration,
     candidate_ranker as candidate_ranker_core,
     confluence,
+    cycle_health,
     cli,
     edge_engine,
     execution,
+    exposure,
     fees,
     guardrails,
     market_identity,
@@ -69,6 +71,7 @@ from nbabot.agents import (  # noqa: E402
     daily_cycle,
     demo_execute,
     discover_markets,
+    health_check,
     historical_backtest,
     market_matcher,
     live_execute,
@@ -2899,6 +2902,108 @@ def test_daily_portfolio_exposure_blocks_cross_game_order(tmp_path):
     assert receipt.status == "rejected"
     assert not third_decision.approved
     assert any("daily portfolio exposure 5.500" in reason for reason in third_decision.reasons)
+
+
+def test_terminal_orders_are_excluded_from_open_exposure(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    store = research.ResearchStore(settings.research_db_path)
+    audit = __import__("nbabot.audit", fromlist=["AuditTrail"]).AuditTrail(tmp_path, store)
+    live = _intent(stake_units=2.0, ticker="KXLIVE")
+    canceled = _intent(stake_units=3.0, ticker="KXCANCEL", scenario_id="S2")
+
+    assert execution.execute_paper(live, risk.evaluate_trade_intent(live, settings), settings, store, audit).status == "filled"
+    assert execution.execute_paper(canceled, risk.evaluate_trade_intent(canceled, settings), settings, store, audit).status == "filled"
+    store.record_order_lifecycle(
+        client_order_id=execution.client_order_id(canceled, "paper"),
+        game_id=settings.game_id,
+        mode="paper",
+        status="canceled",
+        terminal=True,
+        filled_count=0,
+    )
+
+    assert store.game_order_exposure_units("paper_orders", settings.game_id) == pytest.approx(2.0)
+    assert store.daily_order_exposure_units("paper_orders") == pytest.approx(2.0)
+
+
+def test_exchange_divergence_prefers_exchange_exposure(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    settings.unit_usd = 10.0
+    store = research.ResearchStore(settings.research_db_path)
+    phantom = _intent(stake_units=6.0, ticker="KXPHANTOM")
+    request = execution.build_order_request(phantom, "demo")
+    receipt = execution.OrderReceipt(
+        client_order_id=request.client_order_id,
+        mode="demo",
+        status="submitted",
+        response={"order_id": "phantom"},
+    )
+    assert store.record_order(
+        "demo_orders",
+        settings.game_id,
+        phantom,
+        risk.RiskDecision(True),
+        request,
+        receipt,
+    )
+
+    class DummyKalshi:
+        def demo_positions(self, base):
+            return {}
+
+        def demo_orders(self, base, **params):
+            return {"orders": []}
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def read_json(self, suffix):
+            return {}
+
+        def write_json(self, suffix, payload):
+            self.settings.data_path(suffix).write_text(json.dumps(payload, default=str))
+
+    payload = exposure.reconcile_open_exposure(DummyContext(), store, "demo_orders", game_id=settings.game_id)
+
+    assert payload["diverged"] is True
+    assert payload["local_portfolio_exposure_units"] == pytest.approx(6.0)
+    assert payload["exchange_positions"] == {}
+    assert payload["authoritative_portfolio_exposure_units"] == pytest.approx(0.0)
+    assert payload["warnings"]
+
+
+def test_genuine_exchange_exposure_still_blocks_cap(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    settings.unit_usd = 1.0
+    store = research.ResearchStore(settings.research_db_path)
+
+    class DummyKalshi:
+        def demo_positions(self, base):
+            return {"KXREAL": 6}
+
+        def demo_orders(self, base, **params):
+            return {"orders": []}
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+    payload = exposure.reconcile_open_exposure(DummyContext(), store, "demo_orders", game_id=settings.game_id)
+    intent = _intent(stake_units=0.5)
+    decision = risk.evaluate_trade_intent(
+        intent,
+        settings,
+        risk.RiskContext(game_exposure_units=payload["authoritative_game_exposure_units"]),
+    )
+
+    assert payload["authoritative_game_exposure_units"] == pytest.approx(6.0)
+    assert not decision.approved
+    assert any("game exposure 6.500" in reason for reason in decision.reasons)
 
 
 def test_paper_broad_slate_bootstrap_records_unvalidated_family_with_zero_validated_families(
@@ -6103,6 +6208,174 @@ def test_scheduled_demo_cycle_soft_reports_missing_demo_credentials(tmp_path, mo
     assert "ran, could not trade: set KALSHI_DEMO_API_KEY" in messages[0][0]
 
 
+def test_health_check_fires_on_stale_cycle_and_writes_verdict(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    old = (datetime.now(timezone.utc) - timedelta(hours=9)).isoformat()
+    cycle_health.cycle_ledger_path(tmp_path).write_text(json.dumps({
+        "event": "finished",
+        "phase": "scheduled-demo-cycle",
+        "game_id": settings.game_id,
+        "started_at": old,
+        "finished_at": old,
+        "exit_code": 0,
+        "hard_error": None,
+    }) + "\n")
+
+    class DummyKalshi:
+        def positions(self):
+            return {}
+
+        def orders(self, **params):
+            return {"orders": []}
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def write_json(self, suffix, payload):
+            self.settings.data_path(suffix).write_text(json.dumps(payload, default=str))
+
+    messages = []
+    monkeypatch.setattr(health_check, "deliver", lambda text, to="stdout": messages.append((text, to)) or True)
+
+    result = health_check.run(DummyContext())
+
+    assert result["exit_code"] == 1
+    assert any("stale" in reason for reason in result["reasons"])
+    assert "ALERT [health-check]" in messages[0][0]
+    assert cycle_health.health_status_path(tmp_path).exists()
+
+
+def test_health_check_fires_on_consecutive_hard_errors(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {"event": "finished", "phase": "scheduled-demo-cycle", "game_id": settings.game_id, "started_at": now, "finished_at": now, "exit_code": 1, "hard_error": "cli failed"},
+        {"event": "finished", "phase": "scheduled-demo-cycle", "game_id": settings.game_id, "started_at": now, "finished_at": now, "exit_code": 1, "hard_error": "cli failed again"},
+    ]
+    cycle_health.cycle_ledger_path(tmp_path).write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+    class DummyKalshi:
+        def positions(self):
+            return {}
+
+        def orders(self, **params):
+            return {"orders": []}
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+    monkeypatch.setattr(health_check, "deliver", lambda *args, **kwargs: True)
+
+    result = cycle_health.build_health_verdict(DummyContext(), max_age_hours=8, hard_error_limit=2)
+
+    assert any("last 2 scheduled cycles" in reason for reason in result["reasons"])
+
+
+def test_health_check_registry_self_test_catches_missing_phase(monkeypatch):
+    monkeypatch.delitem(PHASES, "status", raising=False)
+
+    ok, reasons = cycle_health.registry_self_test()
+
+    assert ok is False
+    assert "missing expected phase: status" in reasons
+
+
+def test_health_check_healthy_state_does_not_alert(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    now = datetime.now(timezone.utc).isoformat()
+    cycle_health.cycle_ledger_path(tmp_path).write_text(json.dumps({
+        "event": "finished",
+        "phase": "scheduled-demo-cycle",
+        "game_id": settings.game_id,
+        "started_at": now,
+        "finished_at": now,
+        "exit_code": 0,
+        "hard_error": None,
+    }) + "\n")
+
+    class DummyKalshi:
+        def positions(self):
+            return {}
+
+        def orders(self, **params):
+            return {"orders": []}
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def write_json(self, suffix, payload):
+            self.settings.data_path(suffix).write_text(json.dumps(payload, default=str))
+
+    monkeypatch.setattr(health_check, "deliver", lambda *args, **kwargs: True)
+
+    result = health_check.run(DummyContext())
+
+    assert result["ok"] is True
+    assert result["alert"] is False
+    assert result["exit_code"] == 0
+
+
+def test_health_check_records_delivery_failure_and_status_surfaces_it(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    now = datetime.now(timezone.utc).isoformat()
+    cycle_health.cycle_ledger_path(tmp_path).write_text(json.dumps({
+        "event": "finished",
+        "phase": "scheduled-demo-cycle",
+        "game_id": settings.game_id,
+        "started_at": now,
+        "finished_at": now,
+        "exit_code": 0,
+        "hard_error": None,
+    }) + "\n")
+
+    class DummyKalshi:
+        def positions(self):
+            return {}
+
+        def orders(self, **params):
+            return {"orders": []}
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def write_json(self, suffix, payload):
+            self.settings.data_path(suffix).write_text(json.dumps(payload, default=str))
+
+    monkeypatch.setattr(health_check, "deliver", lambda *args, **kwargs: False)
+    result = health_check.run(DummyContext())
+
+    assert result["delivery_failures"]["count"] == 1
+
+    rendered = status._format_status({
+        "game_id": settings.game_id,
+        "sport": settings.sport,
+        "live_ready": False,
+        "live_blockers": ["NBABOT_EXECUTION_MODE=live"],
+        "orders": {"paper": 0, "demo": 0, "live": 0},
+        "signal_engines": {},
+        "qual_learning": {},
+        "validation_report": {},
+        "fill_rate": {},
+        "latest_risk_snapshot": {},
+        "health": cycle_health.read_health_status(tmp_path),
+        "delivery_failures": cycle_health.read_delivery_failures(tmp_path),
+        "exposure_reconciliation": {},
+        "execution_mode": settings.execution_mode,
+        "dry_run": settings.dry_run,
+        "kill_switch_on": False,
+    })
+
+    assert "alerts failing=1" in rendered
+
+
 def test_cli_returns_phase_exit_code(monkeypatch):
     monkeypatch.setitem(cli.PHASES, "fake-exit", lambda ctx: {"exit_code": 7})
     monkeypatch.setattr(cli, "load_context", lambda game_id=None: object())
@@ -6345,3 +6618,46 @@ def test_june_25_edge_analysis_uses_independent_prices_and_fees():
     assert usa_no["classification"] == "watch_below_gate"
     assert usa_no["gross_edge"] > 0
     assert usa_no["fee_adjusted_edge"] > 0
+
+
+def test_exchange_exposure_counts_resting_orders_with_fp_fields():
+    """Kalshi returns *_fp fixed-point counts; missing them made every resting
+    order contribute zero exposure, letting the cap be stacked past silently."""
+    from nbabot import exposure
+
+    state = {
+        "positions": {},
+        "orders": [
+            {
+                "ticker": "KXMLBGAME-26JUL271910ATLNYM-ATL",
+                "status": "resting",
+                "side": "yes",
+                "yes_price_dollars": "0.4900",
+                "initial_count_fp": "58.00",
+                "remaining_count_fp": "58.00",
+                "fill_count_fp": "0.00",
+            }
+        ],
+    }
+    result = exposure.exchange_exposure_units(state, unit_usd=15.70)
+
+    # 58 contracts * $0.49 = $28.42 -> ~1.81 units at a $15.70 unit
+    assert result["open_order_exposure_units"] == pytest.approx(1.81, abs=0.01)
+    assert result["total_exposure_units"] == pytest.approx(1.81, abs=0.01)
+    assert result["open_orders"][0]["contracts"] == pytest.approx(58.0)
+
+
+def test_exchange_exposure_ignores_terminal_orders():
+    from nbabot import exposure
+
+    state = {
+        "positions": {},
+        "orders": [
+            {"ticker": "KXA", "status": "executed", "side": "yes",
+             "yes_price_dollars": "0.5000", "remaining_count_fp": "10.00"},
+            {"ticker": "KXB", "status": "canceled", "side": "yes",
+             "yes_price_dollars": "0.5000", "remaining_count_fp": "10.00"},
+        ],
+    }
+    result = exposure.exchange_exposure_units(state, unit_usd=15.70)
+    assert result["total_exposure_units"] == pytest.approx(0.0)

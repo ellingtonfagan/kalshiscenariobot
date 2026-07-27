@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from ..alerts import deliver
+from ..exposure import reconcile_open_exposure, write_reconciliation
 from ..research import ResearchStore, utc_now
 from .base import Context, load_context
 
@@ -49,14 +50,19 @@ def run(ctx: Context | None = None) -> dict:
         "positions": positions,
         "open_positions": len(positions),
     }
+    table = "demo_orders" if mode == "demo" else "live_orders"
     exposure_units = 0.0
     portfolio_exposure_units = 0.0
+    exposure_reconciliation = {}
     try:
-        exposure_units = store.game_order_exposure_units("live_orders", ctx.settings.game_id)
-        portfolio_exposure_units = store.daily_order_exposure_units("live_orders")
+        exposure_reconciliation = reconcile_open_exposure(ctx, store, table, game_id=ctx.settings.game_id)
+        write_reconciliation(ctx, exposure_reconciliation)
+        exposure_units = float(exposure_reconciliation["authoritative_game_exposure_units"])
+        portfolio_exposure_units = float(exposure_reconciliation["authoritative_portfolio_exposure_units"])
     except Exception:
         exposure_units = 0.0
         portfolio_exposure_units = 0.0
+    payload["exposure_reconciliation"] = exposure_reconciliation
     store.record_risk_snapshot(ctx.settings.game_id, {
         "game_exposure_units": exposure_units,
         "portfolio_exposure_units": portfolio_exposure_units,
@@ -64,6 +70,7 @@ def run(ctx: Context | None = None) -> dict:
         "open_positions": len(positions),
         "circuit_breaker_on": False,
         "balance_cents": balance_cents,
+        "exposure_reconciliation": exposure_reconciliation,
     })
     ctx.write_json("portfolio_sync.json", payload)
     deliver(

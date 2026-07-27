@@ -1480,6 +1480,64 @@ were changed, and no scheduler or cron work was added.
 
 ---
 
+## Round 23 - 2026-07-27 - Exposure reconciliation and dead-man health checks
+
+### What changed in code
+
+- Changed open-exposure accounting so `game_order_exposure_units()` and
+  `daily_order_exposure_units()` exclude orders with terminal lifecycle records
+  or settlement records instead of summing every historical order forever.
+- Added exchange reconciliation for demo/live exposure. The bot now compares
+  local open exposure against exchange positions and open orders, writes
+  `exposure_reconciliation.json`, and prefers the exchange number when the two
+  diverge beyond tolerance.
+- Added a scheduled-cycle ledger in `data/scheduled_cycle_runs.jsonl` with
+  started/finished timestamps, exit status, candidates, edges, orders placed,
+  and hard-error text.
+- Added `health-check`, a registry self-test, durable `data/health_status.json`,
+  stale-cycle and consecutive-hard-error checks, exchange reachability/divergence
+  checks, and local delivery-failure accounting in
+  `data/alert_delivery_failures.json`.
+- Updated `status` to show health verdicts, exposure reconciliation warnings,
+  and alert delivery failures prominently.
+
+### Tests
+
+- Focused suite:
+  `.venv/bin/pytest tests/test_smoke.py -q -k "exposure or health_check or scheduled_demo_cycle or status_reports_live_blockers or portfolio_sync_records_balance"`
+  -> `14 passed, 146 deselected`.
+- Full smoke suite: `.venv/bin/pytest tests/test_smoke.py -q` ->
+  `160 passed in 2.06s`.
+- Guardrail tests remain in the same suite; live gates, stake caps, edge floors,
+  fuzzy-match rejection, and plausible-edge checks were not weakened.
+
+### Real behavior check
+
+- Real pre-reconcile demo exposure check under `NBABOT_EXECUTION_MODE=demo`:
+  historical demo ledger exposure was `4.870469u`, local open exposure was `0u`,
+  exchange positions were `{}`, exchange open orders were `[]`, and
+  exchange-authoritative exposure was `0u`.
+- Real `order-reconcile` ran in demo mode and exited `0`: checked `8` demo
+  orders, errors `[]`, fills inserted `0`, canceled `0`.
+- Real `health-check` ran in demo mode and exited non-zero when no successful
+  durable cycle record existed. After the scheduled demo cycle completed, it
+  stopped reporting stale/no-success and correctly alerted on the remaining
+  local-vs-exchange exposure divergence.
+- Real scheduled demo cycle ran in demo mode: `200` candidates, `1` edge pass,
+  `1` trade-eligible row, `1` demo order submitted
+  (`KXMLBGAME-26JUL271910ATLNYM-ATL`), `hard_error=none`, `exit_code=0`.
+- Post-cycle demo exchange checksum: balance `1047.2456`, positions `{}`, open
+  orders `[]`. Local open exposure for the submitted order was `1.809189u`, but
+  exchange-authoritative exposure stayed `0u`, with a reconciliation warning
+  recorded and surfaced in health/status.
+- Alert delivery failure was not reproduced in the current environment:
+  `delivery_ok=true`, `alerts failing=0`, including an explicit
+  `NBABOT_DELIVER_TO=telegram` health-check run.
+- No live execution env vars were set to live values and no live orders were
+  placed.
+
+---
+
 ## Round 22 - 2026-07-27 - Closing snapshots and honest validation reporting
 
 ### What changed in code

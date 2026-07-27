@@ -13,6 +13,7 @@ from .qual_learning import normalize_lesson, qual_calibration_stats
 
 ORDER_TABLES = {"paper_orders", "demo_orders", "live_orders"}
 DEFAULT_RISK_TIMEZONE = "America/New_York"
+OPEN_EXPOSURE_STATUSES = {"resting", "open", "pending", "accepted", "created"}
 
 
 def utc_now() -> str:
@@ -1861,19 +1862,7 @@ class ResearchStore:
         if table not in ORDER_TABLES:
             raise ValueError(f"unsupported order table: {table}")
         self.init_schema()
-        with self.connect() as db:
-            rows = db.execute(
-                f"SELECT intent_json FROM {table} WHERE game_id = ?",
-                (game_id,),
-            ).fetchall()
-        exposure = 0.0
-        for row in rows:
-            try:
-                intent = json.loads(row["intent_json"])
-                exposure += float(intent.get("stake_units", 0.0) or 0.0)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                continue
-        return exposure
+        return sum(row["stake_units"] for row in self.open_exposure_rows(table, game_id=game_id))
 
     @staticmethod
     def _order_tables(tables: str | Iterable[str]) -> list[str]:
@@ -1918,33 +1907,110 @@ class ResearchStore:
         broad_slate_only: bool = False,
         signal_source: str | None = None,
     ) -> float:
-        selected = self._order_tables(tables)
         target_day, tz = self._risk_day(calendar_day, timezone_name)
+        return sum(
+            row["stake_units"]
+            for row in self.open_exposure_rows(
+                tables,
+                calendar_day=target_day,
+                timezone_name=timezone_name,
+                broad_slate_only=broad_slate_only,
+                signal_source=signal_source,
+            )
+            if self._created_on_day(row["created_at"], target_day, tz)
+        )
+
+    @staticmethod
+    def _json_obj(raw: str | None) -> dict[str, Any]:
+        try:
+            obj = json.loads(raw or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return obj if isinstance(obj, dict) else {}
+
+    @staticmethod
+    def _stake_units(intent: dict[str, Any]) -> float:
+        try:
+            return float(intent.get("stake_units", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _is_open_exposure_row(lifecycle: dict[str, Any] | None, settled: bool) -> bool:
+        if settled:
+            return False
+        if not lifecycle:
+            return True
+        if int(lifecycle.get("terminal") or 0):
+            return False
+        status = str(lifecycle.get("status") or "").lower()
+        if not status:
+            return True
+        return status in OPEN_EXPOSURE_STATUSES
+
+    def open_exposure_rows(
+        self,
+        tables: str | Iterable[str],
+        *,
+        game_id: str | None = None,
+        calendar_day: str | date | None = None,
+        timezone_name: str = DEFAULT_RISK_TIMEZONE,
+        broad_slate_only: bool = False,
+        signal_source: str | None = None,
+    ) -> list[dict[str, Any]]:
+        selected = self._order_tables(tables)
+        risk_day = self._risk_day(calendar_day, timezone_name) if calendar_day is not None else None
         self.init_schema()
-        exposure = 0.0
+        out: list[dict[str, Any]] = []
         with self.connect() as db:
+            lifecycle = {
+                row["client_order_id"]: dict(row)
+                for row in db.execute("SELECT * FROM order_lifecycle")
+            }
+            settled = {
+                row["client_order_id"]
+                for row in db.execute("SELECT client_order_id FROM settlement_records")
+            }
             for table in selected:
                 rows = db.execute(
-                    f"SELECT created_at, signal_source, intent_json FROM {table}",
-                ).fetchall()
+                    f"""
+                    SELECT client_order_id, game_id, created_at, signal_source,
+                           intent_json, request_json
+                    FROM {table}
+                    {'' if game_id is None else 'WHERE game_id = ?'}
+                    """,
+                    () if game_id is None else (game_id,),
+                )
                 for row in rows:
-                    if not self._created_on_day(row["created_at"], target_day, tz):
+                    if risk_day is not None and not self._created_on_day(row["created_at"], risk_day[0], risk_day[1]):
                         continue
-                    try:
-                        intent = json.loads(row["intent_json"])
-                    except (json.JSONDecodeError, TypeError):
+                    client_order_id = row["client_order_id"]
+                    lc = lifecycle.get(client_order_id)
+                    if not self._is_open_exposure_row(lc, client_order_id in settled):
                         continue
+                    intent = self._json_obj(row["intent_json"])
                     if broad_slate_only and not bool(intent.get("broad_slate")):
                         continue
                     if signal_source is not None and str(
                         intent.get("signal_source") or row["signal_source"] or "consensus"
                     ) != signal_source:
                         continue
-                    try:
-                        exposure += float(intent.get("stake_units", 0.0) or 0.0)
-                    except (TypeError, ValueError):
+                    stake_units = self._stake_units(intent)
+                    if stake_units <= 0:
                         continue
-        return exposure
+                    request = self._json_obj(row["request_json"])
+                    out.append({
+                        "client_order_id": client_order_id,
+                        "table": table,
+                        "game_id": row["game_id"],
+                        "created_at": row["created_at"],
+                        "signal_source": row["signal_source"],
+                        "ticker": str(intent.get("ticker") or request.get("ticker") or ""),
+                        "stake_units": stake_units,
+                        "intent": intent,
+                        "lifecycle": lc,
+                    })
+        return out
 
     def daily_order_count(
         self,

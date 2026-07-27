@@ -9,6 +9,7 @@ from ..alerts import deliver
 from ..audit import AuditTrail
 from ..confluence import VETO_REASON
 from ..execution import TradeIntent, client_order_id, execute_paper
+from ..exposure import reconcile_open_exposure, write_reconciliation
 from ..research import ResearchStore
 from ..risk import (
     RiskContext,
@@ -115,9 +116,24 @@ def sizing_context(ctx: Context) -> dict[str, Any]:
 def execution_limits(ctx: Context, store: ResearchStore, table: str) -> dict[str, float | int]:
     research = ctx.read_json("research_bundle.json") or {}
     learning = research.get("performance_learning") or {}
+    reconciliation = None
+    if table in {"demo_orders", "live_orders"}:
+        reconciliation = reconcile_open_exposure(ctx, store, table, game_id=ctx.settings.game_id)
+        write_reconciliation(ctx, reconciliation)
+    game_exposure = (
+        float(reconciliation["authoritative_game_exposure_units"])
+        if reconciliation is not None else
+        store.game_order_exposure_units(table, ctx.settings.game_id)
+    )
+    portfolio_exposure = (
+        float(reconciliation["authoritative_portfolio_exposure_units"])
+        if reconciliation is not None else
+        store.daily_order_exposure_units(table)
+    )
     return {
-        "game_exposure_units": store.game_order_exposure_units(table, ctx.settings.game_id),
-        "portfolio_exposure_units": store.daily_order_exposure_units(table),
+        "game_exposure_units": game_exposure,
+        "portfolio_exposure_units": portfolio_exposure,
+        "exposure_reconciliation": reconciliation or {},
         "broad_slate_trade_count": store.daily_order_count(table, broad_slate_only=True),
         "broad_slate_daily_trade_limit": broad_slate_daily_trade_limit(learning),
         "paper_demo_broad_slate_trade_count": store.daily_order_count(
