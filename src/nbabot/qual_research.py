@@ -14,9 +14,11 @@ from .performance_learner import market_family
 from .qual_rag import (
     RetrievalQuery,
     branch_tradeable_mass,
+    compose_contexts,
     cosine,
     embedding,
     groundedness_score,
+    is_evidence_context,
     keyword_score,
     rerank,
     rrf_fuse,
@@ -299,9 +301,15 @@ def retrieve_contexts_for_market(
         sparse.append({**base, "sparse_score": sparse_score, "score": sparse_score})
     dense.sort(key=lambda row: row.get("dense_score") or 0.0, reverse=True)
     sparse.sort(key=lambda row: row.get("sparse_score") or 0.0, reverse=True)
-    fused = rrf_fuse(dense[: max(limit * 4, 20)], sparse[: max(limit * 4, 20)])
-    contexts = rerank(query, fused, limit=limit)
-    return {"query": query, "contexts": contexts, "leaked_context_count": leaked}
+    fused = rrf_fuse(dense[: max(limit * 8, 40)], sparse[: max(limit * 8, 40)])
+    reranked = rerank(query, fused, limit=max(limit * 4, 24))
+    contexts, composition = compose_contexts(reranked, limit=limit)
+    return {
+        "query": query,
+        "contexts": contexts,
+        "leaked_context_count": leaked,
+        "composition": composition,
+    }
 
 
 def build_prompt(
@@ -326,6 +334,7 @@ def build_prompt(
         str(row.get("evidence_id") or row.get("chunk_id"))
         for rows in retrieval_contexts.values()
         for row in rows
+        if row.get("context_role") == "evidence" or is_evidence_context(row)
         if row.get("evidence_id") or row.get("chunk_id")
     })
     payload = {
@@ -345,6 +354,8 @@ def build_prompt(
         "You are pricing Kalshi sports markets that lack sportsbook consensus. "
         "Use only the provided news/discussion items and market rows. "
         "Prefer retrieved_context_by_ticker over raw recency. "
+        "Prior qual_signals are opinion context only: they may inform priors, but they are not evidence. "
+        "Supported scenario evidence_ids must come from external or outcome-bearing contexts: news_items, settlement_records, qual_postmortems, or qual_lessons. "
         "Decompose every forecast into 2-4 mutually exclusive, collectively exhaustive scenario branches. "
         "The scenario p_event values must sum to about 1.0, and qual_prob must equal "
         "sum(p_event * p_outcome_given_event) within rounding. "
@@ -604,6 +615,7 @@ def validate_qual_output(
         ticker: {
             str(ctx.get("evidence_id") or ctx.get("chunk_id"))
             for ctx in rows
+            if ctx.get("context_role") == "evidence" or is_evidence_context(ctx)
             if ctx.get("evidence_id") or ctx.get("chunk_id")
         }
         for ticker, rows in retrieval_contexts.items()
@@ -676,6 +688,9 @@ def validate_qual_output(
         tradeable = True
         blocked_reason = None
         if retrieval_contexts.get(ticker):
+            if score.get("evidence_context_count", 0) <= 0:
+                tradeable = False
+                blocked_reason = "self-generated-evidence-only"
             if score["groundedness"] < float(min_groundedness):
                 tradeable = False
                 blocked_reason = "low-groundedness"

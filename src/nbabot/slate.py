@@ -1330,12 +1330,17 @@ def research_bundle(ctx: Any, slate: dict[str, Any], verification: dict[str, Any
                 "scenario_id": None,
                 "market": "open_kalshi_sports",
                 "label": market.get("title"),
-                "side": "yes",
+                "side": rank.get("side") or rank.get("chosen_side") or "yes",
                 "captured_at": match.get("captured_at") or market.get("captured_at"),
                 "entry_price_cents": _rank_entry_price(rank, market.get("ask") or market.get("mid")),
                 "bid": market.get("bid"),
                 "ask": market.get("ask"),
-                "implied": market.get("implied"),
+                "implied": (
+                    (rank.get("executable_price") or {}).get("price_prob")
+                    if (rank.get("side") or rank.get("chosen_side")) == "no"
+                    and isinstance(rank.get("executable_price"), dict) else
+                    market.get("implied")
+                ),
                 "prior_p": model_prob,
                 "model_prob": model_prob,
                 "model_prob_sources": rank.get("model_prob_sources") or [],

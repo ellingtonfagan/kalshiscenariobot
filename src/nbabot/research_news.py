@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import re
 import time
 import urllib.error
@@ -74,6 +75,11 @@ def _child_text(node: ElementTree.Element, *names: str) -> str:
     return ""
 
 
+def _author(node: ElementTree.Element) -> str | None:
+    raw = _child_text(node, "author", f"{ATOM}author/{ATOM}name")
+    return raw or None
+
+
 def _link(node: ElementTree.Element) -> str:
     link = _child_text(node, "link")
     if link:
@@ -107,7 +113,66 @@ def _published_at(node: ElementTree.Element) -> str | None:
     return parse_feed_datetime(raw)
 
 
-def parse_feed(payload: bytes | str, *, source: str, team: str) -> list[dict[str, Any]]:
+def _parse_dt(raw: Any) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def detection_lag_seconds(published_at: Any, first_seen_at: Any) -> float | None:
+    published = _parse_dt(published_at)
+    seen = _parse_dt(first_seen_at)
+    if published is None or seen is None:
+        return None
+    return round((seen - published).total_seconds(), 3)
+
+
+def source_credibility_tier(source: str, *, author: str | None = None, feed: dict[str, Any] | None = None, text: str = "") -> int:
+    if feed and feed.get("credibility_tier") is not None:
+        return int(feed["credibility_tier"])
+    lowered = str(source or "").lower()
+    if lowered.startswith("mlb_") or "official" in lowered:
+        return 1
+    if "espn" in lowered:
+        return 2
+    author_tiers = (feed or {}).get("author_tiers") or {}
+    if author and author in author_tiers:
+        return int(author_tiers[author])
+    credible_handles = {str(v).lower() for v in (feed or {}).get("credible_authors") or []}
+    if author and author.lower() in credible_handles:
+        return 2
+    if lowered.startswith("reddit_"):
+        primary_patterns = [str(v).lower() for v in (feed or {}).get("primary_sources") or []]
+        if any(pattern and pattern in text.lower() for pattern in primary_patterns):
+            return 3
+        return 5
+    if "bluesky" in lowered or "bsky" in lowered:
+        return 3 if author else 4
+    return 4
+
+
+def confirmation_state_for_item(source: str, *, credibility_tier: int, text: str) -> str:
+    lowered = f"{source} {text}".lower()
+    if "official" in lowered or "mlb.com" in lowered or "transactions" in lowered:
+        return "officially_confirmed"
+    if credibility_tier <= 2:
+        return "reported_by_credible_source"
+    return "rumored"
+
+
+def news_event_key(item: dict[str, Any]) -> str:
+    text = " ".join(str(item.get(key) or "") for key in ("team", "title", "body")).lower()
+    terms = [tok for tok in re.findall(r"[a-z0-9]+", text) if len(tok) > 2]
+    return " ".join(terms[:12])
+
+
+def parse_feed(payload: bytes | str, *, source: str, team: str, feed: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     raw = payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else str(payload)
     root = ElementTree.fromstring(raw)
     rss_items = root.findall("./channel/item")
@@ -126,7 +191,13 @@ def parse_feed(payload: bytes | str, *, source: str, team: str) -> list[dict[str
         url = _link(node)
         if not title and not body:
             continue
+        author = _author(node)
+        first_seen_at = utc_now()
+        text = f"{title} {body} {url}"
+        credibility = source_credibility_tier(source, author=author, feed=feed, text=text)
+        confirmation = confirmation_state_for_item(source, credibility_tier=credibility, text=text)
         content_hash = news_content_hash(team, source, title, body, url)
+        published_at = _published_at(node)
         out.append({
             "id": content_hash[:24],
             "team": team,
@@ -134,11 +205,51 @@ def parse_feed(payload: bytes | str, *, source: str, team: str) -> list[dict[str
             "title": title,
             "body": body,
             "url": url,
-            "published_at": _published_at(node),
-            "fetched_at": utc_now(),
+            "published_at": published_at,
+            "fetched_at": first_seen_at,
+            "first_seen_at": first_seen_at,
+            "detection_lag_seconds": detection_lag_seconds(published_at, first_seen_at),
+            "credibility_tier": credibility,
+            "author": author,
+            "confirmation_state": confirmation,
+            "news_event_id": hashlib.sha256(news_event_key({
+                "team": team, "title": title, "body": body,
+            }).encode("utf-8")).hexdigest()[:24],
             "content_hash": content_hash,
         })
     return out
+
+
+def fetch_with_retries(
+    url: str,
+    *,
+    user_agent: str,
+    fetcher: Any,
+    attempts: int = 3,
+    base_sleep_seconds: float = 0.5,
+) -> tuple[int, bytes, dict[str, Any]]:
+    last_error: Exception | None = None
+    for attempt in range(1, max(int(attempts), 1) + 1):
+        try:
+            status, body = fetcher(url, user_agent=user_agent)
+            return status, body, {"attempts": attempt, "retry_after_seconds": None}
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code != 429 or attempt >= attempts:
+                raise
+            retry_after = None
+            try:
+                retry_after = float(exc.headers.get("Retry-After")) if exc.headers else None
+            except (TypeError, ValueError):
+                retry_after = None
+            sleep_for = retry_after if retry_after is not None else base_sleep_seconds * attempt
+            time.sleep(max(sleep_for, 0.0))
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts:
+                raise
+            time.sleep(max(base_sleep_seconds * attempt, 0.0))
+    raise last_error or RuntimeError("fetch failed")
 
 
 def news_content_hash(team: str, source: str, title: str, body: str, url: str) -> str:
@@ -210,8 +321,34 @@ def feed_sources(team: ResearchTeam) -> list[dict[str, Any]]:
             "url": f"https://www.reddit.com/r/{subreddit}/new.rss",
             "kind": "reddit_rss",
             "require_alias": subreddit.lower() == "baseball",
+            "credibility_tier": 5,
         })
     return sources
+
+
+def _source_key(source: dict[str, Any], team: ResearchTeam) -> str:
+    return f"{team.key}:{source.get('name') or source.get('url')}"
+
+
+def _record_poll(store: Any, status_row: dict[str, Any], source: dict[str, Any], team: ResearchTeam) -> None:
+    recorder = getattr(store, "record_news_source_poll", None)
+    if not callable(recorder):
+        return
+    try:
+        recorder({
+            "source_key": _source_key(source, team),
+            "team": team.key,
+            "polled_at": utc_now(),
+            "status": status_row.get("status"),
+            "http_status": status_row.get("http_status"),
+            "parsed": status_row.get("parsed", 0),
+            "inserted": status_row.get("inserted", 0),
+            "retry_after_seconds": status_row.get("retry_after_seconds"),
+            "error": status_row.get("error"),
+            "row": json.dumps(status_row, sort_keys=True, default=str),
+        })
+    except Exception:
+        return
 
 
 def ingest_team_feeds(
@@ -243,30 +380,46 @@ def ingest_team_feeds(
                 "discarded_alias": 0,
             }
             try:
-                http_status, body = fetcher(str(source["url"]), user_agent=user_agent)
+                http_status, body, retry_meta = fetch_with_retries(
+                    str(source["url"]),
+                    user_agent=user_agent,
+                    fetcher=fetcher,
+                    attempts=3 if str(source.get("kind")) == "reddit_rss" else 2,
+                    base_sleep_seconds=0.2,
+                )
                 status_row["http_status"] = http_status
             except urllib.error.HTTPError as exc:
                 status_row["http_status"] = exc.code
                 status_row["status"] = f"http_{exc.code}"
                 status_row["error"] = str(exc)
                 source_status.append(status_row)
+                _record_poll(store, status_row, source, team)
                 continue
             except Exception as exc:
                 status_row["status"] = f"error:{exc.__class__.__name__}"
                 status_row["error"] = str(exc)
                 source_status.append(status_row)
+                _record_poll(store, status_row, source, team)
                 continue
+            status_row["retry_after_seconds"] = retry_meta.get("retry_after_seconds")
 
             if status_row["http_status"] in {403, 429}:
                 status_row["status"] = f"http_{status_row['http_status']}"
                 source_status.append(status_row)
+                _record_poll(store, status_row, source, team)
                 continue
             try:
-                items = parse_feed(body, source=str(source.get("name") or source.get("url")), team=team.key)
+                items = parse_feed(
+                    body,
+                    source=str(source.get("name") or source.get("url")),
+                    team=team.key,
+                    feed=source,
+                )
             except (ElementTree.ParseError, UnicodeDecodeError) as exc:
                 status_row["status"] = f"parse_error:{exc.__class__.__name__}"
                 status_row["error"] = str(exc)
                 source_status.append(status_row)
+                _record_poll(store, status_row, source, team)
                 continue
 
             parsed = 0
@@ -295,6 +448,7 @@ def ingest_team_feeds(
             team_counts[team.key]["ignored_old"] += ignored_old
             team_counts[team.key]["discarded_alias"] += discarded_alias
             source_status.append(status_row)
+            _record_poll(store, status_row, source, team)
             if request_delay_seconds > 0:
                 time.sleep(request_delay_seconds)
 
@@ -305,4 +459,8 @@ def ingest_team_feeds(
         "source_status": source_status,
         "total_parsed": sum(row["parsed"] for row in team_counts.values()),
         "total_inserted": sum(row["inserted"] for row in team_counts.values()),
+        "detection_latency": (
+            store.news_detection_latency_summary()
+            if hasattr(store, "news_detection_latency_summary") else {}
+        ),
     }

@@ -823,6 +823,61 @@ def test_news_ingest_parses_dedups_and_fails_soft(tmp_path):
     }
 
 
+def test_news_ingest_retries_429_and_records_detection_latency(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    store = research.ResearchStore(settings.research_db_path)
+    teams = [
+        research_news.ResearchTeam(
+            key="yankees",
+            canonical_name="New York Yankees",
+            aliases=("Yankees",),
+            rss_feeds=({"name": "mlb_yankees", "url": "https://example.com/rss"},),
+            subreddits=(),
+        )
+    ]
+    calls = {"count": 0}
+
+    def fetcher(url, user_agent):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            import urllib.error
+            raise urllib.error.HTTPError(url, 429, "rate limited", {"Retry-After": "0"}, None)
+        return 200, RSS_FIXTURE
+
+    payload = research_news.ingest_team_feeds(
+        teams=teams,
+        store=store,
+        user_agent=settings.news_user_agent,
+        window_hours=48,
+        request_delay_seconds=0,
+        fetcher=fetcher,
+        now=datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc),
+    )
+    latency = store.news_detection_latency_summary()
+
+    assert calls["count"] == 2
+    assert payload["team_counts"]["yankees"]["inserted"] == 1
+    assert latency["source_latency"]["mlb_yankees"]["count"] == 1
+    assert latency["source_latency"]["mlb_yankees"]["max_minutes"] >= 0
+
+
+def test_news_source_poll_repeated_failures_alarm(tmp_path):
+    store = research.ResearchStore(tmp_path / "research.sqlite")
+    for _ in range(3):
+        store.record_news_source_poll({
+            "source_key": "yankees:reddit_NYYankees",
+            "team": "yankees",
+            "status": "http_429",
+            "http_status": 429,
+            "error": "rate limited",
+        })
+
+    summary = store.news_detection_latency_summary()
+
+    assert summary["source_alarms"][0]["source_key"] == "yankees:reddit_NYYankees"
+    assert summary["source_alarms"][0]["consecutive_failures"] == 3
+
+
 def test_recap_matching_uses_team_and_game_date():
     teams = [
         research_news.ResearchTeam(
@@ -1571,6 +1626,101 @@ def test_hybrid_retrieval_prefers_relevant_precedent_and_rerank_changes_order():
 
     assert result["contexts"][0]["chunk_id"] == "precedent"
     assert result["contexts"][0]["rerank_score"] >= result["contexts"][-1]["rerank_score"]
+
+
+def test_qual_retrieval_caps_opinions_and_enforces_evidence_floor():
+    chunks = []
+    for idx in range(10):
+        chunks.append({
+            "chunk_id": f"opinion-{idx}",
+            "source_type": "qual_signals",
+            "source_id": str(idx),
+            "source_timestamp": "2026-07-07T18:00:00+00:00",
+            "teams": ["yankees"],
+            "market_family": "mlb moneyline",
+            "text": "Yankees moneyline same market prior speculative signal.",
+            "embedding": qual_rag.embedding("Yankees moneyline same market prior speculative signal"),
+        })
+    for idx, source_type in enumerate(("news_items", "settlement_records", "qual_lessons", "qual_postmortems")):
+        chunks.append({
+            "chunk_id": f"evidence-{idx}",
+            "source_type": source_type,
+            "source_id": str(idx),
+            "source_timestamp": "2026-07-07T18:00:00+00:00",
+            "teams": ["yankees"],
+            "market_family": "mlb moneyline",
+            "text": "Yankees moneyline bullpen injury outcome-bearing external evidence.",
+            "embedding": qual_rag.embedding("Yankees moneyline bullpen injury evidence"),
+        })
+
+    result = qual_research_core.retrieve_contexts_for_market(
+        market={
+            "ticker": "KXQUAL1",
+            "title": "Yankees moneyline",
+            "teams": ["yankees"],
+            "market_family": "mlb moneyline",
+            "close_time": "2026-07-07T19:00:00+00:00",
+        },
+        chunks=chunks,
+        limit=8,
+    )
+
+    composition = result["composition"]
+    assert composition["evidence_count"] >= composition["min_evidence_contexts"]
+    assert composition["opinion_count"] <= composition["max_opinion_contexts"]
+    assert composition["source_counts"]["qual_signals"] <= 2
+
+
+def test_all_self_generated_retrieval_is_not_tradeable():
+    raw = json.dumps([
+        {
+            "ticker": "KXQUAL1",
+            "base_rate": 0.50,
+            "qual_prob": 0.60,
+            "confidence": 0.70,
+            "rationale": "Prior signal repeats itself.",
+            "citation_urls": ["https://example.com/a"],
+            "news_item_ids_used": ["news-a"],
+            "scenarios": [
+                {
+                    "event": "Yankees prior signal says bullpen edge",
+                    "p_event": 0.50,
+                    "p_outcome_given_event": 0.60,
+                    "citations": ["https://example.com/a"],
+                    "evidence_ids": ["opinion-a"],
+                    "status": "supported",
+                },
+                {
+                    "event": "Prior branch repeats bullpen edge",
+                    "p_event": 0.50,
+                    "p_outcome_given_event": 0.60,
+                    "citations": ["https://example.com/a"],
+                    "evidence_ids": ["opinion-a"],
+                    "status": "supported",
+                },
+            ],
+        }
+    ])
+    result = qual_research_core.validate_qual_output(
+        raw,
+        allowed_tickers={"KXQUAL1"},
+        allowed_urls={"https://example.com/a"},
+        allowed_news_item_ids={"news-a"},
+        url_to_news_item_ids={"https://example.com/a": ["news-a"]},
+        model_run_id="run-self",
+        retrieval_contexts={
+            "KXQUAL1": [{
+                "chunk_id": "opinion-a",
+                "evidence_id": "opinion-a",
+                "text": "Yankees prior signal says bullpen edge.",
+                "source_type": "qual_signals",
+                "context_role": "opinion",
+            }]
+        },
+    )
+
+    assert result.accepted == []
+    assert "supported without evidence" in result.retry_error
 
 
 def test_anti_leakage_schema_unsupported_branches_do_not_contribute_tradeable_mass():
@@ -4698,6 +4848,51 @@ def test_candidate_ranker_builds_edge_candidates(tmp_path, monkeypatch):
     assert (tmp_path / "TEST-GAME.edge_candidates.json").exists()
 
 
+def test_candidate_ranker_evaluates_no_side_with_real_no_executable_price(tmp_path, monkeypatch):
+    now_dt = datetime(2026, 7, 7, 19, 0, tzinfo=timezone.utc)
+    now = now_dt.isoformat()
+    slate_payload, market_matches = _ranker_fixture(now)
+    market_matches["rows"][0]["orderbook"]["no"] = {
+        "best_bid_cents": 60,
+        "best_ask_cents": 63,
+        "spread_cents": 3,
+        "fillable_contracts": 20,
+        "vwap_cents": 63,
+        "captured_at": now,
+    }
+
+    def fixed_consensus(_rows, target_name=None):
+        return {
+            "fair_prob": 0.25,
+            "book_count": 6,
+            "sources": ["pinnacle", "circa", "draftkings"],
+            "disagreement_std": 0.0,
+        }
+
+    monkeypatch.setattr(candidate_ranker_core, "consensus_prob", fixed_consensus)
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = _ExecSettings(tmp_path)
+
+    result = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        liquidity_role="taker",
+    )
+    row = result["rows"][0]
+
+    assert row["side"] == "no"
+    assert row["model_prob"] == pytest.approx(0.75)
+    assert row["executable_price"]["price_cents"] == 63
+    assert row["raw_edge"] == pytest.approx(0.12)
+    assert row["passes_edge"] is True
+    assert row["side_economics"]["yes"]["executable_price"]["price_cents"] == 50
+    assert row["side_economics"]["no"]["executable_price"]["price_cents"] == 63
+
+
 def test_candidate_ranker_demo_floor_passes_marginal_edge_while_live_is_unchanged(tmp_path, monkeypatch):
     now_dt = datetime(2026, 7, 7, 19, 0, tzinfo=timezone.utc)
     now = now_dt.isoformat()
@@ -4864,6 +5059,48 @@ def test_candidate_ranker_qual_prices_unconsensused_demo_rows_at_higher_floor(tm
     assert blocked["rows"][0]["signal_source"] == "qual"
     assert blocked["rows"][0]["passes_edge"] is False
     assert "edge below dynamic required edge" in blocked["rows"][0]["blockers"]
+
+
+def test_unconfirmed_news_trading_default_off_and_scales_when_enabled(tmp_path):
+    now = datetime(2026, 7, 7, 19, 0, tzinfo=timezone.utc).isoformat()
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "paper"
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+    unit = sizing.UnitSizing(
+        bankroll_usd=1000,
+        unit_fraction=0.015,
+        unit_size_dollars=15.0,
+        requested_unit_fraction=0.015,
+    )
+    row = {
+        "ticker": "KXNEWS",
+        "entry_price_cents": 50,
+        "captured_at": now,
+        "prior_p": 0.62,
+        "implied": 0.50,
+        "edge": 0.10,
+        "raw_edge": 0.12,
+        "net_edge": 0.10,
+        "side": "yes",
+        "signal_source": "qual",
+        "confirmation_state": "reported_by_credible_source",
+        "credibility_tier": 2,
+        "label": "news signal",
+        "sgp_adjusted_prob": 0.62,
+    }
+
+    blocked = paper._intent_from_row(DummyContext(), row, row, {"KXNEWS": 1}, unit)
+    settings.trade_unconfirmed_news = True
+    scaled = paper._intent_from_row(DummyContext(), row, row, {"KXNEWS": 1}, unit)
+
+    assert blocked is None
+    assert scaled is not None
+    assert scaled.stake_units < 5
+    assert scaled.stake_units > 0
 
 
 def test_candidate_ranker_near_miss_qaq_upgrade_lowers_floor_with_evidence(tmp_path, monkeypatch):

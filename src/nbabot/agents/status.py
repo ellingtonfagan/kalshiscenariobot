@@ -109,6 +109,8 @@ def build_status(ctx: Context) -> dict[str, Any]:
         store.list_settlement_records(),
         default_sport=ctx.settings.sport,
         qual_rag_stats=store.qual_rag_corpus_summary(),
+        detection_latency=store.news_detection_latency_summary(),
+        market_move_report=store.news_market_move_report(),
         concentration_max_winner_share=float(
             getattr(ctx.settings, "concentration_max_winner_share", 0.50)
         ),
@@ -136,6 +138,8 @@ def build_status(ctx: Context) -> dict[str, Any]:
         "validation_report": validation,
         "qual_learning": store.qual_learning_summary(),
         "qual_rag": store.qual_rag_corpus_summary(),
+        "news_detection_latency": store.news_detection_latency_summary(),
+        "news_market_move_report": store.news_market_move_report(),
         "latest_risk_snapshot": latest_risk[0] if latest_risk else None,
         "latest_live_order": latest_live[0] if latest_live else None,
         "latest_audit_events": latest_audit,
@@ -158,6 +162,8 @@ def _format_status(status: dict[str, Any]) -> str:
     learning = status.get("qual_learning") or {}
     rag = status.get("qual_rag") or {}
     validation = status.get("validation_report") or {}
+    latency = status.get("news_detection_latency") or {}
+    source_latency = latency.get("source_latency") or {}
     groups = validation.get("groups") or []
     top_group = groups[0] if groups else {}
     concentration = validation.get("overall_concentration") or {}
@@ -215,6 +221,16 @@ def _format_status(status: dict[str, Any]) -> str:
             f"mean_groundedness={rag.get('mean_groundedness', 'n/a')} "
             f"unsupported_rate={rag.get('unsupported_branch_rate', 'n/a')} "
             f"low_groundedness_blocked={rag.get('low_groundedness_blocked', 0)}"
+        ),
+        (
+            "  news_latency "
+            + (
+                "; ".join(
+                    f"{source} p50={row.get('p50_minutes')}m p90={row.get('p90_minutes')}m max={row.get('max_minutes')}m"
+                    for source, row in list(source_latency.items())[:3]
+                )
+                if source_latency else "n/a"
+            )
         ),
         f"  fill_rate {fill_text}",
         (

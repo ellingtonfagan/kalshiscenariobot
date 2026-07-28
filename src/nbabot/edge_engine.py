@@ -163,6 +163,8 @@ def evaluate_market(
     require_exact_match: bool = True,
 ) -> EdgeCandidate:
     model_prob = consensus.get("fair_prob")
+    if executable.side == "no" and model_prob is not None:
+        model_prob = round(1.0 - float(model_prob), 6)
     price_prob = executable.price_prob
     book_count = int(consensus.get("book_count") or 0)
     disagreement = consensus.get("disagreement_std")

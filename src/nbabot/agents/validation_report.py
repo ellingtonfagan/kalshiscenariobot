@@ -51,6 +51,8 @@ def run(ctx: Context | None = None) -> dict:
         store.list_settlement_records(),
         default_sport=ctx.settings.sport,
         qual_rag_stats=store.qual_rag_corpus_summary(),
+        detection_latency=store.news_detection_latency_summary(),
+        market_move_report=store.news_market_move_report(),
         concentration_max_winner_share=float(
             getattr(ctx.settings, "concentration_max_winner_share", 0.50)
         ),

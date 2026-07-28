@@ -140,6 +140,8 @@ def report(
     *,
     default_sport: str | None = None,
     qual_rag_stats: dict[str, Any] | None = None,
+    detection_latency: dict[str, Any] | None = None,
+    market_move_report: dict[str, Any] | None = None,
     min_validated_n: int = VALIDATION_MIN_SETTLED,
     min_clv_beat_rate: float = VALIDATION_MIN_CLV_BEAT_RATE,
     min_brier_improvement: float = BRIER_MIN_IMPROVEMENT,
@@ -204,6 +206,8 @@ def report(
         "validation_thresholds": thresholds,
         "overall_concentration": overall_concentration,
         "qual_rag": qual_rag_stats or {},
+        "detection_latency": detection_latency or {},
+        "market_move_report": market_move_report or {},
         "groups": groups,
         "notes": [
             "CLV-unmeasured settlements are excluded from CLV rates and do not satisfy the CLV criterion.",

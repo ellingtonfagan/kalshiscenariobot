@@ -17,6 +17,11 @@ DEFAULT_CONTEXT_LIMIT = 8
 MIN_CHUNK_CHARS = 80
 MAX_CHUNK_CHARS = 1200
 SUPPORTED_BRANCH_STATUSES = {"supported", "unsupported"}
+EVIDENCE_SOURCE_TYPES = {"news_items", "settlement_records", "qual_postmortems", "qual_lessons"}
+OPINION_SOURCE_TYPES = {"qual_signals"}
+MIN_EVIDENCE_CONTEXTS = 2
+MIN_EVIDENCE_SHARE = 0.50
+MAX_OPINION_CONTEXTS = 2
 
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_+-]*", re.I)
 
@@ -155,9 +160,9 @@ def rerank(query: RetrievalQuery, rows: list[dict[str, Any]], *, limit: int | No
             "qual_postmortems": 0.08,
             "qual_lessons": 0.07,
             "settlement_records": 0.06,
-            "qual_signals": 0.04,
+            "qual_signals": -0.04,
             "closing_snapshots": 0.03,
-            "news_items": 0.0,
+            "news_items": 0.05,
         }.get(str(row.get("source_type") or ""), 0.0)
         final = (
             float(row.get("hybrid_score") or 0.0)
@@ -172,6 +177,63 @@ def rerank(query: RetrievalQuery, rows: list[dict[str, Any]], *, limit: int | No
         ranked.append(item)
     ranked.sort(key=lambda row: row.get("rerank_score") or 0.0, reverse=True)
     return ranked[: (limit or query.limit)]
+
+
+def is_evidence_context(row: dict[str, Any]) -> bool:
+    return str(row.get("source_type") or "") in EVIDENCE_SOURCE_TYPES
+
+
+def is_opinion_context(row: dict[str, Any]) -> bool:
+    return str(row.get("source_type") or "") in OPINION_SOURCE_TYPES
+
+
+def compose_contexts(rows: list[dict[str, Any]], *, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Enforce evidence composition instead of relying on ranking preference."""
+    limit = max(int(limit), 0)
+    if limit <= 0:
+        return [], {
+            "source_counts": {},
+            "evidence_count": 0,
+            "opinion_count": 0,
+            "evidence_share": 0.0,
+            "evidence_floor_met": False,
+        }
+    min_evidence = min(limit, max(MIN_EVIDENCE_CONTEXTS, int(math.ceil(limit * MIN_EVIDENCE_SHARE))))
+    evidence = [row for row in rows if is_evidence_context(row)]
+    opinion = [row for row in rows if is_opinion_context(row)]
+    other = [row for row in rows if not is_evidence_context(row) and not is_opinion_context(row)]
+    selected = evidence[:min_evidence]
+    remaining = limit - len(selected)
+    opinion_cap = min(MAX_OPINION_CONTEXTS, max(remaining, 0))
+    selected.extend(opinion[:opinion_cap])
+    remaining = limit - len(selected)
+    selected.extend(other[:remaining])
+    remaining = limit - len(selected)
+    if remaining > 0:
+        selected.extend(evidence[min_evidence:min_evidence + remaining])
+    seen = set()
+    deduped = []
+    for row in selected:
+        chunk_id = str(row.get("chunk_id") or row.get("evidence_id") or "")
+        if chunk_id in seen:
+            continue
+        seen.add(chunk_id)
+        item = dict(row)
+        item["context_role"] = "evidence" if is_evidence_context(item) else "opinion" if is_opinion_context(item) else "context"
+        deduped.append(item)
+    source_counts = dict(Counter(str(row.get("source_type") or "unknown") for row in deduped))
+    evidence_count = sum(1 for row in deduped if is_evidence_context(row))
+    opinion_count = sum(1 for row in deduped if is_opinion_context(row))
+    evidence_share = round(evidence_count / len(deduped), 6) if deduped else 0.0
+    return deduped, {
+        "source_counts": source_counts,
+        "evidence_count": evidence_count,
+        "opinion_count": opinion_count,
+        "evidence_share": evidence_share,
+        "evidence_floor_met": bool(evidence_count >= min_evidence),
+        "min_evidence_contexts": min_evidence,
+        "max_opinion_contexts": MAX_OPINION_CONTEXTS,
+    }
 
 
 def _json_list(raw: Any) -> list[str]:
@@ -255,7 +317,8 @@ def validate_branch_evidence(branches: Iterable[dict[str, Any]], allowed_evidenc
 
 
 def groundedness_score(signal: dict[str, Any], contexts: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    context_rows = list(contexts)
+    all_context_rows = list(contexts)
+    context_rows = [row for row in all_context_rows if is_evidence_context(row)]
     by_id = {str(row.get("evidence_id") or row.get("chunk_id")): row for row in context_rows}
     context_text_by_id = {
         eid: " ".join(tokens(row.get("text")))
@@ -304,4 +367,7 @@ def groundedness_score(signal: dict[str, Any], contexts: Iterable[dict[str, Any]
         "unsupported_branch_rate": round(unsupported_rate, 6),
         "supported_branch_count": supported,
         "branch_count": total,
+        "evidence_context_count": len(context_rows),
+        "opinion_context_count": sum(1 for row in all_context_rows if is_opinion_context(row)),
+        "evidence_source_types": sorted({str(row.get("source_type") or "") for row in context_rows}),
     }

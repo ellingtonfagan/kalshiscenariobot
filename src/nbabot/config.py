@@ -80,6 +80,7 @@ class Settings:
     research_teams_path: Path
     news_window_hours: float
     news_user_agent: str
+    trade_unconfirmed_news: bool
     event_trigger_cooldown_minutes: int
     event_trigger_daily_cap: int
     max_plausible_edge: float
@@ -247,6 +248,7 @@ def load_settings(game_id: str | None = None) -> Settings:
         research_teams_path=research_teams_path,
         news_window_hours=float(os.environ.get("NBABOT_NEWS_WINDOW_HOURS", "48")),
         news_user_agent=os.environ.get("NBABOT_NEWS_USER_AGENT", "nbabot-research/0.1"),
+        trade_unconfirmed_news=os.environ.get("NBABOT_TRADE_UNCONFIRMED_NEWS", "0").lower() in {"1", "true", "yes"},
         event_trigger_cooldown_minutes=int(
             os.environ.get("NBABOT_EVENT_TRIGGER_COOLDOWN_MINUTES", "45")
         ),

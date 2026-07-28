@@ -1480,6 +1480,33 @@ were changed, and no scheduler or cron work was added.
 
 ---
 
+## Round 26 - 2026-07-28 - Side-aware edges, retrieval evidence floor, and news latency instrumentation
+
+### What changed in code
+
+- `candidate_ranker` now evaluates both YES and NO for each binary market. The NO side uses the actual NO-side order-book metrics, executable price, spread, liquidity, freshness, fees, dynamic required edge, plausible-edge guard, and all existing blockers. Rows persist `chosen_side`, `side_economics`, and the selected `side`.
+- Qual RAG retrieval now treats prior `qual_signals` as opinion context. Groundedness/evidence scoring only accepts external or outcome-bearing evidence (`news_items`, `settlement_records`, `qual_postmortems`, `qual_lessons`), caps opinion contexts, and records retrieval source composition.
+- News ingestion now records `first_seen_at`, detection lag, credibility tier, author, confirmation state, and a news event id. Source polling is persisted with consecutive-failure counts; Reddit 429s retry/back off before recording a failure.
+- Added event-level confirmation aggregation and a conservative market-move report. The report only claims timing when a news event can be linked to later Kalshi snapshots; otherwise it says the data is insufficient.
+- Added default-off `NBABOT_TRADE_UNCONFIRMED_NEWS`. Unconfirmed qual/QAQ signals do not create paper/demo intents unless enabled; when enabled, stake is reduced by confirmation state and credibility tier. Live hard blocks remain unchanged.
+
+### Tests
+
+- Full suite: `.venv/bin/pytest -q` -> `178 passed in 2.98s`.
+- New coverage includes NO-side executable pricing, side economics persistence, RAG evidence composition, all-self-generated evidence rejection, news 429 retry, source failure alarms, detection-lag aggregation, and default-off unconfirmed-news trading with stake scaling.
+
+### Real behavior check
+
+- Real current slate after `.venv/bin/nbabot candidate-ranker`: `candidate_count=200`, old YES-only pass count `1`, new chosen-side pass count `7`, trade-eligible count `7`. Passing sides were `NO=6`, `YES=1`; chosen-side counts were `NO=9`, `YES=191`.
+- Real RAG after `.venv/bin/nbabot qual-index` and `.venv/bin/nbabot qual-research`: `market_count=25`, `context_count=107`, source mix `news_items=53`, `qual_lessons=4`, `qual_signals=50`. The old 100% `qual_signals` echo chamber is gone; `evidence_floor_failed_count=20` is now explicit.
+- Real qual output from that run: `produced_count=5`, `accepted_count=3`; all three accepted rows were recorded non-tradeable with `blocked_reason=low-groundedness` and `groundedness=0.3`.
+- Real detection-lag summary is now exposed in status and validation. Current source p50/p90/max minutes include `reddit_NYYankees=146.731/1085.997/1731.451`, `reddit_baseball=788.432/857.115/861.532`, `mlb_tigers=130.668/1707.048/2809.781`, `mlb_yankees=130.659/1689.675/2811.037`.
+- Current poll health shows Reddit 429s still happening but recorded with retries and consecutive failures. Several Reddit sources are at `consecutive_failures=2`; no source alarm fired yet because the alarm threshold is 3.
+- Real report-to-detection-to-market-move analysis: `event_count=50`, `measured_event_count=0`, conclusion `insufficient linked news-event and Kalshi trajectory data`. There is not enough linked local data yet to claim the bot can beat market repricing on high-impact news.
+- Status still reports live blocked by `NBABOT_EXECUTION_MODE=live`, `NBABOT_DRY_RUN=0`, and `NBABOT_LIVE_TRADING_ACK=LIVE_TRADES_REAL_MONEY`. No live env vars were set and no live orders were placed.
+
+---
+
 ## Round 23 - 2026-07-27 - Exposure reconciliation and dead-man health checks
 
 ### What changed in code

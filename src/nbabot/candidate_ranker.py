@@ -26,6 +26,7 @@ COMPOSITE_TRADE_BLOCKER = "composite/multi-leg Kalshi markets require validated 
 EDGE_BELOW_BLOCKER = "edge below dynamic required edge"
 QAQ_SIGNAL_SOURCE = "qual_activated_quant"
 QAQ_MIN_NET_EDGE = 0.005
+SIDES = ("yes", "no")
 
 
 def _execution_min_edge(settings: Any) -> float:
@@ -140,6 +141,14 @@ def _with_qaq_evidence(
         "signal_engine": verdict.get("engine") or "codex",
     })
     return payload
+
+
+def _candidate_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        not item.get("passes_edge"),
+        -(item.get("net_edge") if item.get("net_edge") is not None else item.get("edge") if item.get("edge") is not None else -999),
+        item.get("required_edge", 999),
+    )
 
 
 def select_near_miss_candidates(
@@ -649,11 +658,6 @@ def build_candidate_rankings(
             target = identity.side or identity.participant
             consensus = consensus_prob(consensus_rows, target_name=target)
         maker = str(liquidity_role or "maker").lower() != "taker"
-        executable = ExecutablePrice.from_orderbook_metrics(
-            row.get("orderbook") or {},
-            "yes",
-            maker=maker,
-        )
         signal_source = "consensus"
         qual_signal = _qual_signal_for(row, qual_signals)
         qual_delta = None
@@ -666,10 +670,15 @@ def build_candidate_rankings(
         eval_base_min_edge = base_min_edge
         require_consensus = True
         exact_consensus_match = bool(match.get("match_type") == "exact" and _has_consensus(consensus))
+        yes_executable = ExecutablePrice.from_orderbook_metrics(
+            row.get("orderbook") or {},
+            "yes",
+            maker=maker,
+        )
         confluence = evaluate_confluence(
             consensus=consensus,
             qual_signal=qual_signal,
-            price_prob=executable.price_prob,
+            price_prob=yes_executable.price_prob,
             settings=ctx.settings,
             base_min_edge=base_min_edge,
             exact_match=exact_consensus_match,
@@ -704,35 +713,74 @@ def build_candidate_rankings(
                 "qual_created_at": qual_signal.get("created_at"),
             }
             require_consensus = False
-        edge = evaluate_market(
-            {
-                **match,
-                "ticker": ticker,
-                "close_time": row.get("close_time"),
-            },
-            eval_consensus,
-            executable,
-            ctx.settings,
-            base_min_edge=eval_base_min_edge,
-            now=now,
-            require_consensus=require_consensus,
-            require_exact_match=signal_source != "qual",
-        )
-        payload = edge.as_dict()
+        side_payloads = []
+        side_economics: dict[str, dict[str, Any]] = {}
+        for side in SIDES:
+            executable = ExecutablePrice.from_orderbook_metrics(
+                row.get("orderbook") or {},
+                side,
+                maker=maker,
+            )
+            edge = evaluate_market(
+                {
+                    **match,
+                    "ticker": ticker,
+                    "close_time": row.get("close_time"),
+                },
+                eval_consensus,
+                executable,
+                ctx.settings,
+                base_min_edge=eval_base_min_edge,
+                now=now,
+                require_consensus=require_consensus,
+                require_exact_match=signal_source != "qual",
+            )
+            side_payload = edge.as_dict()
+            side_payload["side"] = side
+            side_payload["yes_model_prob"] = eval_consensus.get("fair_prob")
+            side_payload["no_model_prob"] = (
+                round(1.0 - float(eval_consensus["fair_prob"]), 6)
+                if eval_consensus.get("fair_prob") is not None else None
+            )
+            side_payloads.append(side_payload)
+            side_economics[side] = {
+                key: side_payload.get(key)
+                for key in (
+                    "side",
+                    "model_prob",
+                    "executable_price",
+                    "raw_edge",
+                    "net_edge",
+                    "edge",
+                    "expected_fee_cents",
+                    "expected_fee_prob",
+                    "liquidity_role",
+                    "required_edge",
+                    "passes_edge",
+                    "blockers",
+                )
+            }
+        payload = sorted(side_payloads, key=_candidate_sort_key)[0]
+        chosen_signal_source = signal_source
         would_pass_before_confluence = bool(payload["passes_edge"])
         confluence_shadow = False
         qaq_verdict = _qaq_verdict_for(row, qaq_verdicts)
+        chosen_executable = ExecutablePrice.from_orderbook_metrics(
+            row.get("orderbook") or {},
+            str(payload.get("side") or "yes"),
+            maker=maker,
+        )
         if signal_source == "consensus" and qaq_verdict is not None and not confluence.veto:
             payload = _with_qaq_evidence(
                 payload=payload,
                 verdict=qaq_verdict,
                 consensus=consensus,
-                executable=executable,
+                executable=chosen_executable,
                 row=row,
                 match=match,
                 settings=ctx.settings,
             )
-            signal_source = str(payload.get("signal_source") or signal_source)
+            chosen_signal_source = str(payload.get("signal_source") or chosen_signal_source)
             would_pass_before_confluence = bool(payload["passes_edge"])
         if signal_source == "consensus" and confluence.veto and would_pass_before_confluence:
             if VETO_REASON not in payload["blockers"]:
@@ -745,6 +793,13 @@ def build_candidate_rankings(
             if COMPOSITE_TRADE_BLOCKER not in payload["blockers"]:
                 payload["blockers"].append(COMPOSITE_TRADE_BLOCKER)
             payload["passes_edge"] = False
+        side_economics[str(payload.get("side") or "yes")] = {
+            **side_economics.get(str(payload.get("side") or "yes"), {}),
+            "passes_edge": payload.get("passes_edge"),
+            "blockers": payload.get("blockers"),
+            "required_edge": payload.get("required_edge"),
+            "signal_source": payload.get("signal_source", chosen_signal_source),
+        }
         payload.update({
             "ticker": ticker,
             "candidate_id": row.get("candidate_id"),
@@ -757,9 +812,12 @@ def build_candidate_rankings(
             "consensus": consensus,
             "qual_signal": qual_signal,
             "qual_vs_consensus_delta": qual_delta,
-            "signal_source": signal_source,
+            "signal_source": chosen_signal_source,
+            "side_economics": side_economics,
+            "side_evaluation_count": len(side_payloads),
+            "chosen_side": payload.get("side"),
             "confluence": confluence.as_dict(),
-            "confluence_verdict": confluence.verdict if signal_source == "consensus" else "none",
+            "confluence_verdict": confluence.verdict if chosen_signal_source == "consensus" else "none",
             "confluence_shadow": confluence_shadow,
             "sgp_adjusted_prob": consensus.get("sgp_adjusted_prob"),
             "raw_joint_prob": consensus.get("raw_joint_prob"),
@@ -770,16 +828,12 @@ def build_candidate_rankings(
             "trade_eligible": payload["passes_edge"],
             "source": "candidate-ranker",
         })
-        if signal_source == "qual":
+        if chosen_signal_source == "qual":
             payload["sgp_adjusted_prob"] = payload.get("model_prob")
             payload["model_prob_sources"] = list((qual_signal or {}).get("citation_urls") or [])
             payload["confluence_verdict"] = "none"
         ranked.append(payload)
-    ranked.sort(key=lambda item: (
-        not item.get("passes_edge"),
-        -(item.get("net_edge") if item.get("net_edge") is not None else item.get("edge") if item.get("edge") is not None else -999),
-        item.get("required_edge", 999),
-    ))
+    ranked.sort(key=_candidate_sort_key)
     return {
         "game_id": ctx.settings.game_id,
         "generated_at": utc_now(),

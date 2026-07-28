@@ -29,6 +29,18 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_dt(raw: Any) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def to_json(obj: Any) -> str:
     if is_dataclass(obj):
         obj = asdict(obj)
@@ -365,12 +377,45 @@ class ResearchStore:
                     url TEXT,
                     published_at TEXT,
                     fetched_at TEXT NOT NULL,
+                    first_seen_at TEXT,
+                    detection_lag_seconds REAL,
+                    credibility_tier INTEGER,
+                    author TEXT,
+                    confirmation_state TEXT,
+                    news_event_id TEXT,
                     content_hash TEXT NOT NULL UNIQUE
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_news_items_url
                     ON news_items(url) WHERE url IS NOT NULL AND url != '';
                 CREATE INDEX IF NOT EXISTS idx_news_items_team_published
                     ON news_items(team, published_at DESC);
+                CREATE TABLE IF NOT EXISTS news_source_polls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_key TEXT NOT NULL,
+                    team TEXT NOT NULL,
+                    polled_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    http_status INTEGER,
+                    parsed INTEGER NOT NULL DEFAULT 0,
+                    inserted INTEGER NOT NULL DEFAULT 0,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    retry_after_seconds REAL,
+                    error TEXT,
+                    row_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_news_source_polls_source_time
+                    ON news_source_polls(source_key, polled_at DESC);
+                CREATE TABLE IF NOT EXISTS news_events (
+                    event_id TEXT PRIMARY KEY,
+                    team TEXT NOT NULL,
+                    event_key TEXT NOT NULL,
+                    first_seen_at TEXT NOT NULL,
+                    latest_seen_at TEXT NOT NULL,
+                    confirmation_state TEXT NOT NULL,
+                    credibility_tier INTEGER,
+                    item_ids_json TEXT NOT NULL,
+                    event_json TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS qual_signals (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ticker TEXT NOT NULL,
@@ -605,6 +650,12 @@ class ResearchStore:
             self._ensure_column(db, "qual_signals", "groundedness", "REAL")
             self._ensure_column(db, "qual_signals", "tradeable", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(db, "qual_signals", "blocked_reason", "TEXT")
+            self._ensure_column(db, "news_items", "first_seen_at", "TEXT")
+            self._ensure_column(db, "news_items", "detection_lag_seconds", "REAL")
+            self._ensure_column(db, "news_items", "credibility_tier", "INTEGER")
+            self._ensure_column(db, "news_items", "author", "TEXT")
+            self._ensure_column(db, "news_items", "confirmation_state", "TEXT")
+            self._ensure_column(db, "news_items", "news_event_id", "TEXT")
 
     @staticmethod
     def _ensure_column(db: sqlite3.Connection, table: str, column: str,
@@ -802,9 +853,10 @@ class ResearchStore:
                 """
                 INSERT OR IGNORE INTO news_items(
                     id, team, source, title, body, url, published_at, fetched_at,
-                    content_hash
+                    first_seen_at, detection_lag_seconds, credibility_tier, author,
+                    confirmation_state, news_event_id, content_hash
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -816,12 +868,274 @@ class ResearchStore:
                         r.get("url"),
                         r.get("published_at"),
                         r.get("fetched_at") or utc_now(),
+                        r.get("first_seen_at") or r.get("fetched_at") or utc_now(),
+                        r.get("detection_lag_seconds"),
+                        r.get("credibility_tier"),
+                        r.get("author"),
+                        r.get("confirmation_state"),
+                        r.get("news_event_id"),
                         r["content_hash"],
                     )
                     for r in rows
                 ],
             )
+            for row in rows:
+                event_id = row.get("news_event_id")
+                event_key = row.get("news_event_key") or row.get("title") or event_id
+                if not event_id or not event_key:
+                    continue
+                existing = db.execute(
+                    "SELECT * FROM news_events WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                item_ids = [str(row["id"])]
+                first_seen = row.get("first_seen_at") or row.get("fetched_at") or utc_now()
+                latest_seen = first_seen
+                state = str(row.get("confirmation_state") or "rumored")
+                tier = row.get("credibility_tier")
+                if existing:
+                    try:
+                        item_ids = json.loads(existing["item_ids_json"] or "[]")
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        item_ids = []
+                    item_ids.append(str(row["id"]))
+                    item_ids = sorted(dict.fromkeys(item_ids))
+                    first_seen = min(str(existing["first_seen_at"]), str(first_seen))
+                    latest_seen = max(str(existing["latest_seen_at"]), str(latest_seen))
+                    rank = {"rumored": 1, "reported_by_credible_source": 2, "officially_confirmed": 3}
+                    old_state = str(existing["confirmation_state"] or "rumored")
+                    state = state if rank.get(state, 0) >= rank.get(old_state, 0) else old_state
+                    old_tier = existing["credibility_tier"]
+                    if old_tier is not None and tier is not None:
+                        tier = min(int(old_tier), int(tier))
+                    elif tier is None:
+                        tier = old_tier
+                event_payload = {
+                    "event_id": event_id,
+                    "event_key": event_key,
+                    "team": row.get("team"),
+                    "confirmation_state": state,
+                    "credibility_tier": tier,
+                    "item_ids": item_ids,
+                }
+                db.execute(
+                    """
+                    INSERT INTO news_events(
+                        event_id, team, event_key, first_seen_at, latest_seen_at,
+                        confirmation_state, credibility_tier, item_ids_json, event_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(event_id) DO UPDATE SET
+                        latest_seen_at=excluded.latest_seen_at,
+                        confirmation_state=excluded.confirmation_state,
+                        credibility_tier=excluded.credibility_tier,
+                        item_ids_json=excluded.item_ids_json,
+                        event_json=excluded.event_json
+                    """,
+                    (
+                        event_id,
+                        row.get("team") or "",
+                        str(event_key),
+                        first_seen,
+                        latest_seen,
+                        state,
+                        tier,
+                        to_json(item_ids),
+                        to_json(event_payload),
+                    ),
+                )
         return cur.rowcount if cur.rowcount is not None else 0
+
+    def record_news_source_poll(self, row: dict[str, Any]) -> None:
+        self.init_schema()
+        with self.connect() as db:
+            previous = db.execute(
+                """
+                SELECT consecutive_failures
+                FROM news_source_polls
+                WHERE source_key = ?
+                ORDER BY polled_at DESC
+                LIMIT 1
+                """,
+                (row["source_key"],),
+            ).fetchone()
+            prev_failures = int(previous["consecutive_failures"] or 0) if previous else 0
+            status = str(row.get("status") or "unknown")
+            consecutive = 0 if status == "ok" else prev_failures + 1
+            payload = {**row, "consecutive_failures": consecutive}
+            db.execute(
+                """
+                INSERT INTO news_source_polls(
+                    source_key, team, polled_at, status, http_status, parsed,
+                    inserted, consecutive_failures, retry_after_seconds, error, row_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["source_key"],
+                    row.get("team") or "",
+                    row.get("polled_at") or utc_now(),
+                    status,
+                    row.get("http_status"),
+                    int(row.get("parsed") or 0),
+                    int(row.get("inserted") or 0),
+                    consecutive,
+                    row.get("retry_after_seconds"),
+                    row.get("error"),
+                    to_json(payload),
+                ),
+            )
+
+    def news_detection_latency_summary(self) -> dict[str, Any]:
+        self.init_schema()
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT source, published_at, COALESCE(first_seen_at, fetched_at) AS first_seen_at,
+                       detection_lag_seconds
+                FROM news_items
+                WHERE published_at IS NOT NULL
+                  AND COALESCE(first_seen_at, fetched_at) IS NOT NULL
+                """
+            ).fetchall()
+            polls = db.execute(
+                """
+                SELECT source_key, team, polled_at, status, http_status,
+                       consecutive_failures, error, row_json
+                FROM news_source_polls
+                ORDER BY polled_at DESC
+                """
+            ).fetchall()
+        by_source: dict[str, list[float]] = {}
+        skew_by_source: dict[str, int] = {}
+        for row in rows:
+            lag = row["detection_lag_seconds"]
+            if lag is None:
+                try:
+                    published = datetime.fromisoformat(str(row["published_at"]).replace("Z", "+00:00"))
+                    seen = datetime.fromisoformat(str(row["first_seen_at"]).replace("Z", "+00:00"))
+                    if published.tzinfo is None:
+                        published = published.replace(tzinfo=timezone.utc)
+                    if seen.tzinfo is None:
+                        seen = seen.replace(tzinfo=timezone.utc)
+                    lag = (seen.astimezone(timezone.utc) - published.astimezone(timezone.utc)).total_seconds()
+                except (TypeError, ValueError):
+                    continue
+            if lag is None:
+                continue
+            source = str(row["source"] or "unknown")
+            if float(lag) < 0:
+                skew_by_source[source] = skew_by_source.get(source, 0) + 1
+                lag = 0.0
+            by_source.setdefault(source, []).append(float(lag))
+        source_rows = {}
+        for source, values in by_source.items():
+            values = sorted(values)
+            def pct(q: float) -> float:
+                if not values:
+                    return 0.0
+                idx = min(int(round((len(values) - 1) * q)), len(values) - 1)
+                return round(values[idx] / 60.0, 3)
+            source_rows[source] = {
+                "count": len(values),
+                "clock_skew_count": int(skew_by_source.get(source, 0)),
+                "p50_minutes": pct(0.50),
+                "p90_minutes": pct(0.90),
+                "max_minutes": round(max(values) / 60.0, 3),
+            }
+        latest_by_source: dict[str, dict[str, Any]] = {}
+        for row in polls:
+            key = str(row["source_key"])
+            if key in latest_by_source:
+                continue
+            latest_by_source[key] = {
+                "team": row["team"],
+                "polled_at": row["polled_at"],
+                "status": row["status"],
+                "http_status": row["http_status"],
+                "consecutive_failures": row["consecutive_failures"],
+                "error": row["error"],
+            }
+        alarms = [
+            {**row, "source_key": source}
+            for source, row in latest_by_source.items()
+            if int(row.get("consecutive_failures") or 0) >= 3
+        ]
+        return {
+            "source_latency": source_rows,
+            "latest_source_polls": latest_by_source,
+            "source_alarms": alarms,
+        }
+
+    def news_market_move_report(self) -> dict[str, Any]:
+        self.init_schema()
+        with self.connect() as db:
+            events = db.execute(
+                """
+                SELECT *
+                FROM news_events
+                ORDER BY first_seen_at DESC
+                LIMIT 50
+                """
+            ).fetchall()
+            snapshots = db.execute(
+                """
+                SELECT *
+                FROM closing_snapshots
+                ORDER BY captured_at ASC
+                """
+            ).fetchall()
+        rows = []
+        for event in events:
+            try:
+                event_json = json.loads(event["event_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                event_json = {}
+            team = str(event["team"] or "").lower()
+            first_seen = _parse_dt(event["first_seen_at"])
+            if first_seen is None:
+                continue
+            matched = []
+            for snap in snapshots:
+                try:
+                    market = json.loads(snap["market_json"] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    market = {}
+                haystack = " ".join(str(v or "") for v in (
+                    market.get("title"),
+                    market.get("ticker"),
+                    market.get("team"),
+                    snap["ticker"],
+                )).lower()
+                captured = _parse_dt(snap["captured_at"])
+                if not team or team not in haystack or captured is None or captured < first_seen:
+                    continue
+                matched.append({
+                    "ticker": snap["ticker"],
+                    "captured_at": snap["captured_at"],
+                    "minutes_after_detection": round((captured - first_seen).total_seconds() / 60.0, 3),
+                    "executable_cents": snap["executable_cents"],
+                    "kalshi_mid_cents": snap["kalshi_mid_cents"],
+                })
+            if matched:
+                rows.append({
+                    "event_id": event["event_id"],
+                    "team": event["team"],
+                    "confirmation_state": event["confirmation_state"],
+                    "first_seen_at": event["first_seen_at"],
+                    "market_observations": matched[:5],
+                    "event": event_json,
+                })
+        return {
+            "event_count": len(events),
+            "measured_event_count": len(rows),
+            "rows": rows,
+            "conclusion": (
+                "insufficient linked news-event and Kalshi trajectory data"
+                if not rows else
+                "market observations found; inspect rows for reprice timing"
+            ),
+        }
 
     def existing_news_content_hashes(self, hashes: Iterable[str]) -> set[str]:
         self.init_schema()

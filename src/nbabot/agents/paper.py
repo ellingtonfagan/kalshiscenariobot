@@ -81,6 +81,35 @@ def _paper_demo_mode(settings: object) -> bool:
     return mode in {"paper", "demo"}
 
 
+def _news_confirmation(row: dict, meta: dict) -> dict[str, Any]:
+    for candidate in (
+        row.get("news_event"),
+        meta.get("news_event"),
+        row.get("confirmation"),
+        meta.get("confirmation"),
+    ):
+        if isinstance(candidate, dict):
+            return candidate
+    state = row.get("confirmation_state") or meta.get("confirmation_state")
+    tier = row.get("credibility_tier") or meta.get("credibility_tier")
+    return {"confirmation_state": state, "credibility_tier": tier} if state or tier else {}
+
+
+def _news_stake_scale(event: dict[str, Any]) -> float:
+    state = str(event.get("confirmation_state") or "officially_confirmed")
+    try:
+        tier = int(event.get("credibility_tier") or 3)
+    except (TypeError, ValueError):
+        tier = 3
+    state_scale = {
+        "officially_confirmed": 1.0,
+        "reported_by_credible_source": 0.50,
+        "rumored": 0.20,
+    }.get(state, 0.20)
+    tier_scale = {1: 1.0, 2: 0.75, 3: 0.50, 4: 0.30, 5: 0.15}.get(tier, 0.20)
+    return max(min(state_scale * tier_scale, 1.0), 0.05)
+
+
 def _latest_balance_usd(ctx: Context) -> tuple[float, str, str | None]:
     return latest_balance_usd(ctx)
 
@@ -175,6 +204,15 @@ def _intent_from_row(
     edge = net_edge
     research_override = bool(row.get("research_override", False))
     signal_source = _row_signal_source(row, meta)
+    news_event = _news_confirmation(row, meta)
+    confirmation_state = str(news_event.get("confirmation_state") or "")
+    if (
+        signal_source in {"qual", "qual_activated_quant"}
+        and confirmation_state
+        and confirmation_state != "officially_confirmed"
+        and not bool(getattr(ctx.settings, "trade_unconfirmed_news", False))
+    ):
+        return None
     min_edge = _effective_row_min_edge(ctx.settings, signal_source, row, meta)
     if edge < min_edge and not research_override:
         return None
@@ -233,6 +271,25 @@ def _intent_from_row(
         stake_units = contract_size.units_staked
         side = row.get("side") or size.side
         entry_price_cents = size.entry_price_cents
+
+    if (
+        signal_source in {"qual", "qual_activated_quant"}
+        and confirmation_state
+        and confirmation_state != "officially_confirmed"
+        and bool(getattr(ctx.settings, "trade_unconfirmed_news", False))
+    ):
+        scaled = contracts_for_units(
+            stake_units * _news_stake_scale(news_event),
+            int(entry_price_cents),
+            unit,
+            minimum_contracts=minimum_contracts,
+            max_order_notional_fraction=max_notional_fraction,
+        )
+        if scaled.contracts <= 0:
+            return None
+        contract_size = scaled
+        contracts = scaled.contracts
+        stake_units = scaled.units_staked
 
     risk = int(row.get("risk", 0) or 0)
     validated = bool(meta.get("validated") or meta.get("market_type_verdict") == "validated")

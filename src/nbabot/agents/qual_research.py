@@ -90,7 +90,12 @@ def run(ctx: Context | None = None) -> dict:
     retrieval_stats = {
         "market_count": len(markets),
         "hit_count": 0,
+        "context_count": 0,
         "leaked_context_count": 0,
+        "source_counts": {},
+        "evidence_context_count": 0,
+        "opinion_context_count": 0,
+        "evidence_floor_failed_count": 0,
         "corpus": store.qual_rag_corpus_summary(),
     }
     # Retrieval failures should not make the research phase crash; the model
@@ -100,9 +105,19 @@ def run(ctx: Context | None = None) -> dict:
             ticker = str(market.get("ticker") or "")
             result = retrieve_contexts_for_market(market=market, chunks=chunks)
             contexts = result.get("contexts") or []
+            composition = result.get("composition") or {}
             retrieval_contexts[ticker] = contexts
             retrieval_stats["hit_count"] += 1 if contexts else 0
+            retrieval_stats["context_count"] += len(contexts)
             retrieval_stats["leaked_context_count"] += int(result.get("leaked_context_count") or 0)
+            retrieval_stats["evidence_context_count"] += int(composition.get("evidence_count") or 0)
+            retrieval_stats["opinion_context_count"] += int(composition.get("opinion_count") or 0)
+            if contexts and not composition.get("evidence_floor_met"):
+                retrieval_stats["evidence_floor_failed_count"] += 1
+            for source_type, count in (composition.get("source_counts") or {}).items():
+                retrieval_stats["source_counts"][source_type] = (
+                    int(retrieval_stats["source_counts"].get(source_type) or 0) + int(count or 0)
+                )
             query = result.get("query")
             store.record_qual_signal_retrieval(
                 model_run_id="pending",

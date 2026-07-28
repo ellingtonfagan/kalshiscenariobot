@@ -13,6 +13,7 @@ from .research_news import (
     ResearchTeam,
     _is_recent,
     fetch_url,
+    fetch_with_retries,
     item_matches_team,
     parse_feed,
 )
@@ -172,13 +173,36 @@ def fetch_new_hits(
                 "hits": 0,
             }
             try:
-                http_status, body = fetcher(str(source["url"]), user_agent=user_agent)
+                http_status, body, retry_meta = fetch_with_retries(
+                    str(source["url"]),
+                    user_agent=user_agent,
+                    fetcher=fetcher,
+                    attempts=3,
+                    base_sleep_seconds=0.2,
+                )
                 status["http_status"] = http_status
-                items = parse_feed(body, source=str(source.get("name") or source.get("url")), team=team.key)
+                status["retry_after_seconds"] = retry_meta.get("retry_after_seconds")
+                items = parse_feed(
+                    body,
+                    source=str(source.get("name") or source.get("url")),
+                    team=team.key,
+                    feed=source,
+                )
             except Exception as exc:
                 status["status"] = f"error:{exc.__class__.__name__}"
                 status["error"] = str(exc)
                 source_status.append(status)
+                recorder = getattr(store, "record_news_source_poll", None)
+                if callable(recorder):
+                    recorder({
+                        "source_key": f"{team.key}:{source.get('name') or source.get('url')}",
+                        "team": team.key,
+                        "status": status["status"],
+                        "http_status": status.get("http_status"),
+                        "parsed": 0,
+                        "inserted": 0,
+                        "error": status.get("error"),
+                    })
                 continue
 
             filtered = []
@@ -220,6 +244,17 @@ def fetch_new_hits(
                 "new": len(new_items),
                 "hits": sum(1 for hit in hits if hit.get("team") == team.key and hit.get("source") == source.get("name")),
             })
+            recorder = getattr(store, "record_news_source_poll", None)
+            if callable(recorder):
+                recorder({
+                    "source_key": f"{team.key}:{source.get('name') or source.get('url')}",
+                    "team": team.key,
+                    "status": status["status"],
+                    "http_status": status.get("http_status"),
+                    "parsed": status.get("parsed", 0),
+                    "inserted": status.get("inserted", 0),
+                    "retry_after_seconds": status.get("retry_after_seconds"),
+                })
             team_counts[team.key]["parsed"] += len(filtered)
             team_counts[team.key]["inserted"] += inserted
             team_counts[team.key]["new"] += len(new_items)
