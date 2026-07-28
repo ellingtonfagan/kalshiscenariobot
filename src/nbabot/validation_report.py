@@ -139,6 +139,7 @@ def report(
     records: Iterable[dict[str, Any]],
     *,
     default_sport: str | None = None,
+    qual_rag_stats: dict[str, Any] | None = None,
     min_validated_n: int = VALIDATION_MIN_SETTLED,
     min_clv_beat_rate: float = VALIDATION_MIN_CLV_BEAT_RATE,
     min_brier_improvement: float = BRIER_MIN_IMPROVEMENT,
@@ -202,6 +203,7 @@ def report(
         "group_count": len(groups),
         "validation_thresholds": thresholds,
         "overall_concentration": overall_concentration,
+        "qual_rag": qual_rag_stats or {},
         "groups": groups,
         "notes": [
             "CLV-unmeasured settlements are excluded from CLV rates and do not satisfy the CLV criterion.",

@@ -1708,6 +1708,38 @@ were changed, and no scheduler or cron work was added.
 
 ---
 
+## Round 25 - 2026-07-28 - Retrieval-grounded qualitative scenario engine
+
+### What changed in code
+
+- Replaced raw recency-only qual context with a local retrieval corpus built from the bot's own accumulated experience: `news_items`, `settlement_records`, prior `qual_signals` scenario branches, `qual_postmortems`, `qual_lessons`, and `closing_snapshots` when present.
+- Added stdlib-only local embeddings (`hashbow-v1`, 96 dimensions) stored in SQLite. The corpus is small enough for brute-force cosine over a few thousand chunks, so no vector DB or ML stack was added.
+- Added source-specific chunking: news stays one source item per chunk, settlement and closing rows become compact ledger summaries, scenario signals chunk per saved branch, and postmortems/lessons preserve the judgment/evidence trail.
+- Added hybrid retrieval with dense cosine plus BM25-ish lexical scoring, reciprocal-rank fusion, and a deterministic reranker that rewards team, market-family, and precedent source matches.
+- Added an explicit no-lookahead guard: retrieval excludes chunks with `source_timestamp` after a market close/cutoff, and tests deliberately prove after-close chunks are not retrievable.
+- Added anti-leakage branch schema fields: `evidence_ids` and `status`. Unsupported branches are recorded for analysis but do not count toward tradeable probability.
+- Added deterministic groundedness scoring and persistence. Signals below `NBABOT_QUAL_MIN_GROUNDEDNESS` default `0.6` are recorded as not tradeable with a blocker reason.
+- Added `qual-index` phase plus status, UI, and validation-report telemetry for corpus size, retrieval count, mean groundedness, unsupported-branch rate, and low-groundedness blocks.
+
+### Tests
+
+- Full suite: `.venv/bin/pytest -q` -> `172 passed in 2.28s`.
+- Compile pass: `.venv/bin/python -m compileall src/nbabot tests/test_smoke.py`.
+- `git diff --check` passed.
+- New tests cover incremental/idempotent indexing, provenance round trip, no-lookahead filtering, hybrid retrieval and reranking, unsupported branch mass, groundedness blocking, and LLM-unavailable fail-soft behavior.
+
+### Real behavior check
+
+- Real index build: `.venv/bin/nbabot qual-index` completed against `data/research.sqlite`.
+- Real corpus after indexing: `4,295` chunks before the qual run, then `4,320` after new signals were recorded. Source counts after the run: `news_items=831`, `qual_signals=3446`, `settlement_records=28`, `qual_postmortems=6`, `qual_lessons=9`. `closing_snapshots` had no populated rows in this DB at verification time.
+- Real no-lookahead guard: using the earliest settled ticker cutoff (`KXMLBGAME-26JUN221940LADMIN-MIN`, cutoff `2026-07-07T20:23:55.822279+00:00`), the corpus contained `4,214` after-cutoff chunks; retrieval returned `50` contexts and `0` after-cutoff contexts.
+- Real qual-research pass: `.venv/bin/nbabot qual-research` exited cleanly with `status=ok`, `engine=codex`, `markets=23`, `news=60`, `produced=6`, `accepted=3`, `inserted=3`.
+- Example real retrieval-grounded signal: `KXMLBGAME-26JUL281840BALDET-DET`, `qual_prob=0.53`, `tradeable=true`, `groundedness=0.825`. All four branches carried `status=supported` with evidence ids including `c0a128741b0aeed545ab1f8d`, `cfe25f9381d18cde6684c83e`, `25f21fdba2c2d1d436bfc189`, and `06a6788c5e0ca401354ba0a0`.
+- Stored groundedness metrics for the real run: `3` scores, mean groundedness `0.825`, unsupported-branch rate `0.25`, low-groundedness blocked `0`.
+- No live execution env vars were set to live values and no live orders were placed.
+
+---
+
 ## Round 20 - 2026-07-07 - Phase 16 fee-adjusted edges, QAQ, fallback, and baskets
 
 ### What changed in code

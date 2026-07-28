@@ -50,6 +50,7 @@ def run(ctx: Context | None = None) -> dict:
     payload = build_validation_report(
         store.list_settlement_records(),
         default_sport=ctx.settings.sport,
+        qual_rag_stats=store.qual_rag_corpus_summary(),
         concentration_max_winner_share=float(
             getattr(ctx.settings, "concentration_max_winner_share", 0.50)
         ),

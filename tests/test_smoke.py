@@ -47,6 +47,7 @@ from nbabot import (  # noqa: E402
     performance_learner,
     qual_learning,
     qual_postmortem as qual_postmortem_core,
+    qual_rag,
     qual_research as qual_research_core,
     research_news,
     news_watch as news_watch_core,
@@ -1471,6 +1472,213 @@ def test_qual_prompt_injects_lessons_and_calibration_lines():
     assert "Do not upgrade bullpen rest without late leverage evidence." in prompt
     assert "your 0.55-0.65 confidence signals have resolved correctly 1/2 times" in prompt
     assert qual_research_core.QUAL_PROMPT_VERSION in prompt
+
+
+def test_qual_rag_index_incremental_idempotent_and_provenance_round_trip(tmp_path):
+    store = research.ResearchStore(tmp_path / "research.sqlite")
+    store.record_news_items([
+        {
+            "id": "news-a",
+            "team": "yankees",
+            "source": "fixture",
+            "title": "Yankees bullpen rested before Boston game",
+            "body": "The bullpen has three rested leverage arms available.",
+            "url": "https://example.com/a",
+            "published_at": "2026-07-07T18:00:00+00:00",
+            "fetched_at": "2026-07-07T18:05:00+00:00",
+            "content_hash": "hash-a",
+        }
+    ])
+
+    first = store.build_qual_rag_index()
+    second = store.build_qual_rag_index()
+    chunks = store.qual_rag_chunks()
+
+    assert first["chunk_count"] == second["chunk_count"] == 1
+    assert chunks[0]["source_type"] == "news_items"
+    assert chunks[0]["source_id"] == "news-a"
+    assert chunks[0]["embedding"]
+
+
+def test_qual_rag_no_lookahead_retrieval_filters_after_close():
+    before = {
+        "chunk_id": "before",
+        "source_type": "qual_lessons",
+        "source_id": "l1",
+        "source_timestamp": "2026-07-07T18:00:00+00:00",
+        "teams": ["yankees"],
+        "market_family": "mlb moneyline",
+        "text": "Yankees bullpen was rested before first pitch.",
+        "embedding": qual_rag.embedding("Yankees bullpen rested moneyline"),
+    }
+    after = {
+        **before,
+        "chunk_id": "after",
+        "source_id": "l2",
+        "source_timestamp": "2026-07-07T21:00:00+00:00",
+        "text": "After close recap says Yankees won easily.",
+        "embedding": qual_rag.embedding("Yankees won easily after close"),
+    }
+
+    result = qual_research_core.retrieve_contexts_for_market(
+        market={
+            "ticker": "KXQUAL1",
+            "title": "Yankees beat Boston",
+            "teams": ["yankees"],
+            "market_family": "mlb moneyline",
+            "close_time": "2026-07-07T19:00:00+00:00",
+        },
+        chunks=[after, before],
+    )
+
+    assert [row["chunk_id"] for row in result["contexts"]] == ["before"]
+    assert result["leaked_context_count"] == 1
+    assert not qual_rag.timestamp_lte(after["source_timestamp"], "2026-07-07T19:00:00+00:00")
+
+
+def test_hybrid_retrieval_prefers_relevant_precedent_and_rerank_changes_order():
+    recent_irrelevant = {
+        "chunk_id": "recent",
+        "source_type": "news_items",
+        "source_id": "n1",
+        "source_timestamp": "2026-07-07T18:30:00+00:00",
+        "teams": ["mets"],
+        "market_family": "mlb total",
+        "text": "Mets weather note for a high total.",
+        "embedding": qual_rag.embedding("Mets weather total"),
+    }
+    precedent = {
+        "chunk_id": "precedent",
+        "source_type": "qual_postmortems",
+        "source_id": "p1",
+        "source_timestamp": "2026-07-06T18:30:00+00:00",
+        "teams": ["yankees"],
+        "market_family": "mlb moneyline",
+        "text": "Yankees moneyline precedent: bullpen rest mattered more than a stale headline.",
+        "embedding": qual_rag.embedding("Yankees moneyline bullpen rest precedent"),
+    }
+
+    result = qual_research_core.retrieve_contexts_for_market(
+        market={
+            "ticker": "KXQUAL1",
+            "title": "Yankees moneyline",
+            "teams": ["yankees"],
+            "market_family": "mlb moneyline",
+            "close_time": "2026-07-07T19:00:00+00:00",
+        },
+        chunks=[recent_irrelevant, precedent],
+    )
+
+    assert result["contexts"][0]["chunk_id"] == "precedent"
+    assert result["contexts"][0]["rerank_score"] >= result["contexts"][-1]["rerank_score"]
+
+
+def test_anti_leakage_schema_unsupported_branches_do_not_contribute_tradeable_mass():
+    branches = [
+        {
+            "event": "Supported bullpen edge",
+            "p_event": 0.40,
+            "p_outcome_given_event": 0.80,
+            "citations": ["https://example.com/a"],
+            "evidence_ids": ["chunk-a"],
+            "status": "supported",
+        },
+        {
+            "event": "Unsupported lineup speculation",
+            "p_event": 0.60,
+            "p_outcome_given_event": 0.90,
+            "citations": ["https://example.com/a"],
+            "evidence_ids": [],
+            "status": "unsupported",
+        },
+    ]
+
+    assert qual_rag.branch_tradeable_mass(branches) == pytest.approx(0.40)
+    assert qual_rag.supported_probability(branches) == pytest.approx(0.32)
+
+    scenarios, err = qual_research_core._validate_scenarios(
+        row={"scenarios": branches},
+        prob=0.86,
+        allowed_urls={"https://example.com/a"},
+        allowed_evidence_ids={"chunk-a"},
+        require_evidence=True,
+    )
+
+    assert scenarios is None
+    assert "supported branch mass" in err
+
+
+def test_groundedness_scoring_blocks_low_groundedness_signal():
+    raw = json.dumps([
+        {
+            "ticker": "KXQUAL1",
+            "base_rate": 0.50,
+            "qual_prob": 0.60,
+            "confidence": 0.70,
+            "rationale": "Unsupported jump.",
+            "citation_urls": ["https://example.com/a"],
+            "news_item_ids_used": ["news-a"],
+            "scenarios": [
+                {
+                    "event": "Star striker returns from injury",
+                    "p_event": 0.50,
+                    "p_outcome_given_event": 0.70,
+                    "citations": ["https://example.com/a"],
+                    "evidence_ids": ["chunk-a"],
+                    "status": "supported",
+                },
+                {
+                    "event": "Market baseline remains intact",
+                    "p_event": 0.50,
+                    "p_outcome_given_event": 0.50,
+                    "citations": ["https://example.com/a"],
+                    "evidence_ids": ["chunk-a"],
+                    "status": "supported",
+                },
+            ],
+        }
+    ])
+    contexts = {
+        "KXQUAL1": [{
+            "chunk_id": "chunk-a",
+            "evidence_id": "chunk-a",
+            "text": "Yankees bullpen rested before first pitch.",
+            "source_type": "news_items",
+        }]
+    }
+
+    result = qual_research_core.validate_qual_output(
+        raw,
+        allowed_tickers={"KXQUAL1"},
+        allowed_urls={"https://example.com/a"},
+        allowed_news_item_ids={"news-a"},
+        url_to_news_item_ids={"https://example.com/a": ["news-a"]},
+        model_run_id="run-rag",
+        retrieval_contexts=contexts,
+        min_groundedness=0.90,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0]["tradeable"] is False
+    assert result.accepted[0]["blocked_reason"] == "low-groundedness"
+    assert result.accepted[0]["groundedness"] < 0.90
+
+
+def test_llm_judge_failure_does_not_break_qual_cycle():
+    def invoker(command, prompt, timeout_seconds):
+        return False, "", "command not found"
+
+    result = qual_research_core.run_qual_model(
+        command="/missing/codex exec",
+        news_items=[{"id": "news-a", "url": "https://example.com/a", "title": "Yankees", "summary": "news"}],
+        markets=[{"ticker": "KXQUAL1", "title": "Yankees win"}],
+        retrieval_contexts={"KXQUAL1": [{"chunk_id": "chunk-a", "text": "Yankees bullpen rested."}]},
+        timeout_seconds=1,
+        invoker=invoker,
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "command not found"
 
 
 def _broad_execution_artifacts(now, learning, *, validated):

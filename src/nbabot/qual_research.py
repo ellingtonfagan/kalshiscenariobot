@@ -11,15 +11,29 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .performance_learner import market_family
+from .qual_rag import (
+    RetrievalQuery,
+    branch_tradeable_mass,
+    cosine,
+    embedding,
+    groundedness_score,
+    keyword_score,
+    rerank,
+    rrf_fuse,
+    supported_probability,
+    timestamp_lte,
+    validate_branch_evidence,
+)
 from .research import utc_now
 from .research_news import ResearchTeam, item_matches_team
 
 
 MIN_CONFIDENCE = 0.55
 USAGE_LIMIT_RE = re.compile(r"(usage limit|quota|rate limit|limit reached|too many requests)", re.I)
-QUAL_PROMPT_VERSION = "qual-scenario-v1"
+QUAL_PROMPT_VERSION = "qual-scenario-rag-v2"
 SCENARIO_EVENT_SUM_TOLERANCE = 0.025
 SCENARIO_PROB_SUM_TOLERANCE = 0.015
+MIN_TRADEABLE_BRANCH_MASS = 0.50
 PRIMARY_UNAVAILABLE_REASONS = {"usage-limit", "timeout", "command not found", "missing command"}
 
 
@@ -49,12 +63,14 @@ QUAL_SIGNAL_ARRAY_SCHEMA: dict[str, Any] = {
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["event", "p_event", "p_outcome_given_event", "citations"],
+                    "required": ["event", "p_event", "p_outcome_given_event", "citations", "evidence_ids", "status"],
                     "properties": {
                         "event": {"type": "string"},
                         "p_event": {"type": "number"},
                         "p_outcome_given_event": {"type": "number"},
                         "citations": {"type": "array", "items": {"type": "string"}},
+                        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+                        "status": {"type": "string", "enum": ["supported", "unsupported"]},
                     },
                 },
             },
@@ -217,10 +233,82 @@ def news_for_prompt(news_items: list[dict[str, Any]], teams: list[ResearchTeam],
     return rows[:max_items]
 
 
+def build_retrieval_query(market: dict[str, Any]) -> RetrievalQuery:
+    text = " ".join(
+        str(market.get(key) or "")
+        for key in ("ticker", "title", "candidate_id", "market_family")
+    )
+    text = " ".join([
+        text,
+        " ".join(str(team) for team in market.get("teams") or []),
+    ]).strip()
+    return RetrievalQuery(
+        ticker=str(market.get("ticker") or ""),
+        text=text,
+        teams=tuple(str(team) for team in (market.get("teams") or []) if str(team)),
+        market_family=str(market.get("market_family") or ""),
+        close_time=market.get("close_time"),
+    )
+
+
+def retrieve_contexts_for_market(
+    *,
+    market: dict[str, Any],
+    chunks: list[dict[str, Any]],
+    limit: int = 8,
+) -> dict[str, Any]:
+    """Hybrid retrieval with explicit no-lookahead filtering.
+
+    Dense similarity gives semantic-ish recall from the local hashed vectors.
+    Sparse scoring keeps exact teams, players, tickers, and market families
+    from being washed out. Reranking then rewards source precedent and direct
+    team/family overlap.
+    """
+    query = build_retrieval_query(market)
+    q_vec = embedding(query.text)
+    eligible = [
+        chunk for chunk in chunks
+        if timestamp_lte(chunk.get("source_timestamp"), query.close_time)
+    ]
+    leaked = len(chunks) - len(eligible) if query.close_time else 0
+    if not eligible:
+        return {"query": query, "contexts": [], "leaked_context_count": leaked}
+    dense = []
+    sparse = []
+    for chunk in eligible:
+        c_vec = chunk.get("embedding") or []
+        dense_score = cosine(q_vec, c_vec) if c_vec else 0.0
+        sparse_score = keyword_score(query.text, chunk)
+        base = {
+            "chunk_id": chunk.get("chunk_id"),
+            "evidence_id": chunk.get("chunk_id"),
+            "source_type": chunk.get("source_type"),
+            "source_id": chunk.get("source_id"),
+            "source_row_id": chunk.get("source_row_id"),
+            "source_timestamp": chunk.get("source_timestamp"),
+            "team": chunk.get("team"),
+            "teams": chunk.get("teams") or [],
+            "teams_json": json.dumps(chunk.get("teams") or [], sort_keys=True),
+            "ticker": chunk.get("ticker"),
+            "market_family": chunk.get("market_family"),
+            "title": chunk.get("title"),
+            "text": chunk.get("text"),
+            "metadata": chunk.get("metadata") or {},
+        }
+        dense.append({**base, "dense_score": round(dense_score, 8), "score": dense_score})
+        sparse.append({**base, "sparse_score": sparse_score, "score": sparse_score})
+    dense.sort(key=lambda row: row.get("dense_score") or 0.0, reverse=True)
+    sparse.sort(key=lambda row: row.get("sparse_score") or 0.0, reverse=True)
+    fused = rrf_fuse(dense[: max(limit * 4, 20)], sparse[: max(limit * 4, 20)])
+    contexts = rerank(query, fused, limit=limit)
+    return {"query": query, "contexts": contexts, "leaked_context_count": leaked}
+
+
 def build_prompt(
     *,
     news_items: list[dict[str, Any]],
     markets: list[dict[str, Any]],
+    retrieval_contexts: dict[str, list[dict[str, Any]]] | None = None,
     lessons: list[dict[str, Any]] | None = None,
     calibration_lines: list[str] | None = None,
     retry_error: str | None = None,
@@ -229,15 +317,25 @@ def build_prompt(
         '[{"ticker":"...","base_rate":0.50,"qual_prob":0.50,"confidence":0.70,'
         '"rationale":"One or two sentences.",'
         '"scenarios":[{"event":"short branch description","p_event":0.50,'
-        '"p_outcome_given_event":0.60,"citations":["https://..."]}],'
+        '"p_outcome_given_event":0.60,"citations":["https://..."],'
+        '"evidence_ids":["chunk-id"],"status":"supported"}],'
         '"citation_urls":["https://..."],"news_item_ids_used":["..."]}]'
     )
+    retrieval_contexts = retrieval_contexts or {}
+    allowed_evidence_ids = sorted({
+        str(row.get("evidence_id") or row.get("chunk_id"))
+        for rows in retrieval_contexts.values()
+        for row in rows
+        if row.get("evidence_id") or row.get("chunk_id")
+    })
     payload = {
         "news_items": news_items,
         "markets": markets,
+        "retrieved_context_by_ticker": retrieval_contexts,
         "allowed_tickers": [row["ticker"] for row in markets],
         "allowed_citation_urls": sorted({row["url"] for row in news_items if row.get("url")}),
         "allowed_news_item_ids": sorted({row["id"] for row in news_items if row.get("id")}),
+        "allowed_evidence_ids": allowed_evidence_ids,
         "lessons": lessons or [],
         "calibration": calibration_lines or [],
         "prompt_version": QUAL_PROMPT_VERSION,
@@ -246,9 +344,13 @@ def build_prompt(
     return (
         "You are pricing Kalshi sports markets that lack sportsbook consensus. "
         "Use only the provided news/discussion items and market rows. "
+        "Prefer retrieved_context_by_ticker over raw recency. "
         "Decompose every forecast into 2-4 mutually exclusive, collectively exhaustive scenario branches. "
         "The scenario p_event values must sum to about 1.0, and qual_prob must equal "
         "sum(p_event * p_outcome_given_event) within rounding. "
+        "Every scenario branch must include evidence_ids copied from allowed_evidence_ids. "
+        "If a branch is plausible but not supported by retrieved evidence, set status='unsupported'; "
+        "unsupported branches are for analysis only and cannot justify tradeable probability. "
         "base_rate is your prior before the provided news; qual_prob is after applying the news. "
         "Use the lessons and calibration lines to correct recurring bias without copying them blindly. "
         "Return STRICT JSON only, with no markdown, no prose wrapper, and no comments. "
@@ -417,6 +519,8 @@ def _validate_scenarios(
     row: dict[str, Any],
     prob: float,
     allowed_urls: set[str],
+    allowed_evidence_ids: set[str] | None = None,
+    require_evidence: bool = False,
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
     raw_scenarios = row.get("scenarios")
     if not isinstance(raw_scenarios, list) or not 2 <= len(raw_scenarios) <= 4:
@@ -424,13 +528,21 @@ def _validate_scenarios(
     scenarios = []
     p_event_sum = 0.0
     point_sum = 0.0
-    for idx, branch in enumerate(raw_scenarios):
+    branches_with_evidence, evidence_errors = validate_branch_evidence(
+        raw_scenarios,
+        allowed_evidence_ids or set(),
+    )
+    if require_evidence and evidence_errors:
+        return None, "; ".join(evidence_errors[:2])
+    for idx, branch in enumerate(branches_with_evidence):
         if not isinstance(branch, dict):
             return None, f"scenario {idx} is not an object"
         event = str(branch.get("event") or "").strip()
         p_event = _prob_or_none(branch.get("p_event"))
         conditional = _prob_or_none(branch.get("p_outcome_given_event"))
         citations = _valid_citations(branch.get("citations"), allowed_urls)
+        status = str(branch.get("status") or "supported")
+        evidence_ids = [str(eid) for eid in (branch.get("evidence_ids") or [])]
         if not event:
             return None, f"scenario {idx} missing event"
         if p_event is None:
@@ -439,18 +551,30 @@ def _validate_scenarios(
             return None, f"scenario {idx} invalid p_outcome_given_event"
         if not citations:
             return None, f"scenario {idx} missing valid citations"
+        if require_evidence and status == "supported" and not evidence_ids:
+            return None, f"scenario {idx} supported without evidence_ids"
         p_event_sum += p_event
-        point_sum += p_event * conditional
+        if status == "supported":
+            point_sum += p_event * conditional
         scenarios.append({
             "event": event[:220],
             "p_event": p_event,
             "p_outcome_given_event": conditional,
             "citations": sorted(dict.fromkeys(citations)),
+            "evidence_ids": sorted(dict.fromkeys(evidence_ids)),
+            "status": status,
         })
     if abs(p_event_sum - 1.0) > SCENARIO_EVENT_SUM_TOLERANCE:
         return None, f"scenario p_event sum {p_event_sum:.4f} != 1.0"
-    if abs(point_sum - prob) > SCENARIO_PROB_SUM_TOLERANCE:
-        return None, f"scenario weighted probability {point_sum:.4f} != qual_prob {prob:.4f}"
+    if require_evidence:
+        tradeable_mass = branch_tradeable_mass(scenarios)
+        if tradeable_mass < MIN_TRADEABLE_BRANCH_MASS:
+            return None, f"supported branch mass {tradeable_mass:.4f} below {MIN_TRADEABLE_BRANCH_MASS:.2f}"
+        if abs(point_sum - prob) > SCENARIO_PROB_SUM_TOLERANCE:
+            return None, f"supported scenario weighted probability {point_sum:.4f} != qual_prob {prob:.4f}"
+    elif abs(sum(b["p_event"] * b["p_outcome_given_event"] for b in scenarios) - prob) > SCENARIO_PROB_SUM_TOLERANCE:
+        total = sum(b["p_event"] * b["p_outcome_given_event"] for b in scenarios)
+        return None, f"scenario weighted probability {total:.4f} != qual_prob {prob:.4f}"
     return scenarios, None
 
 
@@ -463,6 +587,8 @@ def validate_qual_output(
     allowed_news_item_ids: set[str] | None = None,
     url_to_news_item_ids: dict[str, list[str]] | None = None,
     market_by_ticker: dict[str, dict[str, Any]] | None = None,
+    retrieval_contexts: dict[str, list[dict[str, Any]]] | None = None,
+    min_groundedness: float = 0.6,
     created_at: str | None = None,
     engine: str = "codex",
 ) -> QualValidationResult:
@@ -473,6 +599,15 @@ def validate_qual_output(
     allowed_news_item_ids = allowed_news_item_ids or set()
     url_to_news_item_ids = url_to_news_item_ids or {}
     market_by_ticker = market_by_ticker or {}
+    retrieval_contexts = retrieval_contexts or {}
+    allowed_evidence_ids_by_ticker = {
+        ticker: {
+            str(ctx.get("evidence_id") or ctx.get("chunk_id"))
+            for ctx in rows
+            if ctx.get("evidence_id") or ctx.get("chunk_id")
+        }
+        for ticker, rows in retrieval_contexts.items()
+    }
     accepted = []
     discarded = []
     retry_error = None
@@ -505,6 +640,8 @@ def validate_qual_output(
             row=row,
             prob=prob,
             allowed_urls=allowed_urls,
+            allowed_evidence_ids=allowed_evidence_ids_by_ticker.get(ticker),
+            require_evidence=bool(retrieval_contexts.get(ticker)),
         )
         if scenario_error:
             retry_error = scenario_error
@@ -531,9 +668,23 @@ def validate_qual_output(
             "model_run_id": model_run_id,
             "prompt_version": QUAL_PROMPT_VERSION,
             "market": market_by_ticker.get(ticker, {}),
+            "retrieved_context": retrieval_contexts.get(ticker, []),
             "created_at": created_at,
             "engine": engine,
         }
+        score = groundedness_score(analysis, retrieval_contexts.get(ticker, []))
+        tradeable = True
+        blocked_reason = None
+        if retrieval_contexts.get(ticker):
+            if score["groundedness"] < float(min_groundedness):
+                tradeable = False
+                blocked_reason = "low-groundedness"
+            if branch_tradeable_mass(scenarios or []) < MIN_TRADEABLE_BRANCH_MASS:
+                tradeable = False
+                blocked_reason = "unsupported-branch-mass"
+        analysis["groundedness"] = score
+        analysis["tradeable"] = tradeable
+        analysis["blocked_reason"] = blocked_reason
         accepted.append({
             "ticker": ticker,
             "base_rate": analysis["base_rate"],
@@ -544,6 +695,10 @@ def validate_qual_output(
             "news_item_ids_used": news_item_ids,
             "scenarios": scenarios or [],
             "analysis": analysis,
+            "groundedness": score["groundedness"],
+            "groundedness_score": score,
+            "tradeable": tradeable,
+            "blocked_reason": blocked_reason,
             "created_at": created_at,
             "engine": engine,
             "model_run_id": model_run_id,
@@ -827,6 +982,8 @@ def run_qual_model(
     news_items: list[dict[str, Any]],
     markets: list[dict[str, Any]],
     timeout_seconds: int,
+    retrieval_contexts: dict[str, list[dict[str, Any]]] | None = None,
+    min_groundedness: float = 0.6,
     lessons: list[dict[str, Any]] | None = None,
     calibration_lines: list[str] | None = None,
     invoker: Any = invoke_codex_cli,
@@ -843,6 +1000,7 @@ def run_qual_model(
         if item.get("url") and item.get("id"):
             url_to_news_item_ids.setdefault(str(item["url"]), []).append(str(item["id"]))
     market_by_ticker = {str(row["ticker"]): row for row in markets if row.get("ticker")}
+    retrieval_contexts = retrieval_contexts or {}
     if not markets:
         return {
             "status": "ok",
@@ -867,6 +1025,7 @@ def run_qual_model(
         prompt = build_prompt(
             news_items=news_items,
             markets=markets,
+            retrieval_contexts=retrieval_contexts,
             lessons=lessons,
             calibration_lines=calibration_lines,
             retry_error=retry_error,
@@ -903,6 +1062,8 @@ def run_qual_model(
                 allowed_news_item_ids=allowed_news_item_ids,
                 url_to_news_item_ids=url_to_news_item_ids,
                 market_by_ticker=market_by_ticker,
+                retrieval_contexts=retrieval_contexts,
+                min_groundedness=min_groundedness,
                 engine=engine,
             )
         except ValueError as exc:
@@ -921,6 +1082,7 @@ def run_qual_model(
             "engine": engine,
             "signals": validation.accepted,
             "discarded": validation.discarded,
+            "retrieval_contexts": retrieval_contexts,
         }
 
     if USAGE_LIMIT_RE.search(last_output):

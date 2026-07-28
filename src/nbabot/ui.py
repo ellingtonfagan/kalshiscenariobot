@@ -450,6 +450,28 @@ def _qual_calibration_rows(learning: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _qual_rag(ctx: Context) -> dict[str, Any]:
+    try:
+        return ResearchStore(ctx.settings.research_db_path).qual_rag_corpus_summary()
+    except Exception:
+        return {"chunk_count": 0, "source_counts": {}}
+
+
+def _qual_rag_rows(rag: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = [
+        {"metric": f"source:{key}", "value": value}
+        for key, value in sorted((rag.get("source_counts") or {}).items())
+    ]
+    rows.extend([
+        {"metric": "retrievals", "value": rag.get("retrieval_count", 0)},
+        {"metric": "leaked_contexts", "value": rag.get("leaked_context_count", 0)},
+        {"metric": "mean_groundedness", "value": rag.get("mean_groundedness", "n/a")},
+        {"metric": "unsupported_branch_rate", "value": rag.get("unsupported_branch_rate", "n/a")},
+        {"metric": "low_groundedness_blocked", "value": rag.get("low_groundedness_blocked", 0)},
+    ])
+    return rows
+
+
 def _metric(label: str, value: str, note: str = "") -> str:
     note_html = f"<small>{html.escape(note)}</small>" if note else ""
     return (
@@ -470,6 +492,7 @@ def render_dashboard(ctx: Context) -> str:
     signal_engine_rows = _signal_engine_rows(ctx)
     fill_rate_rows = _fill_rate_rows(ctx)
     qual_learning = _qual_learning(ctx)
+    qual_rag = _qual_rag(ctx)
     candidates = _candidate_rows(ranker)
     total_candidates = int(ranker.get("candidate_count") or len(candidates))
     priced_count = sum(1 for row in candidates if _candidate_price(row) is not None)
@@ -495,6 +518,8 @@ def render_dashboard(ctx: Context) -> str:
         _metric("Concentration", "flag" if concentration.get("concentration_flag") else "clear"),
         _metric("Qual Postmortems", f"{int(qual_learning.get('postmortems_completed') or 0):,}"),
         _metric("Qual Lessons", f"{int(qual_learning.get('lessons_stored') or 0):,}"),
+        _metric("Qual RAG Chunks", f"{int(qual_rag.get('chunk_count') or 0):,}"),
+        _metric("Mean Groundedness", str(qual_rag.get("mean_groundedness") or "n/a")),
     ])
     live_class = "ok" if exec_state["live_cleared"] else "blocked"
     live_text = "yes" if exec_state["live_cleared"] else "no"
@@ -576,6 +601,7 @@ def render_dashboard(ctx: Context) -> str:
     <section class="block"><h2>Validation</h2>{_table(_validation_rows(validation), ["market_family","signal_source","settled","wins","pnl","clv_measured","clv_beat_rate","avg_clv","distance"])}</section>
     <section class="block"><h2>Fill Rate</h2>{_table(fill_rate_rows, ["signal_source","liquidity_role","placed","filled","fill_rate","canceled_unfilled"])}</section>
     <section class="block"><h2>Qual Learning</h2>{_table(_qual_calibration_rows(qual_learning), ["bucket","count","correct","correct_rate","observed_rate","brier"])}</section>
+    <section class="block"><h2>Qual Retrieval</h2>{_table(_qual_rag_rows(qual_rag), ["metric","value"])}</section>
     <section class="block"><h2>Data Source Health</h2>{_table(provider_rows, ["provider","configured","state","rows","remaining_credits","detail"])}</section>
     <section class="block"><h2>Recent Settlements</h2>{_render_settlements(settlement_rows)}</section>
     <p class="footnote">Artifacts are loaded from the newest matching files in {html.escape(str(ctx.settings.data_dir))}. No API keys or secret values are rendered.</p>

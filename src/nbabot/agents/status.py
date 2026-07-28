@@ -108,6 +108,7 @@ def build_status(ctx: Context) -> dict[str, Any]:
     validation = build_validation_report(
         store.list_settlement_records(),
         default_sport=ctx.settings.sport,
+        qual_rag_stats=store.qual_rag_corpus_summary(),
         concentration_max_winner_share=float(
             getattr(ctx.settings, "concentration_max_winner_share", 0.50)
         ),
@@ -134,6 +135,7 @@ def build_status(ctx: Context) -> dict[str, Any]:
         "fill_rate": store.fill_rate_summary(),
         "validation_report": validation,
         "qual_learning": store.qual_learning_summary(),
+        "qual_rag": store.qual_rag_corpus_summary(),
         "latest_risk_snapshot": latest_risk[0] if latest_risk else None,
         "latest_live_order": latest_live[0] if latest_live else None,
         "latest_audit_events": latest_audit,
@@ -154,6 +156,7 @@ def _format_status(status: dict[str, Any]) -> str:
     consensus = engines.get("consensus") or {}
     qual = engines.get("qual") or {}
     learning = status.get("qual_learning") or {}
+    rag = status.get("qual_rag") or {}
     validation = status.get("validation_report") or {}
     groups = validation.get("groups") or []
     top_group = groups[0] if groups else {}
@@ -204,6 +207,14 @@ def _format_status(status: dict[str, Any]) -> str:
             f"lessons={learning.get('lessons_stored', 0)} "
             f"recaps_found={learning.get('recaps_found', 0)} "
             f"recaps_missing={learning.get('recaps_missing', 0)}"
+        ),
+        (
+            "  qual_rag "
+            f"chunks={rag.get('chunk_count', 0)} "
+            f"retrievals={rag.get('retrieval_count', 0)} "
+            f"mean_groundedness={rag.get('mean_groundedness', 'n/a')} "
+            f"unsupported_rate={rag.get('unsupported_branch_rate', 'n/a')} "
+            f"low_groundedness_blocked={rag.get('low_groundedness_blocked', 0)}"
         ),
         f"  fill_rate {fill_text}",
         (

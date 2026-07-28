@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -10,6 +11,14 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 from .qual_learning import normalize_lesson, qual_calibration_stats
+from .qual_rag import (
+    EMBEDDING_DIM,
+    EMBEDDING_VERSION,
+    MAX_CHUNK_CHARS,
+    chunk_text_by_paragraphs,
+    embedding,
+    text_hash,
+)
 
 ORDER_TABLES = {"paper_orders", "demo_orders", "live_orders"}
 DEFAULT_RISK_TIMEZONE = "America/New_York"
@@ -460,6 +469,65 @@ class ResearchStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_qual_lessons_lookup
                     ON qual_lessons(team, market_family, hit_count DESC, last_seen_at DESC);
+                CREATE TABLE IF NOT EXISTS qual_rag_chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    source_row_id TEXT NOT NULL,
+                    source_timestamp TEXT,
+                    team TEXT,
+                    teams_json TEXT NOT NULL,
+                    ticker TEXT,
+                    market_family TEXT,
+                    title TEXT,
+                    text TEXT NOT NULL,
+                    text_hash TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(source_type, source_id, text_hash)
+                );
+                CREATE INDEX IF NOT EXISTS idx_qual_rag_chunks_source_time
+                    ON qual_rag_chunks(source_type, source_timestamp DESC);
+                CREATE INDEX IF NOT EXISTS idx_qual_rag_chunks_ticker_time
+                    ON qual_rag_chunks(ticker, source_timestamp DESC);
+                CREATE TABLE IF NOT EXISTS qual_rag_embeddings (
+                    chunk_id TEXT PRIMARY KEY,
+                    embedding_version TEXT NOT NULL,
+                    dim INTEGER NOT NULL,
+                    vector_json TEXT NOT NULL,
+                    embedded_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS qual_signal_retrievals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    model_run_id TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    retrieved_at TEXT NOT NULL,
+                    close_time TEXT,
+                    query_json TEXT NOT NULL,
+                    context_json TEXT NOT NULL,
+                    no_lookahead_checked INTEGER NOT NULL DEFAULT 1,
+                    leaked_context_count INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(model_run_id, ticker)
+                );
+                CREATE TABLE IF NOT EXISTS qual_groundedness_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    model_run_id TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    groundedness REAL NOT NULL,
+                    faithfulness REAL NOT NULL,
+                    context_relevance REAL NOT NULL,
+                    unsupported_branch_rate REAL NOT NULL,
+                    branch_count INTEGER NOT NULL,
+                    supported_branch_count INTEGER NOT NULL,
+                    tradeable INTEGER NOT NULL,
+                    blocked_reason TEXT,
+                    score_json TEXT NOT NULL,
+                    UNIQUE(model_run_id, ticker)
+                );
+                CREATE INDEX IF NOT EXISTS idx_qual_groundedness_time
+                    ON qual_groundedness_scores(created_at DESC);
                 CREATE TABLE IF NOT EXISTS confluence_records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     game_id TEXT NOT NULL,
@@ -534,6 +602,9 @@ class ResearchStore:
             self._ensure_column(db, "qual_signals", "news_item_ids_json", "TEXT")
             self._ensure_column(db, "qual_signals", "prompt_version", "TEXT")
             self._ensure_column(db, "qual_signals", "engine", "TEXT NOT NULL DEFAULT 'codex'")
+            self._ensure_column(db, "qual_signals", "groundedness", "REAL")
+            self._ensure_column(db, "qual_signals", "tradeable", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(db, "qual_signals", "blocked_reason", "TEXT")
 
     @staticmethod
     def _ensure_column(db: sqlite3.Connection, table: str, column: str,
@@ -829,9 +900,10 @@ class ResearchStore:
                 INSERT OR IGNORE INTO qual_signals(
                     ticker, base_rate, qual_prob, confidence, rationale, citations_json,
                     scenarios_json, analysis_json, news_item_ids_json,
-                    created_at, model_run_id, prompt_version, engine, signal_source
+                    created_at, model_run_id, prompt_version, engine, signal_source,
+                    groundedness, tradeable, blocked_reason
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -862,6 +934,9 @@ class ResearchStore:
                         r.get("prompt_version"),
                         str(r.get("engine") or "codex"),
                         str(r.get("signal_source") or "qual"),
+                        r.get("groundedness"),
+                        int(bool(r.get("tradeable", True))),
+                        r.get("blocked_reason"),
                     )
                     for r in rows
                 ],
@@ -1249,6 +1324,411 @@ class ResearchStore:
             "recaps_found": recap_found,
             "recaps_missing": recap_missing,
             "calibration": self.qual_calibration_table(),
+        }
+
+    def _rag_upsert_chunks(self, rows: Iterable[dict[str, Any]]) -> int:
+        self.init_schema()
+        records = [row for row in rows if str(row.get("text") or "").strip()]
+        if not records:
+            return 0
+        now = utc_now()
+        with self.connect() as db:
+            cur = db.executemany(
+                """
+                INSERT INTO qual_rag_chunks(
+                    chunk_id, source_type, source_id, source_row_id,
+                    source_timestamp, team, teams_json, ticker, market_family,
+                    title, text, text_hash, metadata_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_type, source_id, text_hash) DO UPDATE SET
+                    source_timestamp=excluded.source_timestamp,
+                    team=excluded.team,
+                    teams_json=excluded.teams_json,
+                    ticker=excluded.ticker,
+                    market_family=excluded.market_family,
+                    title=excluded.title,
+                    text=excluded.text,
+                    metadata_json=excluded.metadata_json,
+                    updated_at=excluded.updated_at
+                """,
+                [
+                    (
+                        row["chunk_id"],
+                        row["source_type"],
+                        row["source_id"],
+                        row["source_row_id"],
+                        row.get("source_timestamp"),
+                        row.get("team"),
+                        to_json(row.get("teams") or ([] if not row.get("team") else [row.get("team")])),
+                        row.get("ticker"),
+                        row.get("market_family"),
+                        row.get("title"),
+                        row["text"],
+                        row["text_hash"],
+                        to_json(row.get("metadata") or {}),
+                        row.get("created_at") or now,
+                        now,
+                    )
+                    for row in records
+                ],
+            )
+            db.executemany(
+                """
+                INSERT INTO qual_rag_embeddings(chunk_id, embedding_version, dim, vector_json, embedded_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    embedding_version=excluded.embedding_version,
+                    dim=excluded.dim,
+                    vector_json=excluded.vector_json,
+                    embedded_at=excluded.embedded_at
+                """,
+                [
+                    (
+                        row["chunk_id"],
+                        EMBEDDING_VERSION,
+                        EMBEDDING_DIM,
+                        to_json(embedding(row["text"])),
+                        now,
+                    )
+                    for row in records
+                ],
+            )
+        return cur.rowcount if cur.rowcount is not None else len(records)
+
+    @staticmethod
+    def _rag_chunk_id(source_type: str, source_id: Any, chunk_hash: str, idx: int) -> str:
+        raw = f"{source_type}:{source_id}:{chunk_hash}:{idx}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+    def build_qual_rag_index(self) -> dict[str, Any]:
+        """Index accumulated bot experience into provenance-preserving chunks."""
+        self.init_schema()
+        chunks: list[dict[str, Any]] = []
+        counts: dict[str, int] = {}
+
+        def add(
+            *,
+            source_type: str,
+            source_id: Any,
+            source_row_id: Any,
+            timestamp: Any,
+            text: str,
+            team: str | None = None,
+            teams: list[str] | None = None,
+            ticker: str | None = None,
+            family: str | None = None,
+            title: str | None = None,
+            metadata: dict[str, Any] | None = None,
+            split: bool = True,
+        ) -> None:
+            parts = chunk_text_by_paragraphs(text) if split else [text.strip()]
+            for idx, part in enumerate(parts):
+                digest = text_hash(part)
+                chunks.append({
+                    "chunk_id": self._rag_chunk_id(source_type, source_id, digest, idx),
+                    "source_type": source_type,
+                    "source_id": str(source_id),
+                    "source_row_id": str(source_row_id),
+                    "source_timestamp": timestamp,
+                    "team": team,
+                    "teams": teams or ([] if not team else [team]),
+                    "ticker": ticker,
+                    "market_family": family,
+                    "title": title,
+                    "text": part[:MAX_CHUNK_CHARS],
+                    "text_hash": digest,
+                    "metadata": {**(metadata or {}), "chunk_index": idx, "chunk_strategy": "source-specific"},
+                })
+                counts[source_type] = counts.get(source_type, 0) + 1
+
+        with self.connect() as db:
+            for row in db.execute("SELECT * FROM news_items ORDER BY fetched_at ASC"):
+                text = "\n".join(str(v or "") for v in (row["title"], row["body"], row["url"]) if v)
+                add(
+                    source_type="news_items",
+                    source_id=row["id"],
+                    source_row_id=row["id"],
+                    timestamp=row["published_at"] or row["fetched_at"],
+                    text=text,
+                    team=row["team"],
+                    title=row["title"],
+                    metadata={"url": row["url"], "source": row["source"]},
+                    split=False,
+                )
+            for row in db.execute("SELECT * FROM settlement_records ORDER BY audited_at ASC"):
+                record = json.loads(row["record_json"] or "{}")
+                market = json.loads(row["market_json"] or "{}")
+                family = str(record.get("market_family") or market.get("market_family") or "")
+                text = (
+                    f"Settlement {row['ticker']} {row['side']} outcome={row['outcome']} "
+                    f"entry={row['entry_price_cents']}c closing={row['closing_consensus_cents']}c "
+                    f"clv={row['clv_cents']} pnl={row['pnl_cents']} "
+                    f"market={json.dumps(market, sort_keys=True)}"
+                )
+                add(
+                    source_type="settlement_records",
+                    source_id=row["client_order_id"],
+                    source_row_id=row["client_order_id"],
+                    timestamp=row["audited_at"],
+                    text=text,
+                    ticker=row["ticker"],
+                    family=family,
+                    title=str(market.get("title") or row["ticker"]),
+                    metadata={"mode": row["mode"], "signal_source": row["signal_source"]},
+                    split=False,
+                )
+            for row in db.execute("SELECT * FROM qual_signals ORDER BY created_at ASC"):
+                analysis = json.loads(row["analysis_json"] or "{}")
+                scenarios = json.loads(row["scenarios_json"] or "[]")
+                market = analysis.get("market") if isinstance(analysis.get("market"), dict) else {}
+                teams = [str(t) for t in (market.get("teams") or [])]
+                family = str(market.get("market_family") or "")
+                base = (
+                    f"Prior qual signal {row['ticker']} base_rate={row['base_rate']} "
+                    f"qual_prob={row['qual_prob']} confidence={row['confidence']} "
+                    f"rationale={row['rationale']}"
+                )
+                add(
+                    source_type="qual_signals",
+                    source_id=row["id"],
+                    source_row_id=row["id"],
+                    timestamp=row["created_at"],
+                    text=base,
+                    teams=teams,
+                    ticker=row["ticker"],
+                    family=family,
+                    title=str(market.get("title") or row["ticker"]),
+                    metadata={"model_run_id": row["model_run_id"], "kind": "signal-summary"},
+                    split=False,
+                )
+                for idx, branch in enumerate(scenarios if isinstance(scenarios, list) else []):
+                    add(
+                        source_type="qual_signals",
+                        source_id=f"{row['id']}:branch:{idx}",
+                        source_row_id=row["id"],
+                        timestamp=row["created_at"],
+                        text=(
+                            f"Prior branch for {row['ticker']}: {branch.get('event')} "
+                            f"p_event={branch.get('p_event')} "
+                            f"p_outcome_given_event={branch.get('p_outcome_given_event')} "
+                            f"status={branch.get('status', 'supported')}"
+                        ),
+                        teams=teams,
+                        ticker=row["ticker"],
+                        family=family,
+                        title=str(market.get("title") or row["ticker"]),
+                        metadata={"model_run_id": row["model_run_id"], "kind": "scenario-branch"},
+                        split=False,
+                    )
+            for row in db.execute("SELECT * FROM qual_postmortems ORDER BY created_at ASC"):
+                postmortem = json.loads(row["postmortem_json"] or "{}")
+                lessons = json.loads(row["lessons_json"] or "[]")
+                text = (
+                    f"Postmortem {row['ticker']} outcome={row['outcome']} "
+                    f"scenario_occurred={postmortem.get('which_scenario_occurred')} "
+                    f"event_grade={postmortem.get('event_prediction_grade')} "
+                    f"conditional_grade={postmortem.get('conditional_grade')} "
+                    f"missed={postmortem.get('what_was_missed')} "
+                    f"lessons={json.dumps(lessons, sort_keys=True)}"
+                )
+                add(
+                    source_type="qual_postmortems",
+                    source_id=row["id"],
+                    source_row_id=row["id"],
+                    timestamp=row["created_at"],
+                    text=text,
+                    ticker=row["ticker"],
+                    metadata={"client_order_id": row["client_order_id"]},
+                    split=True,
+                )
+            for row in db.execute("SELECT * FROM qual_lessons ORDER BY last_seen_at ASC"):
+                add(
+                    source_type="qual_lessons",
+                    source_id=row["id"],
+                    source_row_id=row["id"],
+                    timestamp=row["last_seen_at"],
+                    text=f"Reusable lesson: {row['lesson_text']} Evidence: {row['evidence_cite']}",
+                    team=row["team"],
+                    family=row["market_family"],
+                    metadata={"hit_count": row["hit_count"], "evidence_cite": row["evidence_cite"]},
+                    split=False,
+                )
+            for row in db.execute("SELECT * FROM closing_snapshots ORDER BY captured_at ASC"):
+                snapshot = json.loads(row["snapshot_json"] or "{}")
+                market = json.loads(row["market_json"] or "{}")
+                text = (
+                    f"Closing snapshot {row['ticker']} side={row['side']} "
+                    f"consensus={row['consensus_cents']}c kalshi_mid={row['kalshi_mid_cents']}c "
+                    f"executable={row['executable_cents']}c book_count={row['book_count']} "
+                    f"market={json.dumps(market, sort_keys=True)}"
+                )
+                add(
+                    source_type="closing_snapshots",
+                    source_id=row["ticker"],
+                    source_row_id=row["ticker"],
+                    timestamp=row["captured_at"],
+                    text=text,
+                    ticker=row["ticker"],
+                    family=str(snapshot.get("market_family") or market.get("market_family") or ""),
+                    title=str(market.get("title") or row["ticker"]),
+                    metadata={"market_close_time": row["market_close_time"]},
+                    split=False,
+                )
+        written = self._rag_upsert_chunks(chunks)
+        return {
+            "status": "ok",
+            "indexed_at": utc_now(),
+            "source_counts": counts,
+            "chunk_count": self.qual_rag_corpus_summary().get("chunk_count", 0),
+            "written": written,
+            "embedding_version": EMBEDDING_VERSION,
+            "embedding_dim": EMBEDDING_DIM,
+        }
+
+    def qual_rag_chunks(self, *, at_or_before: str | None = None) -> list[dict[str, Any]]:
+        self.init_schema()
+        where = ""
+        params: tuple[Any, ...] = ()
+        if at_or_before:
+            where = "WHERE source_timestamp IS NOT NULL AND source_timestamp <= ?"
+            params = (at_or_before,)
+        with self.connect() as db:
+            rows = db.execute(
+                f"""
+                SELECT c.*, e.vector_json
+                FROM qual_rag_chunks c
+                LEFT JOIN qual_rag_embeddings e ON e.chunk_id = c.chunk_id
+                {where}
+                ORDER BY c.source_timestamp DESC
+                """,
+                params,
+            ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            for source_key, target_key, default in (
+                ("teams_json", "teams", []),
+                ("metadata_json", "metadata", {}),
+                ("vector_json", "embedding", []),
+            ):
+                raw = item.get(source_key)
+                try:
+                    item[target_key] = json.loads(raw or to_json(default))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    item[target_key] = default
+            out.append(item)
+        return out
+
+    def record_qual_signal_retrieval(
+        self,
+        *,
+        model_run_id: str,
+        ticker: str,
+        query: dict[str, Any],
+        contexts: list[dict[str, Any]],
+        close_time: str | None,
+        leaked_context_count: int = 0,
+    ) -> None:
+        self.init_schema()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT OR REPLACE INTO qual_signal_retrievals(
+                    model_run_id, ticker, retrieved_at, close_time, query_json,
+                    context_json, no_lookahead_checked, leaked_context_count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                """,
+                (
+                    model_run_id,
+                    ticker,
+                    utc_now(),
+                    close_time,
+                    to_json(query),
+                    to_json(contexts),
+                    int(leaked_context_count),
+                ),
+            )
+
+    def record_qual_groundedness(self, rows: Iterable[dict[str, Any]]) -> int:
+        self.init_schema()
+        records = [row for row in rows if row.get("ticker") and row.get("model_run_id")]
+        if not records:
+            return 0
+        with self.connect() as db:
+            cur = db.executemany(
+                """
+                INSERT OR REPLACE INTO qual_groundedness_scores(
+                    model_run_id, ticker, created_at, groundedness, faithfulness,
+                    context_relevance, unsupported_branch_rate, branch_count,
+                    supported_branch_count, tradeable, blocked_reason, score_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row["model_run_id"],
+                        row["ticker"],
+                        row.get("created_at") or utc_now(),
+                        row["groundedness"],
+                        row["faithfulness"],
+                        row["context_relevance"],
+                        row["unsupported_branch_rate"],
+                        int(row.get("branch_count") or 0),
+                        int(row.get("supported_branch_count") or 0),
+                        int(bool(row.get("tradeable"))),
+                        row.get("blocked_reason"),
+                        to_json(row),
+                    )
+                    for row in records
+                ],
+            )
+        return cur.rowcount if cur.rowcount is not None else len(records)
+
+    def qual_rag_corpus_summary(self) -> dict[str, Any]:
+        self.init_schema()
+        with self.connect() as db:
+            by_source = {
+                row["source_type"]: int(row["count"])
+                for row in db.execute(
+                    """
+                    SELECT source_type, COUNT(*) AS count
+                    FROM qual_rag_chunks
+                    GROUP BY source_type
+                    ORDER BY source_type
+                    """
+                )
+            }
+            total = int(db.execute("SELECT COUNT(*) FROM qual_rag_chunks").fetchone()[0])
+            retrievals = int(db.execute("SELECT COUNT(*) FROM qual_signal_retrievals").fetchone()[0])
+            leaked = int(db.execute("SELECT COALESCE(SUM(leaked_context_count), 0) FROM qual_signal_retrievals").fetchone()[0])
+            scores = db.execute(
+                """
+                SELECT AVG(groundedness) AS mean_groundedness,
+                       AVG(unsupported_branch_rate) AS unsupported_rate,
+                       SUM(CASE WHEN tradeable = 0 AND blocked_reason = 'low-groundedness' THEN 1 ELSE 0 END) AS low_groundedness_blocked,
+                       COUNT(*) AS score_count
+                FROM qual_groundedness_scores
+                """
+            ).fetchone()
+        return {
+            "chunk_count": total,
+            "source_counts": by_source,
+            "retrieval_count": retrievals,
+            "leaked_context_count": leaked,
+            "mean_groundedness": (
+                round(float(scores["mean_groundedness"]), 6)
+                if scores and scores["mean_groundedness"] is not None else None
+            ),
+            "unsupported_branch_rate": (
+                round(float(scores["unsupported_rate"]), 6)
+                if scores and scores["unsupported_rate"] is not None else None
+            ),
+            "low_groundedness_blocked": int(scores["low_groundedness_blocked"] or 0) if scores else 0,
+            "groundedness_score_count": int(scores["score_count"] or 0) if scores else 0,
+            "embedding_version": EMBEDDING_VERSION,
+            "embedding_dim": EMBEDDING_DIM,
         }
 
     def record_order(self, table: str, game_id: str, intent: Any, decision: Any,
