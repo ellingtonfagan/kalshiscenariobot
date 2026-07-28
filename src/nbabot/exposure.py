@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from .research import ResearchStore, utc_now
+from .units import unit_context
 
 OPEN_ORDER_STATUSES = {"resting", "open", "pending", "accepted"}
 TERMINAL_ORDER_STATUSES = {"filled", "executed", "canceled", "cancelled", "expired", "rejected"}
@@ -89,8 +90,13 @@ def exchange_state(ctx: Any) -> dict[str, Any]:
     return {"mode": mode, "source": source, "positions": positions, "orders": _order_docs(orders)}
 
 
-def exchange_exposure_units(state: dict[str, Any], *, unit_usd: float) -> dict[str, Any]:
-    unit = max(float(unit_usd or 1.0), 0.01)
+def exchange_exposure_units(
+    state: dict[str, Any],
+    *,
+    unit_size_dollars: float | None = None,
+    unit_usd: float | None = None,
+) -> dict[str, Any]:
+    unit = max(float(unit_size_dollars if unit_size_dollars is not None else unit_usd or 1.0), 0.01)
     positions = state.get("positions") if isinstance(state.get("positions"), dict) else {}
     position_units = {
         str(ticker): round(abs(float(contracts)) / unit, 6)
@@ -117,6 +123,7 @@ def exchange_exposure_units(state: dict[str, Any], *, unit_usd: float) -> dict[s
             "exposure_units": round(units, 6),
         })
     return {
+        "unit_size_dollars": round(unit, 4),
         "position_exposure_units": round(sum(position_units.values()), 6),
         "open_order_exposure_units": round(order_units, 6),
         "total_exposure_units": round(sum(position_units.values()) + order_units, 6),
@@ -148,13 +155,29 @@ def reconcile_open_exposure(
         "warnings": [],
     }
     try:
+        units = unit_context(ctx)
         state = exchange_state(ctx)
-        exchange = exchange_exposure_units(state, unit_usd=float(getattr(ctx.settings, "unit_usd", 1.0)))
+        exchange = exchange_exposure_units(
+            state,
+            unit_size_dollars=float(units["unit_size_dollars"]),
+        )
     except Exception as exc:
         payload["exchange_ok"] = False
         payload["exchange_error"] = str(exc)
         payload["warnings"].append(f"exchange exposure reconciliation failed: {exc}")
         return payload
+    payload["unit"] = {
+        "bankroll_usd": units["bankroll_usd"],
+        "bankroll_source": units["bankroll_source"],
+        "balance_error": units["balance_error"],
+        "unit_size_dollars": units["unit_size_dollars"],
+        "unit_cents": units["unit_cents"],
+        "unit_fraction": units["unit_fraction"],
+        "requested_unit_fraction": units["requested_unit_fraction"],
+        "invariant": units["invariant"],
+    }
+    if units.get("warnings"):
+        payload["warnings"].extend(str(warning) for warning in units["warnings"])
 
     exchange_total = float(exchange["total_exposure_units"])
     diff = abs(local_portfolio - exchange_total)

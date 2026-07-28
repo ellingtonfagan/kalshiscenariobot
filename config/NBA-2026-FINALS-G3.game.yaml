@@ -37,4 +37,6 @@ tracked_players:
 
 # 1 unit = the only stake size this bot will ever endorse for a multi-leg ticket.
 bankroll:
-  unit_usd: 5
+  # unit_usd removed 2026-07-27: the unit is now derived from live
+  # bankroll x NBABOT_UNIT_FRACTION (see units.py). A static value here
+  # silently disagreed with sizing and blocked trading.

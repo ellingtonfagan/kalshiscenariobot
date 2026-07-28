@@ -113,8 +113,17 @@ class Settings:
         return self.game.get("tracked_players", [])
 
     @property
-    def unit_usd(self) -> float:
-        return float(self.game.get("bankroll", {}).get("unit_usd", 1))
+    def configured_unit_usd(self) -> float | None:
+        """Legacy static YAML unit, for diagnostics only.
+
+        Runtime unit sizing is canonicalized in ``nbabot.units`` from the
+        resolved bankroll and ``unit_fraction``. Do not use this value for
+        sizing or risk caps.
+        """
+        bankroll = self.game.get("bankroll", {})
+        if not isinstance(bankroll, dict) or "unit_usd" not in bankroll:
+            return None
+        return float(bankroll["unit_usd"])
 
     @property
     def execution_min_edge(self) -> float:

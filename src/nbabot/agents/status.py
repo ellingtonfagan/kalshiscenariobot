@@ -9,6 +9,7 @@ from .. import guardrails
 from ..alerts import deliver
 from ..cycle_health import read_delivery_failures, read_health_status
 from ..research import ResearchStore
+from ..units import unit_payload
 from ..validation_report import report as build_validation_report
 from .base import Context, load_context
 
@@ -111,6 +112,10 @@ def build_status(ctx: Context) -> dict[str, Any]:
             getattr(ctx.settings, "concentration_max_winner_share", 0.50)
         ),
     )
+    try:
+        unit = unit_payload(ctx)
+    except Exception as exc:
+        unit = {"ok": False, "error": str(exc)}
     return {
         "game_id": ctx.settings.game_id,
         "sport": ctx.settings.sport,
@@ -134,6 +139,7 @@ def build_status(ctx: Context) -> dict[str, Any]:
         "latest_audit_events": latest_audit,
         "health": health,
         "delivery_failures": read_delivery_failures(ctx.settings.data_dir),
+        "unit": unit,
         "exposure_reconciliation": exposure_reconciliation,
         "artifacts": artifacts,
     }
@@ -173,6 +179,8 @@ def _format_status(status: dict[str, Any]) -> str:
     else:
         delivery_line = "alerts failing=0"
     exposure_reconciliation = status.get("exposure_reconciliation") or {}
+    unit = status.get("unit") or {}
+    invariant = unit.get("invariant") or {}
     exposure_warnings = exposure_reconciliation.get("warnings") or []
     exposure_line = (
         "ok"
@@ -214,6 +222,12 @@ def _format_status(status: dict[str, Any]) -> str:
             f"exposure={exposure_label} "
             f"daily_pnl={daily_pnl_label} "
             f"open_positions={risk.get('open_positions', 'n/a')}"
+        ),
+        (
+            "  unit "
+            f"${float(unit.get('unit_size_dollars') or 0):.2f} "
+            f"source={unit.get('bankroll_source', 'n/a')} "
+            f"invariant={'ok' if invariant.get('ok', True) else 'WARNING'}"
         ),
         f"  exposure_reconciliation {exposure_line}",
         f"  kill_switch={'ON' if status['kill_switch_on'] else 'clear'}",

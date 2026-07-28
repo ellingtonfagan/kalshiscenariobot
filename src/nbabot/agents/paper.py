@@ -16,8 +16,9 @@ from ..risk import (
     broad_slate_daily_trade_limit,
     evaluate_trade_intent,
 )
-from ..sizing import ContractSizing, UnitSizing, capped_kelly, contracts_for_units, unit_sizing
+from ..sizing import ContractSizing, UnitSizing, capped_kelly, contracts_for_units
 from ..slate import configured_game_candidate_id
+from ..units import latest_balance_usd, unit_context, unit_payload
 from .base import Context, load_context
 
 
@@ -81,36 +82,11 @@ def _paper_demo_mode(settings: object) -> bool:
 
 
 def _latest_balance_usd(ctx: Context) -> tuple[float, str, str | None]:
-    mode = str(getattr(ctx.settings, "execution_mode", "paper") or "paper").lower()
-    if mode == "paper":
-        return float(getattr(ctx.settings, "paper_bankroll_usd", 1000.0)), "paper-bankroll", None
-    sync = ctx.read_json("portfolio_sync.json") or {}
-    if sync.get("ok") and sync.get("balance_usd_exact") is not None:
-        return float(sync["balance_usd_exact"]), "portfolio-sync", None
-    if sync.get("ok") and sync.get("balance_usd") is not None:
-        return float(sync["balance_usd"]), "portfolio-sync", None
-    if sync.get("ok") and sync.get("balance_cents") is not None:
-        return float(sync["balance_cents"]) / 100.0, "portfolio-sync", None
-    try:
-        cents = ctx.kalshi.demo_balance_cents(ctx.settings.demo_api_base)
-        return float(cents) / 100.0, "demo-api", None
-    except Exception as exc:
-        if sync.get("balance_cents") is not None:
-            return float(sync["balance_cents"]) / 100.0, "last-known-portfolio-sync", str(exc)
-        return float(getattr(ctx.settings, "paper_bankroll_usd", 1000.0)), "paper-bankroll-fallback", str(exc)
+    return latest_balance_usd(ctx)
 
 
 def sizing_context(ctx: Context) -> dict[str, Any]:
-    bankroll, source, error = _latest_balance_usd(ctx)
-    unit = unit_sizing(bankroll, float(getattr(ctx.settings, "unit_fraction", 0.015)))
-    return {
-        "bankroll_usd": bankroll,
-        "bankroll_source": source,
-        "balance_error": error,
-        "unit": unit,
-        "unit_cents": max(int(round(unit.unit_size_dollars * 100)), 1),
-        "warning": unit.warning,
-    }
+    return unit_context(ctx)
 
 
 def execution_limits(ctx: Context, store: ResearchStore, table: str) -> dict[str, float | int]:
@@ -532,6 +508,7 @@ def run(ctx: Context | None = None) -> dict:
         "daily_pnl_units": 0.0,
         "open_positions": len([r for r in receipts if r["decision"]["approved"]]),
         "circuit_breaker_on": False,
+        "unit": unit_payload(ctx),
     })
     ctx.write_json("paper.json", {"orders": receipts})
     first = receipts[0]

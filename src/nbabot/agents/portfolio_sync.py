@@ -4,6 +4,7 @@ from __future__ import annotations
 from ..alerts import deliver
 from ..exposure import reconcile_open_exposure, write_reconciliation
 from ..research import ResearchStore, utc_now
+from ..units import unit_payload_from_bankroll
 from .base import Context, load_context
 
 
@@ -50,6 +51,15 @@ def run(ctx: Context | None = None) -> dict:
         "positions": positions,
         "open_positions": len(positions),
     }
+    try:
+        payload["unit"] = unit_payload_from_bankroll(
+            ctx.settings,
+            bankroll_usd=float(balance_usd_exact),
+            bankroll_source=balance_source,
+            balance_error=None,
+        )
+    except Exception as exc:
+        payload["unit"] = {"ok": False, "error": str(exc)}
     table = "demo_orders" if mode == "demo" else "live_orders"
     exposure_units = 0.0
     portfolio_exposure_units = 0.0
@@ -75,6 +85,7 @@ def run(ctx: Context | None = None) -> dict:
     ctx.write_json("portfolio_sync.json", payload)
     deliver(
         f"[portfolio-sync] balance=${payload['balance_usd']:.2f} "
+        f"unit=${float((payload.get('unit') or {}).get('unit_size_dollars') or 0):.2f} "
         f"positions={len(positions)}",
         ctx.settings.deliver_to,
     )

@@ -60,6 +60,7 @@ from nbabot import (  # noqa: E402
     soccer_research,
     sports,
     validation_report as validation_report_core,
+    units,
     ui,
 )
 from nbabot.adapters import get_adapter  # noqa: E402
@@ -2975,10 +2976,168 @@ def test_exchange_divergence_prefers_exchange_exposure(tmp_path):
     assert payload["warnings"]
 
 
+def test_canonical_unit_matches_sizing_and_exchange_exposure_paths(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    settings.game = {"bankroll": {"unit_usd": 5.0}}
+    sync = {"ok": True, "balance_usd_exact": 1047.25}
+    order = {
+        "ticker": "KXMLBGAME-26JUL271910ATLNYM-ATL",
+        "status": "resting",
+        "side": "yes",
+        "yes_price_dollars": "0.4900",
+        "remaining_count_fp": "58.00",
+    }
+
+    class DummyKalshi:
+        def demo_positions(self, base):
+            return {}
+
+        def demo_orders(self, base, **params):
+            return {"orders": [order]}
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def read_json(self, suffix):
+            return sync if suffix == "portfolio_sync.json" else {}
+
+    ctx = DummyContext()
+    sizing_payload = paper.sizing_context(ctx)
+    exposure_payload = exposure.reconcile_open_exposure(
+        ctx,
+        research.ResearchStore(settings.research_db_path),
+        "demo_orders",
+        game_id=settings.game_id,
+    )
+    sizing_units = (58 * 0.49) / sizing_payload["unit"].unit_size_dollars
+
+    assert sizing_payload["unit"].unit_size_dollars == pytest.approx(15.7088, abs=0.0001)
+    assert sizing_units == pytest.approx(1.809177, abs=0.000001)
+    assert exposure_payload["exchange_open_order_exposure_units"] == pytest.approx(sizing_units, abs=0.000001)
+    assert exposure_payload["unit"]["unit_size_dollars"] == pytest.approx(
+        sizing_payload["unit"].unit_size_dollars
+    )
+
+
+def test_exposure_caps_use_canonical_units_for_pass_and_block(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    settings.max_game_exposure_units = 5.0
+    settings.max_daily_exposure_units = 5.0
+    unit_size = sizing.unit_sizing(1047.25, settings.unit_fraction).unit_size_dollars
+    stake_units = (58 * 0.49) / unit_size
+    normal = _intent(contracts=58, price_cents=49, stake_units=stake_units)
+
+    decision = risk.evaluate_trade_intent(normal, settings)
+    assert decision.approved
+    assert stake_units == pytest.approx(1.809177, abs=0.000001)
+
+    oversized = _intent(contracts=200, price_cents=49, stake_units=(200 * 0.49) / unit_size)
+    blocked = risk.evaluate_trade_intent(oversized, settings)
+    assert not blocked.approved
+    assert any(check.name == "stake_cap" and not check.passed for check in blocked.checks)
+
+
+def test_bankroll_change_moves_unit_for_sizing_and_exposure(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    state = {"positions": {}, "orders": [
+        {"ticker": "KXTEST", "status": "resting", "side": "yes", "yes_price_dollars": "0.50", "remaining_count_fp": "30.00"}
+    ]}
+    sync = {"ok": True, "balance_usd_exact": 1000.0}
+
+    class DummyKalshi:
+        def demo_positions(self, base):
+            return {}
+
+        def demo_orders(self, base, **params):
+            return {"orders": state["orders"]}
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def read_json(self, suffix):
+            return sync if suffix == "portfolio_sync.json" else {}
+
+    ctx = DummyContext()
+    first_sizing = paper.sizing_context(ctx)
+    first_exposure = exposure.reconcile_open_exposure(
+        ctx,
+        research.ResearchStore(settings.research_db_path),
+        "demo_orders",
+        game_id=settings.game_id,
+    )
+    sync["balance_usd_exact"] = 2000.0
+    second_sizing = paper.sizing_context(ctx)
+    second_exposure = exposure.reconcile_open_exposure(
+        ctx,
+        research.ResearchStore(settings.research_db_path),
+        "demo_orders",
+        game_id=settings.game_id,
+    )
+
+    assert first_sizing["unit"].unit_size_dollars == pytest.approx(15.0)
+    assert first_exposure["unit"]["unit_size_dollars"] == pytest.approx(15.0)
+    assert second_sizing["unit"].unit_size_dollars == pytest.approx(30.0)
+    assert second_exposure["unit"]["unit_size_dollars"] == pytest.approx(30.0)
+    assert first_exposure["exchange_total_exposure_units"] == pytest.approx(1.0)
+    assert second_exposure["exchange_total_exposure_units"] == pytest.approx(0.5)
+
+
+def test_unit_invariant_flags_legacy_static_mismatch_in_health_check(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    settings.game = {"bankroll": {"unit_usd": 5.0}}
+    settings.deliver_to = "stdout"
+    (tmp_path / "scheduled_cycle_runs.jsonl").write_text(json.dumps({
+        "event": "finished",
+        "phase": "scheduled-demo-cycle",
+        "game_id": settings.game_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "exit_code": 0,
+    }) + "\n")
+
+    class DummyKalshi:
+        def demo_positions(self, base):
+            return {}
+
+        def demo_orders(self, base, **params):
+            return {"orders": []}
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def read_json(self, suffix):
+            if suffix == "portfolio_sync.json":
+                return {"ok": True, "balance_usd_exact": 1047.25}
+            return {}
+
+        def write_json(self, suffix, payload):
+            self.settings.data_path(suffix).write_text(json.dumps(payload, default=str))
+
+    messages = []
+    monkeypatch.setattr(health_check, "deliver", lambda text, to="stdout": messages.append(text) or True)
+    payload = health_check.run(DummyContext())
+
+    assert not units.unit_context(DummyContext())["invariant"]["ok"]
+    assert payload["alert"] is True
+    assert any("legacy configured bankroll.unit_usd diverges" in reason for reason in payload["reasons"])
+    assert "ALERT [health-check]" in messages[0]
+
+
 def test_genuine_exchange_exposure_still_blocks_cap(tmp_path):
     settings = _ExecSettings(tmp_path)
     settings.execution_mode = "demo"
-    settings.unit_usd = 1.0
+    settings.paper_bankroll_usd = 200.0
+    settings.unit_fraction = 0.005
     store = research.ResearchStore(settings.research_db_path)
 
     class DummyKalshi:

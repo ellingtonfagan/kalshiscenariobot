@@ -1538,6 +1538,60 @@ were changed, and no scheduler or cron work was added.
 
 ---
 
+## Round 24 - 2026-07-27 - Canonical bankroll-derived unit sizing
+
+### What changed in code
+
+- Added `nbabot.units` as the single runtime resolver for unit sizing:
+  bankroll is resolved through the same fail-soft path used by execution sizing,
+  then `unit_sizing(bankroll_usd, unit_fraction)` computes the canonical
+  `unit_size_dollars`.
+- Removed runtime use of the legacy YAML `bankroll.unit_usd` value. It is now
+  exposed only as `configured_unit_usd` for diagnostics; sizing, exchange
+  exposure reconciliation, risk snapshots, portfolio sync, status, and
+  health-check use the bankroll-derived unit.
+- Added a unit invariant diagnostic that warns when legacy `bankroll.unit_usd`
+  disagrees with the canonical bankroll-derived unit beyond tolerance. The
+  warning is written through exposure reconciliation and surfaced by
+  health-check/status alongside Round 23 exposure divergence warnings.
+- Kept the risk limits unchanged: 5-unit stake/exposure caps, daily loss caps,
+  notional backstop, edge gates, live gates, fuzzy-match rejection, and
+  plausible-edge guard remain intact.
+
+### Tests
+
+- Focused suite:
+  `.venv/bin/pytest tests/test_smoke.py -q -k "unit or exposure or health_check"`
+  -> `17 passed, 149 deselected`.
+- Full smoke suite: `.venv/bin/pytest tests/test_smoke.py -q` ->
+  `166 passed in 2.23s`.
+
+### Real behavior check
+
+- Real `portfolio-sync` ran in demo mode and resolved demo balance
+  `$1047.2456`, canonical unit `$15.7087` from `unit_fraction=0.015`, positions
+  `0`.
+- Real exposure reconciliation in demo mode measured the resting
+  `KXMLBGAME-26JUL271910ATLNYM-ATL` order (`58 @ $0.49`, `$28.42` notional) at
+  `1.809189u` using the same `$15.7087` unit.
+- The sizing path measured the same order at `1.809189u` from the same
+  portfolio-sync bankroll and unit.
+- Real `health-check` ran in demo mode and exited non-zero. Verdict:
+  `ok=false`, `alert=true`, reason
+  `legacy configured bankroll.unit_usd diverges from canonical bankroll-derived unit`;
+  exchange reconciliation itself was reachable and reported
+  `exchange_open_order_exposure_units=1.809189`.
+- Real `scheduled-demo-cycle` ran in demo mode with `dry_run=true`: `200`
+  candidates, `2` edge passes, `2` trade-eligible rows, `0` new demo orders,
+  `exit_code=1`. The no-order reason was a Kalshi demo API
+  `503 Service Unavailable` from `/portfolio/events/orders` during
+  `demo-execute`. A fresh post-cycle portfolio sync still showed only the
+  existing `58 @ $0.49` resting order at `1.809189u`.
+- No live execution env vars were set to live values and no live orders were
+  placed.
+
+---
+
 ## Round 22 - 2026-07-27 - Closing snapshots and honest validation reporting
 
 ### What changed in code
