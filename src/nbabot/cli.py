@@ -27,7 +27,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {e}", file=sys.stderr)
         return 2
 
-    PHASES[args.phase](ctx)
+    result = PHASES[args.phase](ctx)
+    if isinstance(result, dict) and "exit_code" in result:
+        try:
+            return int(result["exit_code"])
+        except (TypeError, ValueError):
+            return 1
     return 0
 
 

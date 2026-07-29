@@ -44,6 +44,8 @@ def load_context(game_id: str | None = None) -> Context:
         settings.kalshi_api_key,
         settings.kalshi_private_key_path,
         settings.kalshi_api_base,
+        demo_api_key=settings.kalshi_demo_api_key,
+        demo_private_key_path=settings.kalshi_demo_private_key_path,
     )
     scen, mm, hc = adapter.load_scenarios(settings.scenarios_doc)
     overrides = calibration.load_overrides(settings.calibration_overrides_path)

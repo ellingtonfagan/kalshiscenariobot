@@ -1,5 +1,6 @@
 requests>=2.31
 cryptography>=42
 PyYAML>=6
+anthropic>=0.57
 # dev
 pytest>=8

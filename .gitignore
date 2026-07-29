@@ -9,6 +9,7 @@ data/*.json
 data/*.jsonl
 data/*.sqlite
 data/*.sqlite-*
+data/historical_cache/
 !data/.gitkeep
 
 # python
@@ -23,3 +24,6 @@ dist/
 
 # operating system
 .DS_Store
+
+# cron literal-variable workaround symlink
+$REPO

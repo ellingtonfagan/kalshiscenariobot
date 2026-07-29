@@ -6,12 +6,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .confluence import MIN_EFFECTIVE_BASE
 from .guardrails import MAX_STAKE_UNITS
 
 RESEARCH_OVERRIDE_ACK = "RESEARCH_OVERRIDE_APPROVED"
 RESEARCH_OVERRIDE_MAX_UNITS = 1.0
 MIN_RESEARCH_OVERRIDE_REASON_CHARS = 80
 MIN_RESEARCH_OVERRIDE_SOURCES = 2
+BROAD_SLATE_TRADES_PER_VALIDATED_FAMILY = 2
+DEFAULT_PAPER_DEMO_DAILY_TRADE_CAP = 50
+DEFAULT_QUAL_DAILY_TRADE_CAP = 10
 
 
 @dataclass(frozen=True)
@@ -24,10 +28,17 @@ class RiskCheck:
 @dataclass(frozen=True)
 class RiskContext:
     game_exposure_units: float = 0.0
+    portfolio_exposure_units: float = 0.0
     daily_pnl_units: float = 0.0
     open_positions: int = 0
     last_trade_lost: bool = False
     last_loss_stake_units: float = 0.0
+    broad_slate_trade_count: int = 0
+    broad_slate_daily_trade_limit: int | None = None
+    paper_demo_broad_slate_trade_count: int = 0
+    paper_demo_daily_trade_cap: int | None = None
+    qual_daily_trade_count: int = 0
+    qual_daily_trade_cap: int | None = None
 
 
 @dataclass(frozen=True)
@@ -108,10 +119,32 @@ def _research_override_status(intent: Any, settings: Any,
     )
 
 
+def validated_market_family_count(learning: dict[str, Any] | None) -> int:
+    families = (learning or {}).get("families") or {}
+    return sum(
+        1
+        for row in families.values()
+        if isinstance(row, dict) and bool(row.get("validated"))
+    )
+
+
+def broad_slate_daily_trade_limit(
+    learning: dict[str, Any] | None,
+    *,
+    per_family: int = BROAD_SLATE_TRADES_PER_VALIDATED_FAMILY,
+) -> int:
+    """Small linear ramp: two trades per validated family keeps a $100 roll tight."""
+    return max(validated_market_family_count(learning) * max(int(per_family), 0), 0)
+
+
 def evaluate_trade_intent(intent: Any, settings: Any,
                           context: RiskContext | None = None) -> RiskDecision:
     context = context or RiskContext()
     checks: list[RiskCheck] = []
+    execution_mode = str(getattr(settings, "execution_mode", "paper") or "paper").lower()
+    live_mode = execution_mode == "live"
+    paper_demo_mode = execution_mode in {"paper", "demo"}
+    signal_source = str(getattr(intent, "signal_source", "consensus") or "consensus")
 
     kill_switch = Path(settings.kill_switch_path)
     checks.append(RiskCheck(
@@ -139,6 +172,21 @@ def evaluate_trade_intent(intent: Any, settings: Any,
         "game_exposure",
         new_exposure <= max_game,
         f"game exposure {new_exposure:.3f} units <= max {max_game:.3f}",
+    ))
+
+    portfolio_exposure = context.portfolio_exposure_units + stake_units
+    max_daily_exposure = float(getattr(
+        settings,
+        "max_daily_exposure_units",
+        MAX_STAKE_UNITS,
+    ))
+    checks.append(RiskCheck(
+        "daily_portfolio_exposure",
+        portfolio_exposure <= max_daily_exposure,
+        (
+            f"daily portfolio exposure {portfolio_exposure:.3f} units <= "
+            f"max {max_daily_exposure:.3f}"
+        ),
     ))
 
     max_loss = float(settings.max_daily_loss_units)
@@ -173,8 +221,140 @@ def evaluate_trade_intent(intent: Any, settings: Any,
         f"ticker {ticker} mapped" if ticker else "missing tradable Kalshi ticker",
     ))
 
+    qual_like = signal_source in {"qual", "qual_activated_quant"}
+    qual_live_ok = not (live_mode and qual_like)
+    checks.append(RiskCheck(
+        "qual_live_block",
+        qual_live_ok,
+        (
+            "qual-sourced intents are hard-blocked in live mode"
+            if not qual_live_ok else
+            "qual live block not applicable"
+            if qual_like else
+            "not a qual-sourced intent"
+        ),
+    ))
+
+    broad_slate = bool(getattr(intent, "broad_slate", False))
+    family_validated = bool(getattr(intent, "validated", False))
+    family = str(getattr(intent, "market_family", "") or "unknown")
+    family_validation_passed = (not broad_slate) or (not live_mode) or family_validated
+    checks.append(RiskCheck(
+        "broad_slate_family_validation",
+        family_validation_passed,
+        (
+            f"broad-slate market family {family} is validated"
+            if family_validated else
+            f"broad-slate market family {family} is not validated"
+            if broad_slate and live_mode else
+            "broad-slate family validation applies only in live mode"
+            if broad_slate else
+            "not a broad-slate intent"
+        ),
+    ))
+
+    if broad_slate and live_mode:
+        daily_limit = max(int(context.broad_slate_daily_trade_limit or 0), 0)
+        current_trades = max(int(context.broad_slate_trade_count or 0), 0)
+        checks.append(RiskCheck(
+            "broad_slate_daily_trade_limit",
+            current_trades < daily_limit,
+            (
+                f"broad-slate daily trades {current_trades + 1} <= "
+                f"validated-family limit {daily_limit}"
+            ),
+        ))
+    elif broad_slate:
+        checks.append(RiskCheck(
+            "broad_slate_daily_trade_limit",
+            True,
+            "validated-family daily limit applies only in live mode",
+        ))
+    else:
+        checks.append(RiskCheck(
+            "broad_slate_daily_trade_limit",
+            True,
+            "not a broad-slate intent",
+        ))
+
+    if broad_slate and paper_demo_mode:
+        configured_cap = (
+            context.paper_demo_daily_trade_cap
+            if context.paper_demo_daily_trade_cap is not None
+            else getattr(
+                settings,
+                "paper_demo_daily_trade_cap",
+                DEFAULT_PAPER_DEMO_DAILY_TRADE_CAP,
+            )
+        )
+        daily_cap = max(int(configured_cap), 0)
+        paper_demo_trades = max(int(context.paper_demo_broad_slate_trade_count or 0), 0)
+        cap_ok = paper_demo_trades < daily_cap
+        checks.append(RiskCheck(
+            "paper_demo_broad_slate_daily_trade_cap",
+            cap_ok,
+            (
+                f"paper/demo broad-slate daily trades {paper_demo_trades + 1} "
+                f"<= cap {daily_cap}"
+                if cap_ok else
+                f"paper/demo broad-slate daily cap {daily_cap} reached; "
+                f"order {paper_demo_trades + 1} blocked"
+            ),
+        ))
+    else:
+        checks.append(RiskCheck(
+            "paper_demo_broad_slate_daily_trade_cap",
+            True,
+            (
+                "paper/demo broad-slate cap not applicable"
+                if broad_slate else
+                "not a broad-slate intent"
+            ),
+        ))
+
+    if qual_like and paper_demo_mode:
+        configured_qual_cap = (
+            context.qual_daily_trade_cap
+            if context.qual_daily_trade_cap is not None
+            else getattr(settings, "qual_daily_trade_cap", DEFAULT_QUAL_DAILY_TRADE_CAP)
+        )
+        qual_cap = max(int(configured_qual_cap), 0)
+        qual_trades = max(int(context.qual_daily_trade_count or 0), 0)
+        qual_cap_ok = qual_trades < qual_cap
+        checks.append(RiskCheck(
+            "qual_daily_trade_cap",
+            qual_cap_ok,
+            (
+                f"qual daily trades {qual_trades + 1} <= cap {qual_cap}"
+                if qual_cap_ok else
+                f"qual daily trade cap {qual_cap} reached; order {qual_trades + 1} blocked"
+            ),
+        ))
+    else:
+        checks.append(RiskCheck(
+            "qual_daily_trade_cap",
+            True,
+            (
+                "qual daily cap applies only in paper/demo mode"
+                if qual_like else
+                "not a qual-sourced intent"
+            ),
+        ))
+
     edge = getattr(intent, "edge", None)
-    min_edge = float(settings.min_edge)
+    if getattr(intent, "net_edge", None) is not None:
+        edge = getattr(intent, "net_edge")
+    min_edge = (
+        float(getattr(settings, "qual_min_edge", 0.06))
+        if signal_source == "qual" else
+        float(getattr(
+            settings,
+            "execution_min_edge",
+            getattr(settings, "min_edge", 0.05),
+        ))
+    )
+    if signal_source == "qual_activated_quant":
+        min_edge = float(getattr(intent, "required_edge", min_edge) or min_edge)
     edge_ok = edge is not None and float(edge) >= min_edge
     if override_requested:
         checks.append(RiskCheck(
@@ -189,12 +369,12 @@ def evaluate_trade_intent(intent: Any, settings: Any,
         "edge",
         edge_passed,
         (
-            f"edge {float(edge):+.3f} meets min {min_edge:.3f}"
+            f"net edge {float(edge):+.3f} meets min {min_edge:.3f}"
             if edge_ok else
-            f"edge {float(edge):+.3f} below min {min_edge:.3f}; "
+            f"net edge {float(edge):+.3f} below min {min_edge:.3f}; "
             "approved research override applied"
             if edge_passed else
-            f"edge {float(edge):+.3f} below min {min_edge:.3f}"
+            f"net edge {float(edge):+.3f} below min {min_edge:.3f}"
             if edge is not None else
             "missing edge"
         ),

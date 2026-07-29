@@ -2,30 +2,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
 from .. import guardrails
 from ..alerts import deliver
 from ..audit import AuditTrail
 from ..research import ResearchStore
+from .activation import activation_edges, run_activated_step, skip_activated_step
 from .base import Context, load_context
 
-StepFn = Callable[[Context], dict]
 
-
-def _run_step(ctx: Context, name: str, fn: StepFn, steps: list[dict[str, Any]],
-              audit: AuditTrail) -> dict | None:
-    try:
-        result = fn(ctx)
-    except Exception as e:
-        audit.dead_letter("DAILY_CYCLE_STEP", str(e), {"step": name}, ctx.settings.game_id)
-        steps.append({"name": name, "status": "error", "error": str(e)})
-        return None
-    steps.append({"name": name, "status": "ok", "result": result})
-    return result
-
-
-def _execution_step(ctx: Context) -> tuple[str, StepFn] | None:
+def _execution_step(ctx: Context):
     from . import demo_execute, live_execute
 
     if ctx.settings.execution_mode == "live":
@@ -41,37 +28,362 @@ def run(ctx: Context | None = None) -> dict:
     audit = AuditTrail(ctx.settings.data_dir, store)
     steps: list[dict[str, Any]] = []
 
-    from . import backtest, book_watch, discover_markets, portfolio_sync, snapshot_market, status
+    from . import backtest, book_watch, candidate_ranker, closing_snapshot, discover_markets, market_matcher, news_ingest, portfolio_sync, qual_research, research_agent
+    from . import slate_discovery, slate_verify, snapshot_market
+    from . import source_check, status
 
-    _run_step(ctx, "portfolio-sync", portfolio_sync.run, steps, audit)
-    _run_step(ctx, "discover-markets", discover_markets.run, steps, audit)
-    snapshot = _run_step(ctx, "snapshot-market", snapshot_market.run, steps, audit)
+    source_report = run_activated_step(
+        ctx,
+        "source-check",
+        source_check.run,
+        steps,
+        audit,
+        activated_by=None,
+        activates=("news-ingest",),
+        dlq_type="DAILY_CYCLE_STEP",
+    )
+    if source_report is None:
+        skip_activated_step(
+            "slate-discovery",
+            steps,
+            activated_by="source-check",
+            reason="source-check failed",
+        )
+        final_status = run_activated_step(
+            ctx,
+            "status",
+            status.run,
+            steps,
+            audit,
+            activated_by="source-check",
+            dlq_type="DAILY_CYCLE_STEP",
+        )
+        payload = {
+            "game_id": ctx.settings.game_id,
+            "ran_at": datetime.now(timezone.utc).isoformat(),
+            "execution_mode": ctx.settings.execution_mode,
+            "dry_run": ctx.settings.dry_run,
+            "steps": steps,
+            "activation_edges": activation_edges(steps),
+            "status": final_status,
+        }
+        ctx.write_json("daily_cycle.json", payload)
+        deliver(
+            guardrails.with_footer(
+                f"[daily-cycle] {ctx.settings.game_id}: source-check failed; "
+                f"mode={ctx.settings.execution_mode} dry_run={ctx.settings.dry_run}"
+            ),
+            ctx.settings.deliver_to,
+        )
+        return payload
+
+    news = run_activated_step(
+        ctx,
+        "news-ingest",
+        news_ingest.run,
+        steps,
+        audit,
+        activated_by="source-check",
+        activates=("slate-discovery",),
+        dlq_type="DAILY_CYCLE_STEP",
+    )
+
+    slate = run_activated_step(
+        ctx,
+        "slate-discovery",
+        slate_discovery.run,
+        steps,
+        audit,
+        activated_by="news-ingest" if news is not None else "source-check",
+        activates=("slate-verify",),
+        dlq_type="DAILY_CYCLE_STEP",
+    )
+    if slate is not None:
+        run_activated_step(
+            ctx,
+            "slate-verify",
+            slate_verify.run,
+            steps,
+            audit,
+            activated_by="slate-discovery",
+            activates=("portfolio-sync",),
+            dlq_type="DAILY_CYCLE_STEP",
+        )
+    else:
+        skip_activated_step(
+            "slate-verify",
+            steps,
+            activated_by="slate-discovery",
+            reason="slate-discovery failed",
+            activates=("portfolio-sync",),
+        )
+
+    _portfolio = run_activated_step(
+        ctx,
+        "portfolio-sync",
+        portfolio_sync.run,
+        steps,
+        audit,
+        activated_by="slate-verify",
+        activates=("discover-markets",),
+        dlq_type="DAILY_CYCLE_STEP",
+    )
+    _catalog = run_activated_step(
+        ctx,
+        "discover-markets",
+        discover_markets.run,
+        steps,
+        audit,
+        activated_by="portfolio-sync",
+        activates=("snapshot-market",),
+        dlq_type="DAILY_CYCLE_STEP",
+    )
+    snapshot = run_activated_step(
+        ctx,
+        "snapshot-market",
+        snapshot_market.run,
+        steps,
+        audit,
+        activated_by="discover-markets",
+        activates=("book-watch",),
+        dlq_type="DAILY_CYCLE_STEP",
+    )
+    book = None
     if snapshot is not None:
-        _run_step(ctx, "book-watch", book_watch.run, steps, audit)
+        book = run_activated_step(
+            ctx,
+            "book-watch",
+            book_watch.run,
+            steps,
+            audit,
+            activated_by="snapshot-market",
+            activates=("market-matcher",),
+            dlq_type="DAILY_CYCLE_STEP",
+        )
+    else:
+        skip_activated_step(
+            "book-watch",
+            steps,
+            activated_by="snapshot-market",
+            reason="snapshot-market failed",
+            activates=("market-matcher",),
+        )
 
     exec_step = _execution_step(ctx)
-    if exec_step is None:
-        steps.append({
-            "name": "execution",
-            "status": "skipped",
-            "reason": "daily-cycle does not paper trade; set live/demo mode explicitly",
-        })
+    if snapshot is None:
+        skip_activated_step(
+            "market-matcher",
+            steps,
+            activated_by="book-watch",
+            reason="snapshot-market failed",
+            activates=("candidate-ranker",),
+        )
+        skip_activated_step(
+            "candidate-ranker",
+            steps,
+            activated_by="market-matcher",
+            reason="snapshot-market failed",
+            activates=("research-agent",),
+        )
+        skip_activated_step(
+            "research-agent",
+            steps,
+            activated_by="candidate-ranker",
+            reason="snapshot-market failed",
+            activates=("execution",),
+        )
+        skip_activated_step(
+            "execution",
+            steps,
+            activated_by="research-agent",
+            reason="snapshot-market failed",
+            activates=("backtest",),
+        )
+    elif book is None:
+        skip_activated_step(
+            "market-matcher",
+            steps,
+            activated_by="book-watch",
+            reason="book-watch failed",
+            activates=("candidate-ranker",),
+        )
+        skip_activated_step(
+            "candidate-ranker",
+            steps,
+            activated_by="market-matcher",
+            reason="book-watch failed",
+            activates=("research-agent",),
+        )
+        skip_activated_step(
+            "research-agent",
+            steps,
+            activated_by="candidate-ranker",
+            reason="book-watch failed",
+            activates=("execution",),
+        )
+        skip_activated_step(
+            "execution",
+            steps,
+            activated_by="research-agent",
+            reason="book-watch failed",
+            activates=("backtest",),
+        )
     else:
-        exec_name, exec_fn = exec_step
-        _run_step(ctx, exec_name, exec_fn, steps, audit)
+        matches = run_activated_step(
+            ctx,
+            "market-matcher",
+            market_matcher.run,
+            steps,
+            audit,
+            activated_by="book-watch",
+            activates=("candidate-ranker",),
+            dlq_type="DAILY_CYCLE_STEP",
+        )
+        if matches is None:
+            skip_activated_step(
+                "candidate-ranker",
+                steps,
+                activated_by="market-matcher",
+                reason="market-matcher failed",
+                activates=("research-agent",),
+            )
+            skip_activated_step(
+                "research-agent",
+                steps,
+                activated_by="candidate-ranker",
+                reason="market-matcher failed",
+                activates=("execution",),
+            )
+            skip_activated_step(
+                "execution",
+                steps,
+                activated_by="research-agent",
+                reason="market-matcher failed",
+                activates=("backtest",),
+            )
+        else:
+            qual = run_activated_step(
+                ctx,
+                "qual-research",
+                qual_research.run,
+                steps,
+                audit,
+                activated_by="market-matcher",
+                activates=("candidate-ranker",),
+                dlq_type="DAILY_CYCLE_STEP",
+            )
+            ranked = run_activated_step(
+                ctx,
+                "candidate-ranker",
+                candidate_ranker.run,
+                steps,
+                audit,
+                activated_by="qual-research" if qual is not None else "market-matcher",
+                activates=("research-agent",),
+                dlq_type="DAILY_CYCLE_STEP",
+            )
+            if ranked is None:
+                skip_activated_step(
+                    "research-agent",
+                    steps,
+                    activated_by="candidate-ranker",
+                    reason="candidate-ranker failed",
+                    activates=("execution",),
+                )
+                skip_activated_step(
+                    "execution",
+                    steps,
+                    activated_by="research-agent",
+                    reason="candidate-ranker failed",
+                    activates=("backtest",),
+                )
+            else:
+                research = run_activated_step(
+                    ctx,
+                    "research-agent",
+                    research_agent.run,
+                    steps,
+                    audit,
+                    activated_by="candidate-ranker",
+                    activates=("execution",),
+                    dlq_type="DAILY_CYCLE_STEP",
+                )
+                if research is None:
+                    skip_activated_step(
+                        "execution",
+                        steps,
+                        activated_by="research-agent",
+                        reason="research-agent failed",
+                        activates=("backtest",),
+                    )
+                elif exec_step is None:
+                    skip_activated_step(
+                        "execution",
+                        steps,
+                        activated_by="research-agent",
+                        reason="daily-cycle does not paper trade; set live/demo mode explicitly",
+                        activates=("backtest",),
+                    )
+                else:
+                    exec_name, exec_fn = exec_step
+                    run_activated_step(
+                        ctx,
+                        exec_name,
+                        exec_fn,
+                        steps,
+                        audit,
+                        activated_by="research-agent",
+                        activates=("backtest",),
+                        dlq_type="DAILY_CYCLE_STEP",
+                    )
+
+    run_activated_step(
+        ctx,
+        "closing-snapshot",
+        closing_snapshot.run,
+        steps,
+        audit,
+        activated_by="execution",
+        activates=("backtest",),
+        dlq_type="DAILY_CYCLE_STEP",
+    )
 
     if ctx.settings.data_path("log.jsonl").exists():
-        _run_step(ctx, "backtest", backtest.run, steps, audit)
+        run_activated_step(
+            ctx,
+            "backtest",
+            backtest.run,
+            steps,
+            audit,
+            activated_by="closing-snapshot",
+            activates=("status",),
+            dlq_type="DAILY_CYCLE_STEP",
+        )
     else:
-        steps.append({"name": "backtest", "status": "skipped", "reason": "no learning log"})
+        skip_activated_step(
+            "backtest",
+            steps,
+            activated_by="closing-snapshot",
+            reason="no learning log",
+            activates=("status",),
+        )
 
-    final_status = _run_step(ctx, "status", status.run, steps, audit)
+    final_status = run_activated_step(
+        ctx,
+        "status",
+        status.run,
+        steps,
+        audit,
+        activated_by="backtest",
+        dlq_type="DAILY_CYCLE_STEP",
+    )
     payload = {
         "game_id": ctx.settings.game_id,
         "ran_at": datetime.now(timezone.utc).isoformat(),
         "execution_mode": ctx.settings.execution_mode,
         "dry_run": ctx.settings.dry_run,
         "steps": steps,
+        "activation_edges": activation_edges(steps),
         "status": final_status,
     }
     ctx.write_json("daily_cycle.json", payload)

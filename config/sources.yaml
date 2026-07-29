@@ -28,6 +28,7 @@ providers:
     base_url_env: KALSHI_API_BASE
     allowed_for:
       - market_discovery
+      - broad_sports_slate_discovery
       - orderbook_depth
       - quote_snapshot
       - execution
@@ -59,6 +60,7 @@ providers:
       path: /events
       params:
         oddsAvailable: "true"
+        leagueID: NBA
         limit: "1"
       auth:
         type: api_key
@@ -76,7 +78,7 @@ providers:
   the_odds_api:
     label: The Odds API
     tier: 2
-    role: secondary_structured_odds
+    role: credit_gated_structured_odds_fallback
     required_env:
       - THE_ODDS_API_KEY
     docs_url: https://the-odds-api.com/liveapi/guides/v4/
@@ -91,7 +93,7 @@ providers:
       event_odds: /sports/{sport}/events/{event_id}/odds/
     default_params:
       odds:
-        regions: us
+        regions: us,eu
         markets: h2h,spreads,totals
         oddsFormat: american
     probe:
@@ -101,6 +103,41 @@ providers:
         type: api_key
         env: THE_ODDS_API_KEY
         query_param: apiKey
+    allowed_for:
+      - slate_discovery
+      - odds_consensus
+      - line_movement_backup
+      - research_context
+    live_execution_allowed: false
+    confidence: high
+
+  parlay_api:
+    label: ParlayAPI
+    tier: 1
+    role: primary_structured_odds
+    required_env:
+      - PARLAY_API_KEY
+    docs_url: https://parlay-api.com/docs
+    base_url: https://parlay-api.com/v1
+    auth:
+      type: api_key
+      env: PARLAY_API_KEY
+      header: X-API-Key
+    endpoints:
+      sports: /sports
+      odds: /sports/{sport}/odds
+    default_params:
+      odds:
+        regions: us
+        markets: h2h,spreads,totals
+        oddsFormat: american
+    probe:
+      method: GET
+      path: /sports
+      auth:
+        type: api_key
+        env: PARLAY_API_KEY
+        header: X-API-Key
     allowed_for:
       - slate_discovery
       - odds_consensus
@@ -198,7 +235,38 @@ providers:
     confidence: low
 
 sports:
+  soccer_world_cup:
+    label: FIFA World Cup
+    default_discovery: true
+    odds_api_sport_key: soccer_fifa_world_cup
+    espn_path: soccer/fifa.world
+    kalshi_keywords:
+      - Reg Time
+      - advances
+      - goals scored
+      - corners
+      - Spain
+      - Portugal
+      - USA
+      - Argentina
+      - Belgium
+      - France
+      - England
+      - Colombia
+      - Norway
+      - Cristiano Ronaldo
+      - Lionel Messi
+      - Lamine Yamal
+      - Kylian Mbappe
+    first_markets:
+      - match_winner
+      - team_advances
+      - totals
+      - corners
+      - player_shots
   nba:
+    label: NBA
+    default_discovery: false
     sportsgameodds_league_id: NBA
     odds_api_sport_key: basketball_nba
     espn_path: basketball/nba
@@ -209,7 +277,39 @@ sports:
       - player_points
       - player_rebounds
       - player_assists
+  nba_summer_league:
+    label: NBA Summer League
+    default_discovery: true
+    sportsgameodds_league_id: NBA
+    odds_api_sport_key: basketball_nba_summer_league
+    espn_path: basketball/nba
+    kalshi_keywords:
+      - NBA Summer
+      - points scored
+      - rebounds
+      - assists
+    first_markets:
+      - h2h
+      - spreads
+      - totals
+  wnba:
+    label: WNBA
+    default_discovery: true
+    sportsgameodds_league_id: WNBA
+    odds_api_sport_key: basketball_wnba
+    espn_path: basketball/wnba
+    kalshi_keywords:
+      - WNBA
+      - points scored
+      - Las Vegas
+      - Indiana
+    first_markets:
+      - h2h
+      - spreads
+      - totals
   nfl:
+    label: NFL
+    default_discovery: true
     sportsgameodds_league_id: NFL
     odds_api_sport_key: americanfootball_nfl
     espn_path: football/nfl
@@ -221,9 +321,28 @@ sports:
       - player_rushing_yards
       - player_receiving_yards
   mlb:
+    label: MLB
+    default_discovery: true
     sportsgameodds_league_id: MLB
     odds_api_sport_key: baseball_mlb
     espn_path: baseball/mlb
+    kalshi_keywords:
+      - runs scored
+      - wins by over
+      - Philadelphia
+      - Atlanta
+      - Milwaukee
+      - Los Angeles D
+      - New York Y
+      - New York M
+      - San Diego
+      - Houston
+      - Tampa Bay
+      - Toronto
+      - Washington
+      - Bryce Harper
+      - Shohei Ohtani
+      - Mookie Betts
     first_markets:
       - h2h
       - spreads
@@ -232,6 +351,8 @@ sports:
       - player_home_runs
       - pitcher_strikeouts
   nhl:
+    label: NHL
+    default_discovery: true
     sportsgameodds_league_id: NHL
     odds_api_sport_key: icehockey_nhl
     espn_path: hockey/nhl
@@ -241,6 +362,35 @@ sports:
       - totals
       - player_points
       - goalie_saves
+  tennis:
+    label: Tennis
+    default_discovery: true
+    odds_api_sport_key:
+      - tennis_atp_wimbledon
+      - tennis_wta_wimbledon
+    kalshi_keywords:
+      - Taylor Fritz
+      - Alexander Zverev
+      - Novak Djokovic
+      - Jannik Sinner
+      - Grigor Dimitrov
+      - Taro Daniel
+    first_markets:
+      - match_winner
+      - set_winner
+      - total_games
+  mma:
+    label: MMA/UFC
+    default_discovery: true
+    odds_api_sport_key: mma_mixed_martial_arts
+    kalshi_keywords:
+      - UFC
+      - Robert Whittaker
+      - Paddy Pimblett
+      - Cody Garbrandt
+      - Terrance McKinney
+    first_markets:
+      - fight_winner
 
 agent_contracts:
   source_check:
@@ -249,9 +399,13 @@ agent_contracts:
     purpose: Verify configured source credentials and optional health probes without exposing secrets.
   slate_discovery:
     phase: slate-discovery
-    output: data/<DATE>.slate_candidates.json
+    output: data/<GAME_ID>.slate_candidates.json
     purpose: Select candidate events and mapped Kalshi markets across sports.
   research_agent:
     phase: research-agent
-    output: data/<EVENT_ID>.research_bundle.json
+    output: data/<GAME_ID>.research_bundle.json
     purpose: Produce evidence-backed candidate theses with source confidence and disagreement notes.
+  slate_verify:
+    phase: slate-verify
+    output: data/<GAME_ID>.slate_verification.json
+    purpose: Verify slate-discovery identity/source coverage before research and execution eligibility.

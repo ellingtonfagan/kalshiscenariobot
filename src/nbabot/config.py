@@ -45,17 +45,52 @@ class Settings:
     calibration_overrides_path: Path
     execution_mode: str
     live_trading_ack: str
+    broad_slate_execution: str
     research_override_ack: str
     research_override_max_units: float
     demo_api_base: str
+    kalshi_demo_api_key: str
+    kalshi_demo_private_key_path: Path
+    paper_demo_daily_trade_cap: int
+    qual_daily_trade_cap: int
+    unit_fraction: float
+    paper_bankroll_usd: float
+    max_order_notional_fraction: float
+    resting_order_max_age_minutes: int
     max_daily_loss_units: float
+    max_daily_exposure_units: float
     max_game_exposure_units: float
     min_edge: float
+    demo_min_edge: float
+    qual_min_edge: float
+    kalshi_taker_fee_factor: float
+    kalshi_maker_fee_factor: float
+    near_miss_window: float
+    near_miss_investigations_per_cycle: int
+    qaq_floor_bonus: float
+    confluence_agree_delta: float
+    confluence_edge_bonus: float
+    confluence_veto_delta: float
+    qual_signal_max_age_hours: float
+    qual_lessons_top_n: int
+    qual_min_groundedness: float
+    qual_llm_cmd: str
+    qual_llm_timeout_seconds: int
+    qual_fallback_model: str
+    research_teams_path: Path
+    news_window_hours: float
+    news_user_agent: str
+    trade_unconfirmed_news: bool
+    event_trigger_cooldown_minutes: int
+    event_trigger_daily_cap: int
+    max_plausible_edge: float
     stale_market_seconds: int
     max_spread_cents: int
     orderbook_depth: int | None
     book_watch_iterations: int
     book_watch_interval_seconds: float
+    closing_snapshot_window_minutes: int
+    concentration_max_winner_share: float
     kill_switch_path: Path
     ui_host: str
     ui_port: int
@@ -80,8 +115,23 @@ class Settings:
         return self.game.get("tracked_players", [])
 
     @property
-    def unit_usd(self) -> float:
-        return float(self.game.get("bankroll", {}).get("unit_usd", 1))
+    def configured_unit_usd(self) -> float | None:
+        """Legacy static YAML unit, for diagnostics only.
+
+        Runtime unit sizing is canonicalized in ``nbabot.units`` from the
+        resolved bankroll and ``unit_fraction``. Do not use this value for
+        sizing or risk caps.
+        """
+        bankroll = self.game.get("bankroll", {})
+        if not isinstance(bankroll, dict) or "unit_usd" not in bankroll:
+            return None
+        return float(bankroll["unit_usd"])
+
+    @property
+    def execution_min_edge(self) -> float:
+        if self.execution_mode in {"demo", "paper"}:
+            return float(self.demo_min_edge)
+        return float(self.min_edge)
 
     def data_path(self, suffix: str) -> Path:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -99,6 +149,13 @@ def load_settings(game_id: str | None = None) -> Settings:
     pk_path = Path(os.environ.get("KALSHI_PRIVATE_KEY_PATH", "./secrets/kalshi-private-key.pem"))
     if not pk_path.is_absolute():
         pk_path = (REPO_ROOT / pk_path).resolve()
+
+    demo_pk_path = Path(
+        os.environ.get("KALSHI_DEMO_PRIVATE_KEY_PATH")
+        or "./secrets/kalshi-demo-private-key.txt"
+    )
+    if not demo_pk_path.is_absolute():
+        demo_pk_path = (REPO_ROOT / demo_pk_path).resolve()
 
     data_dir = Path(os.environ.get("NBABOT_DATA_DIR", REPO_ROOT / "data"))
     if not data_dir.is_absolute():
@@ -118,6 +175,12 @@ def load_settings(game_id: str | None = None) -> Settings:
     if not kill_switch_path.is_absolute():
         kill_switch_path = (REPO_ROOT / kill_switch_path).resolve()
 
+    research_teams_path = Path(
+        os.environ.get("NBABOT_RESEARCH_TEAMS", CONFIG_DIR / "research_teams.yaml")
+    )
+    if not research_teams_path.is_absolute():
+        research_teams_path = (REPO_ROOT / research_teams_path).resolve()
+
     return Settings(
         kalshi_api_key=os.environ.get("KALSHI_API_KEY", ""),
         kalshi_private_key_path=pk_path,
@@ -131,6 +194,7 @@ def load_settings(game_id: str | None = None) -> Settings:
         calibration_overrides_path=calibration_overrides_path,
         execution_mode=os.environ.get("NBABOT_EXECUTION_MODE", "paper").lower(),
         live_trading_ack=os.environ.get("NBABOT_LIVE_TRADING_ACK", ""),
+        broad_slate_execution=os.environ.get("NBABOT_BROAD_SLATE_EXECUTION", ""),
         research_override_ack=os.environ.get("NBABOT_RESEARCH_OVERRIDE_ACK", ""),
         research_override_max_units=min(
             float(os.environ.get("NBABOT_RESEARCH_OVERRIDE_MAX_UNITS", "1")),
@@ -140,11 +204,56 @@ def load_settings(game_id: str | None = None) -> Settings:
             "NBABOT_DEMO_API_BASE",
             "https://external-api.demo.kalshi.co/trade-api/v2",
         ).rstrip("/"),
+        kalshi_demo_api_key=os.environ.get("KALSHI_DEMO_API_KEY", ""),
+        kalshi_demo_private_key_path=demo_pk_path,
+        paper_demo_daily_trade_cap=int(os.environ.get("NBABOT_PAPER_DEMO_DAILY_TRADE_CAP", "50")),
+        qual_daily_trade_cap=int(os.environ.get("NBABOT_QUAL_DAILY_TRADE_CAP", "10")),
+        unit_fraction=float(os.environ.get("NBABOT_UNIT_FRACTION", "0.015")),
+        paper_bankroll_usd=float(os.environ.get("NBABOT_PAPER_BANKROLL", "1000")),
+        max_order_notional_fraction=float(
+            os.environ.get("NBABOT_MAX_ORDER_NOTIONAL_FRACTION", "0.10")
+        ),
+        resting_order_max_age_minutes=int(
+            os.environ.get("NBABOT_RESTING_ORDER_MAX_AGE_MINUTES", "90")
+        ),
         max_daily_loss_units=float(os.environ.get("NBABOT_MAX_DAILY_LOSS_UNITS", "2")),
+        max_daily_exposure_units=float(
+            os.environ.get("NBABOT_MAX_DAILY_EXPOSURE_UNITS", str(MAX_STAKE_UNITS))
+        ),
         max_game_exposure_units=float(
             os.environ.get("NBABOT_MAX_GAME_EXPOSURE_UNITS", str(MAX_STAKE_UNITS))
         ),
         min_edge=float(os.environ.get("NBABOT_MIN_EDGE", "0.05")),
+        demo_min_edge=float(os.environ.get("NBABOT_DEMO_MIN_EDGE", "0.03")),
+        qual_min_edge=float(os.environ.get("NBABOT_QUAL_MIN_EDGE", "0.06")),
+        kalshi_taker_fee_factor=float(os.environ.get("NBABOT_KALSHI_TAKER_FEE_FACTOR", "0.07")),
+        kalshi_maker_fee_factor=float(os.environ.get("NBABOT_KALSHI_MAKER_FEE_FACTOR", "0.0175")),
+        near_miss_window=float(os.environ.get("NBABOT_NEAR_MISS_WINDOW", "0.02")),
+        near_miss_investigations_per_cycle=int(
+            os.environ.get("NBABOT_NEAR_MISS_INVESTIGATIONS_PER_CYCLE", "5")
+        ),
+        qaq_floor_bonus=float(os.environ.get("NBABOT_QAQ_FLOOR_BONUS", "0.015")),
+        confluence_agree_delta=float(os.environ.get("NBABOT_CONFLUENCE_AGREE_DELTA", "0.05")),
+        confluence_edge_bonus=float(os.environ.get("NBABOT_CONFLUENCE_EDGE_BONUS", "0.01")),
+        confluence_veto_delta=float(os.environ.get("NBABOT_CONFLUENCE_VETO_DELTA", "0.08")),
+        qual_signal_max_age_hours=float(os.environ.get("NBABOT_QUAL_SIGNAL_MAX_AGE_HOURS", "12")),
+        qual_lessons_top_n=int(os.environ.get("NBABOT_QUAL_LESSONS_TOP_N", "5")),
+        qual_min_groundedness=float(os.environ.get("NBABOT_QUAL_MIN_GROUNDEDNESS", "0.6")),
+        qual_llm_cmd=os.environ.get(
+            "NBABOT_QUAL_LLM_CMD",
+            "~/.codex/plugins/.plugin-appserver/codex exec",
+        ),
+        qual_llm_timeout_seconds=int(os.environ.get("NBABOT_QUAL_LLM_TIMEOUT_SECONDS", "600")),
+        qual_fallback_model=os.environ.get("NBABOT_QUAL_FALLBACK_MODEL", "claude-opus-4-8"),
+        research_teams_path=research_teams_path,
+        news_window_hours=float(os.environ.get("NBABOT_NEWS_WINDOW_HOURS", "48")),
+        news_user_agent=os.environ.get("NBABOT_NEWS_USER_AGENT", "nbabot-research/0.1"),
+        trade_unconfirmed_news=os.environ.get("NBABOT_TRADE_UNCONFIRMED_NEWS", "0").lower() in {"1", "true", "yes"},
+        event_trigger_cooldown_minutes=int(
+            os.environ.get("NBABOT_EVENT_TRIGGER_COOLDOWN_MINUTES", "45")
+        ),
+        event_trigger_daily_cap=int(os.environ.get("NBABOT_EVENT_TRIGGER_DAILY_CAP", "8")),
+        max_plausible_edge=float(os.environ.get("NBABOT_MAX_PLAUSIBLE_EDGE", "0.15")),
         stale_market_seconds=int(os.environ.get("NBABOT_STALE_MARKET_SECONDS", "90")),
         max_spread_cents=int(os.environ.get("NBABOT_MAX_SPREAD_CENTS", "10")),
         orderbook_depth=(
@@ -153,6 +262,8 @@ def load_settings(game_id: str | None = None) -> Settings:
         ),
         book_watch_iterations=int(os.environ.get("NBABOT_BOOK_WATCH_ITERATIONS", "1")),
         book_watch_interval_seconds=float(os.environ.get("NBABOT_BOOK_WATCH_INTERVAL_SECONDS", "0")),
+        closing_snapshot_window_minutes=int(os.environ.get("NBABOT_CLOSING_SNAPSHOT_WINDOW_MINUTES", "240")),
+        concentration_max_winner_share=float(os.environ.get("NBABOT_CONCENTRATION_MAX_WINNER_SHARE", "0.50")),
         kill_switch_path=kill_switch_path,
         ui_host=os.environ.get("NBABOT_UI_HOST", "127.0.0.1"),
         ui_port=int(os.environ.get("NBABOT_UI_PORT", "8765")),

@@ -7,7 +7,10 @@ from typing import Any
 
 from .. import guardrails
 from ..alerts import deliver
+from ..cycle_health import read_delivery_failures, read_health_status
 from ..research import ResearchStore
+from ..units import unit_payload
+from ..validation_report import report as build_validation_report
 from .base import Context, load_context
 
 
@@ -25,6 +28,22 @@ def _artifact_summary(ctx: Context, suffix: str) -> dict[str, Any]:
         "size_bytes": stat.st_size,
         "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
     }
+
+
+def _read_artifact(ctx: Context, suffix: str) -> dict[str, Any]:
+    reader = getattr(ctx, "read_json", None)
+    if callable(reader):
+        return reader(suffix) or {}
+    path = ctx.settings.data_path(suffix)
+    if not path.exists():
+        return {}
+    try:
+        import json
+
+        loaded = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _live_ready(ctx: Context) -> tuple[bool, list[str]]:
@@ -54,19 +73,52 @@ def build_status(ctx: Context) -> dict[str, Any]:
         name: _artifact_summary(ctx, name)
         for name in (
             "market_catalog.json",
+            "slate_candidates.json",
+            "slate_verification.json",
             "market_snapshot.json",
             "book_watch.json",
+            "market_matches.json",
+            "execution_slate.json",
+            "candidate_ranker.json",
+            "edge_candidates.json",
+            "news_ingest.json",
+            "qual_signals.json",
+            "qual_postmortem.json",
+            "research_bundle.json",
+            "market_candidates.json",
+            "sport_market_candidates.json",
             "autopilot.json",
             "daily_cycle.json",
             "portfolio_sync.json",
             "source_check.json",
             "reconcile.json",
             "backtest.json",
+            "historical_backtest.json",
+            "exposure_reconciliation.json",
+            "health_check.json",
         )
     }
+    health = read_health_status(ctx.settings.data_dir)
+    exposure_reconciliation = _read_artifact(ctx, "exposure_reconciliation.json")
+    if isinstance(health, dict) and isinstance(health.get("exposure_reconciliation"), dict):
+        exposure_reconciliation = health["exposure_reconciliation"]
     latest_risk = store.latest_rows("risk_snapshots", 1)
     latest_live = store.latest_rows("live_orders", 1)
     latest_audit = store.latest_rows("audit_events", 3)
+    validation = build_validation_report(
+        store.list_settlement_records(),
+        default_sport=ctx.settings.sport,
+        qual_rag_stats=store.qual_rag_corpus_summary(),
+        detection_latency=store.news_detection_latency_summary(),
+        market_move_report=store.news_market_move_report(),
+        concentration_max_winner_share=float(
+            getattr(ctx.settings, "concentration_max_winner_share", 0.50)
+        ),
+    )
+    try:
+        unit = unit_payload(ctx)
+    except Exception as exc:
+        unit = {"ok": False, "error": str(exc)}
     return {
         "game_id": ctx.settings.game_id,
         "sport": ctx.settings.sport,
@@ -81,9 +133,20 @@ def build_status(ctx: Context) -> dict[str, Any]:
             "demo": _count_orders(store, "demo_orders"),
             "live": _count_orders(store, "live_orders"),
         },
+        "signal_engines": store.signal_engine_summary(),
+        "fill_rate": store.fill_rate_summary(),
+        "validation_report": validation,
+        "qual_learning": store.qual_learning_summary(),
+        "qual_rag": store.qual_rag_corpus_summary(),
+        "news_detection_latency": store.news_detection_latency_summary(),
+        "news_market_move_report": store.news_market_move_report(),
         "latest_risk_snapshot": latest_risk[0] if latest_risk else None,
         "latest_live_order": latest_live[0] if latest_live else None,
         "latest_audit_events": latest_audit,
+        "health": health,
+        "delivery_failures": read_delivery_failures(ctx.settings.data_dir),
+        "unit": unit,
+        "exposure_reconciliation": exposure_reconciliation,
         "artifacts": artifacts,
     }
 
@@ -93,20 +156,107 @@ def _format_status(status: dict[str, Any]) -> str:
     live_line = "ready" if status["live_ready"] else "blocked: " + "; ".join(blockers)
     risk = status.get("latest_risk_snapshot") or {}
     orders = status["orders"]
+    engines = status.get("signal_engines") or {}
+    consensus = engines.get("consensus") or {}
+    qual = engines.get("qual") or {}
+    learning = status.get("qual_learning") or {}
+    rag = status.get("qual_rag") or {}
+    validation = status.get("validation_report") or {}
+    latency = status.get("news_detection_latency") or {}
+    source_latency = latency.get("source_latency") or {}
+    groups = validation.get("groups") or []
+    top_group = groups[0] if groups else {}
+    concentration = validation.get("overall_concentration") or {}
+    fill_buckets = (status.get("fill_rate") or {}).get("buckets") or []
+    fill_text = "; ".join(
+        f"{row.get('signal_source')}:{row.get('liquidity_role')} {row.get('filled', 0)}/{row.get('placed', 0)} filled"
+        for row in fill_buckets[:3]
+    ) or "n/a"
     exposure = risk.get("game_exposure_units")
     daily_pnl = risk.get("daily_pnl_units")
     exposure_label = f"{exposure}u" if exposure is not None else "n/a"
     daily_pnl_label = f"{daily_pnl}u" if daily_pnl is not None else "n/a"
+    health = status.get("health") or {}
+    health_reasons = health.get("reasons") or []
+    health_line = "ok" if health.get("ok") else "ALERT " + "; ".join(str(reason) for reason in health_reasons[:3])
+    delivery_failures = status.get("delivery_failures") or {}
+    if delivery_failures.get("failing"):
+        delivery_line = (
+            f"alerts failing={delivery_failures.get('count', 0)} "
+            f"since={delivery_failures.get('first_failed_at', 'n/a')}"
+        )
+    else:
+        delivery_line = "alerts failing=0"
+    exposure_reconciliation = status.get("exposure_reconciliation") or {}
+    unit = status.get("unit") or {}
+    invariant = unit.get("invariant") or {}
+    exposure_warnings = exposure_reconciliation.get("warnings") or []
+    exposure_line = (
+        "ok"
+        if not exposure_warnings else
+        "WARNING " + "; ".join(str(reason) for reason in exposure_warnings[:2])
+    )
     return "\n".join([
         f"[status] {status['game_id']} sport={status['sport']}",
+        f"  health {health_line}",
+        f"  {delivery_line}",
         f"  mode={status['execution_mode']} dry_run={status['dry_run']} live={live_line}",
         f"  orders paper={orders['paper']} demo={orders['demo']} live={orders['live']}",
+        (
+            "  signal_engines "
+            f"consensus={consensus.get('trades_placed', 0)} placed/{consensus.get('settled', 0)} settled "
+            f"qual={qual.get('trades_placed', 0)} placed/{qual.get('settled', 0)} settled"
+        ),
+        (
+            "  qual_learning "
+            f"postmortems={learning.get('postmortems_completed', 0)} "
+            f"lessons={learning.get('lessons_stored', 0)} "
+            f"recaps_found={learning.get('recaps_found', 0)} "
+            f"recaps_missing={learning.get('recaps_missing', 0)}"
+        ),
+        (
+            "  qual_rag "
+            f"chunks={rag.get('chunk_count', 0)} "
+            f"retrievals={rag.get('retrieval_count', 0)} "
+            f"mean_groundedness={rag.get('mean_groundedness', 'n/a')} "
+            f"unsupported_rate={rag.get('unsupported_branch_rate', 'n/a')} "
+            f"low_groundedness_blocked={rag.get('low_groundedness_blocked', 0)}"
+        ),
+        (
+            "  news_latency "
+            + (
+                "; ".join(
+                    f"{source} p50={row.get('p50_minutes')}m p90={row.get('p90_minutes')}m max={row.get('max_minutes')}m"
+                    for source, row in list(source_latency.items())[:3]
+                )
+                if source_latency else "n/a"
+            )
+        ),
+        f"  fill_rate {fill_text}",
+        (
+            "  validation "
+            f"settled={validation.get('settled_count', 0)} "
+            f"clv_measured={top_group.get('clv_measured_count', 0) if top_group else 0} "
+            f"distance={'; '.join(top_group.get('remaining_distance', ['n/a'])) if top_group else 'n/a'}"
+        ),
+        (
+            "  concentration "
+            f"pnl_ex_largest=${float(concentration.get('pnl_ex_largest_winner_cents') or 0) / 100:.2f} "
+            f"flag={bool(concentration.get('concentration_flag'))}"
+        ),
         (
             "  risk "
             f"exposure={exposure_label} "
             f"daily_pnl={daily_pnl_label} "
             f"open_positions={risk.get('open_positions', 'n/a')}"
         ),
+        (
+            "  unit "
+            f"${float(unit.get('unit_size_dollars') or 0):.2f} "
+            f"source={unit.get('bankroll_source', 'n/a')} "
+            f"invariant={'ok' if invariant.get('ok', True) else 'WARNING'}"
+        ),
+        f"  exposure_reconciliation {exposure_line}",
         f"  kill_switch={'ON' if status['kill_switch_on'] else 'clear'}",
     ])
 
