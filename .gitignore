@@ -27,3 +27,7 @@ dist/
 
 # cron literal-variable workaround symlink
 $REPO
+
+# runtime scheduler/news-watch/status-report logs (keep dir, ignore contents)
+logs/*.log
+!logs/.gitkeep
