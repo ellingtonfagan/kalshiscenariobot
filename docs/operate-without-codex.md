@@ -20,7 +20,7 @@ ksobot autopilot
 For repeated runs, use the existing cron file:
 
 ```bash
-crontab scheduler/crontab.txt
+crontab scheduler/combined-crontab.txt
 ```
 
 `autopilot` is the best repeated operational phase because it safely decides which game
