@@ -17,6 +17,7 @@ from . import (  # noqa: F401
     live_execute,
     lock,
     market_matcher,
+    monitor,
     news_ingest,
     news_watch,
     order_reconcile,
@@ -58,6 +59,7 @@ PHASES = {
     "historical-backtest": historical_backtest.run,
     "live": heartbeat.run,      # alias so a plain crontab can drive the live loop
     "market-matcher": market_matcher.run,
+    "monitor": monitor.run,
     "news-ingest": news_ingest.run,
     "news-watch": news_watch.run,
     "order-reconcile": order_reconcile.run,

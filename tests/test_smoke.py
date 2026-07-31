@@ -41,6 +41,7 @@ from nbabot import (  # noqa: E402
     market_identity,
     market_matcher as market_matcher_core,
     market_discovery,
+    monitor as monitor_core,
     orderbook,
     odds_math,
     odds_refresh,
@@ -76,6 +77,7 @@ from nbabot.agents import (  # noqa: E402
     health_check,
     historical_backtest,
     market_matcher,
+    monitor as monitor_agent,
     live_execute,
     news_ingest,
     news_watch,
@@ -7265,3 +7267,218 @@ def test_exchange_exposure_ignores_terminal_orders():
     }
     result = exposure.exchange_exposure_units(state, unit_usd=15.70)
     assert result["total_exposure_units"] == pytest.approx(0.0)
+
+
+# ── monitor phase ──────────────────────────────────────────────────────────────
+def _monitor_ctx(tmp_path, *, execution_mode="paper", dry_run=True):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = execution_mode
+    settings.dry_run = dry_run
+    settings.live_trading_ack = ""
+    settings.deliver_to = "telegram"
+
+    class DummyContext:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def read_json(self, suffix):
+            path = self.settings.data_dir / suffix
+            return json.loads(path.read_text()) if path.exists() else None
+
+    return DummyContext(settings)
+
+
+def _record_monitor_order(store, intent):
+    request = execution.OrderRequest(
+        client_order_id=f"cid-{intent.ticker}-{intent.signal_source}",
+        ticker=intent.ticker,
+        action="buy",
+        side="yes",
+        order_type="limit",
+        count=intent.contracts,
+        price_cents=intent.price_cents,
+    )
+    decision = risk.RiskDecision(True, [])
+    receipt = execution.OrderReceipt(request.client_order_id, "demo", "submitted", {"order_id": "demo-1"})
+    assert store.record_order("demo_orders", intent.game_id, intent, decision, request, receipt)
+
+
+def test_monitor_snapshot_deterministic_and_per_engine_sql(tmp_path):
+    ctx = _monitor_ctx(tmp_path)
+    store = research.ResearchStore(ctx.settings.research_db_path)
+    store.init_schema()
+    now = datetime(2026, 7, 31, 16, tzinfo=timezone.utc)
+    (tmp_path / "scheduled_cycle_runs.jsonl").write_text(
+        json.dumps({
+            "event": "finished",
+            "finished_at": (now - timedelta(hours=2)).isoformat(),
+            "exit_code": 0,
+            "edges": 3,
+            "orders_placed": 2,
+            "hard_error": None,
+        }) + "\n"
+    )
+    (tmp_path / "health_status.json").write_text(json.dumps({"ok": True, "alert": False, "reasons": []}))
+    (tmp_path / "portfolio_sync.json").write_text(json.dumps({
+        "ok": True,
+        "balance_source": "kalshi-demo",
+        "balance_usd_exact": 1000.0,
+        "open_positions": 2,
+        "unit": {"unit_size_dollars": 15.0},
+        "exposure_reconciliation": {
+            "authoritative_portfolio_exposure_units": 1.5,
+            "diverged": False,
+            "warnings": [],
+        },
+    }))
+    _record_monitor_order(
+        store,
+        _intent(
+            ticker="KXCONSENSUS",
+            signal_source="consensus",
+            captured_at=now.isoformat(),
+            stake_units=1.0,
+            unit_size_dollars=15.0,
+        ),
+    )
+    _record_monitor_order(
+        store,
+        _intent(
+            ticker="KXQUAL",
+            signal_source="qual",
+            captured_at=now.isoformat(),
+            stake_units=0.5,
+            unit_size_dollars=15.0,
+        ),
+    )
+    store.record_settlement({
+        **_settlement_fixture(501, ticker="KXCONSENSUS", outcome=1, market_prob=0.40, clv_cents=4.0),
+        "client_order_id": "cid-KXCONSENSUS-consensus",
+        "signal_source": "consensus",
+        "audited_at": now.isoformat(),
+        "settled_at": now.isoformat(),
+    })
+    store.record_settlement({
+        **_settlement_fixture(502, ticker="KXQUAL", outcome=0, market_prob=0.50, clv_cents=-2.0),
+        "client_order_id": "cid-KXQUAL-qual",
+        "signal_source": "qual",
+        "audited_at": now.isoformat(),
+        "settled_at": now.isoformat(),
+    })
+
+    snap = monitor_core.build_monitor_snapshot(
+        ctx,
+        store,
+        generated_at=now.isoformat(),
+        host="host-a",
+        git_commit="abc123",
+        pending_prs=[12],
+    )
+    again = monitor_core.build_monitor_snapshot(
+        ctx,
+        store,
+        generated_at=now.isoformat(),
+        host="host-a",
+        git_commit="abc123",
+        pending_prs=[12],
+    )
+
+    assert snap.to_dict() == again.to_dict()
+    assert snap.bot_alive is True
+    assert snap.trades_today["count"] == 2
+    assert snap.trades_today["total_stake_usd"] == pytest.approx(22.5)
+    assert snap.per_engine["consensus"]["placed"] == 1
+    assert snap.per_engine["consensus"]["settled"] == 1
+    assert snap.per_engine["consensus"]["wins"] == 1
+    assert snap.per_engine["qual"]["losses"] == 1
+    assert snap.pnl["today_usd"] == pytest.approx(0.10)
+    assert "monitor" in monitor_core.format_monitor_md(snap)
+
+
+def test_monitor_snapshot_missing_sources_is_partial_with_errors(tmp_path):
+    ctx = _monitor_ctx(tmp_path)
+    store = research.ResearchStore(ctx.settings.research_db_path)
+
+    snap = monitor_core.build_monitor_snapshot(
+        ctx,
+        store,
+        generated_at="2026-07-31T16:00:00+00:00",
+        host="host-a",
+    )
+
+    assert snap.bot_alive is False
+    assert snap.errors
+    assert any("demo_orders" in err or "settlement_records" in err for err in snap.errors)
+
+
+def test_monitor_delivery_order_fallback_and_health(tmp_path, monkeypatch):
+    ctx = _monitor_ctx(tmp_path)
+    md_path = tmp_path / "monitor.md"
+    md_path.write_text("monitor")
+    calls = []
+
+    monkeypatch.setattr(monitor_agent, "_deliver_telegram", lambda ctx, text: calls.append("telegram") or (False, "403"))
+    monkeypatch.setattr(monitor_agent, "_deliver_osascript", lambda text: calls.append("osascript") or (True, "ok"))
+    monkeypatch.setattr(monitor_agent, "_deliver_gist", lambda ctx, path: calls.append("gist") or (True, "url"))
+
+    attempts = monitor_agent._attempt_delivery(ctx, text="body", monitor_path=md_path, escalated=False)
+    health = monitor_agent._record_delivery_health(ctx, attempts)
+
+    # Push channels (telegram, osascript) fall through until one succeeds; gist
+    # ALWAYS runs after because it is the persistent state URL, not a fallback
+    # for the push notification.
+    assert calls == ["telegram", "osascript", "gist"]
+    assert health["consecutive_failures"] == 0
+    assert health["failing"] is False
+
+    calls.clear()
+    attempts = monitor_agent._attempt_delivery(ctx, text="body", monitor_path=md_path, escalated=True)
+    # Escalated: push channels all fire (redundancy), gist still runs.
+    assert calls == ["telegram", "osascript", "gist"]
+
+
+def test_monitor_delivery_all_failures_increment_counter(tmp_path, monkeypatch):
+    ctx = _monitor_ctx(tmp_path)
+    md_path = tmp_path / "monitor.md"
+    md_path.write_text("monitor")
+    monkeypatch.setattr(monitor_agent, "_deliver_telegram", lambda ctx, text: (False, "403"))
+    monkeypatch.setattr(monitor_agent, "_deliver_osascript", lambda text: (False, "no gui"))
+    monkeypatch.setattr(monitor_agent, "_deliver_gist", lambda ctx, path: (False, "no auth"))
+
+    attempts = monitor_agent._attempt_delivery(ctx, text="body", monitor_path=md_path, escalated=False)
+    first = monitor_agent._record_delivery_health(ctx, attempts)
+    second = monitor_agent._record_delivery_health(ctx, attempts)
+
+    assert [row["channel"] for row in attempts] == ["telegram", "osascript", "gist"]
+    assert first["consecutive_failures"] == 1
+    assert second["consecutive_failures"] == 2
+    assert second["failing"] is True
+
+
+def test_monitor_alert_state_machine_fires_once_and_clears(tmp_path):
+    ctx = _monitor_ctx(tmp_path)
+
+    fired, state = monitor_agent._transition_events(ctx, ["bot silent > 6h"])
+    repeated, repeated_state = monitor_agent._transition_events(ctx, ["bot silent > 6h"])
+    cleared, clear_state = monitor_agent._transition_events(ctx, [])
+
+    assert fired == ["ALERT: bot silent > 6h"]
+    assert repeated == []
+    assert repeated_state["active_conditions"] == ["bot silent > 6h"]
+    assert cleared == ["ALL CLEAR: bot silent > 6h"]
+    assert clear_state["active_conditions"] == []
+
+
+def test_monitor_phase_registered_and_cli_callable(monkeypatch, tmp_path):
+    assert PHASES["monitor"] == monitor_agent.run
+    called = {}
+
+    def fake_load_context(game_id=None):
+        called["game_id"] = game_id
+        return _monitor_ctx(tmp_path)
+
+    monkeypatch.setattr(cli, "load_context", fake_load_context)
+    monkeypatch.setitem(cli.PHASES, "monitor", lambda ctx: {"ok": True})
+
+    assert cli.main(["monitor", "--game-id", "TEST-GAME"]) == 0
+    assert called["game_id"] == "TEST-GAME"
