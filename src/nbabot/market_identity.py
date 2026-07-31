@@ -877,13 +877,25 @@ def same_event_key(a: str | None, b: str | None) -> bool:
 
 
 def _exact_identity(a: MarketIdentity, b: MarketIdentity) -> bool:
+    same_line = _same_line(a.line, b.line)
+    same_side = a.side is None or b.side is None or a.side == b.side
+    if (
+        a.market_type == b.market_type == "spread"
+        and a.side
+        and b.side
+        and a.side != b.side
+        and a.line is not None
+        and b.line is not None
+    ):
+        same_line = abs(a.line + b.line) <= 0.01
+        same_side = True
     return (
         a.sport == b.sport
         and a.event_key is not None
         and _same_event_key(a.event_key, b.event_key)
         and a.market_type == b.market_type
-        and _same_line(a.line, b.line)
-        and (a.side is None or b.side is None or a.side == b.side)
+        and same_line
+        and same_side
     )
 
 

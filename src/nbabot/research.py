@@ -47,6 +47,13 @@ def to_json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, default=str)
 
 
+def _safe_float(raw: Any) -> float:
+    try:
+        return float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class ResearchStore:
     def __init__(self, path: Path):
         self.path = path
@@ -2499,10 +2506,19 @@ class ResearchStore:
                 row["client_order_id"]: dict(row)
                 for row in db.execute("SELECT * FROM order_lifecycle")
             }
-            fill_ids = {
-                row["client_order_id"]
-                for row in db.execute("SELECT DISTINCT client_order_id FROM fills")
-            }
+            fill_contracts: dict[str, float] = {}
+            for row in db.execute("SELECT client_order_id, fill_json FROM fills"):
+                fill = self._json_obj(row["fill_json"])
+                contracts = _safe_float(
+                    fill.get("contracts")
+                    or fill.get("count")
+                    or fill.get("fill_count")
+                    or fill.get("filled_count")
+                )
+                if contracts > 0:
+                    fill_contracts[row["client_order_id"]] = (
+                        fill_contracts.get(row["client_order_id"], 0.0) + contracts
+                    )
             for table in sorted(ORDER_TABLES):
                 for row in db.execute(f"SELECT client_order_id, intent_json, signal_source FROM {table}"):
                     try:
@@ -2517,14 +2533,24 @@ class ResearchStore:
                         "liquidity_role": role,
                         "placed": 0,
                         "filled": 0,
+                        "filled_contracts": 0.0,
                         "canceled_unfilled": 0,
                         "terminal_unfilled": 0,
+                        "fill_source": "order_reconcile",
                     })
                     bucket["placed"] += 1
                     cid = row["client_order_id"]
                     lc = lifecycle.get(cid) or {}
-                    if cid in fill_ids or float(lc.get("filled_count") or 0) > 0:
+                    reconciled_count = max(
+                        fill_contracts.get(cid, 0.0),
+                        _safe_float(lc.get("filled_count")),
+                    )
+                    if reconciled_count > 0:
                         bucket["filled"] += 1
+                        bucket["filled_contracts"] = round(
+                            float(bucket["filled_contracts"]) + reconciled_count,
+                            6,
+                        )
                     elif int(lc.get("terminal") or 0):
                         bucket["terminal_unfilled"] += 1
                         if "cancel" in str(lc.get("status") or "").lower():

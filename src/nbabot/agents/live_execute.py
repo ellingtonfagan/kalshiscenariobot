@@ -1,16 +1,13 @@
 """Phase: live-execute. Submit one gated real-money Kalshi order."""
 from __future__ import annotations
 
-from dataclasses import asdict
-
 from .. import guardrails
 from ..alerts import deliver
 from ..audit import AuditTrail
-from ..execution import build_order_request, execute_live
+from ..execution import OrderReceipt, build_order_request, execute_live
 from ..research import ResearchStore
-from ..risk import RiskContext, evaluate_trade_intent
 from .base import Context, load_context
-from .paper import _candidate_intents, refresh_research_for_execution
+from .paper import _candidate_intents, execute_intent_batch, refresh_research_for_execution
 
 
 LIVE_ACK = "LIVE_TRADES_REAL_MONEY"
@@ -55,42 +52,67 @@ def run(ctx: Context | None = None) -> dict:
         deliver("[live-execute] no candidates; run snapshot-market first", ctx.settings.deliver_to)
         return {"orders": [], "reason": "no-candidates"}
 
-    from .paper import execution_limits
-
-    limits = execution_limits(ctx, store, "live_orders")
-    game_exposure = float(limits["game_exposure_units"])
-    portfolio_exposure = float(limits["portfolio_exposure_units"])
-    broad_slate_count = int(limits["broad_slate_trade_count"])
-    broad_slate_limit = int(limits["broad_slate_daily_trade_limit"])
+    live_intents = []
     for intent in intents:
         blocked = _blocked_reason(ctx, intent)
-        if blocked:
+        if blocked and "NBABOT_BROAD_SLATE_EXECUTION" in blocked:
             msg = f"[live-execute] blocked: {blocked}"
             deliver(msg, ctx.settings.deliver_to)
             return {"reason": "mode-blocked", "detail": blocked}
         if store.order_exists("live_orders", build_order_request(intent, "live").client_order_id):
             continue
-        decision = evaluate_trade_intent(
-            intent,
-            ctx.settings,
-            RiskContext(
-                game_exposure_units=game_exposure,
-                portfolio_exposure_units=portfolio_exposure,
-                broad_slate_trade_count=broad_slate_count,
-                broad_slate_daily_trade_limit=broad_slate_limit,
-            ),
-        )
-        receipt = execute_live(intent, decision, ctx.settings, store, audit, ctx.kalshi)
-        result = {"intent": asdict(intent), "decision": asdict(decision), "receipt": asdict(receipt)}
-        ctx.write_json("live_execute.json", result)
-        hope = " HOPE BET" if intent.hope_bet else ""
-        out = (
-            f"[live-execute] {receipt.status}: {intent.scenario_id} {intent.ticker} "
-            f"{intent.contracts} {intent.side.upper()} @ {intent.price_cents}c "
-            f"stake={intent.stake_units:.3f}u net_edge={intent.edge:+.3f} "
-            f"SGP-adjusted scenario p={intent.sgp_adjusted_prob:.3f}{hope}"
-        )
-        deliver(guardrails.with_footer(out), ctx.settings.deliver_to)
-        return result
+        live_intents.append(intent)
+    if not live_intents:
+        return {"orders": [], "reason": "no-approved"}
 
-    return {"orders": [], "reason": "no-approved"}
+    result = execute_intent_batch(
+        ctx=ctx,
+        store=store,
+        audit=audit,
+        intents=live_intents,
+        table="live_orders",
+        mode="live",
+        executor=lambda intent, decision: _execute_live_or_reject(ctx, store, audit, intent, decision),
+        artifact="live_execute.json",
+    )
+    first = result["orders"][0]
+    intent = first["intent"]
+    receipt = first["receipt"]
+    hope = " HOPE BET" if intent["hope_bet"] else ""
+    out = (
+        f"[live-execute] {result['attempted_count']} attempted, "
+        f"{result['approved_count']} approved; first {receipt['status']}: "
+        f"{intent['scenario_id']} {intent['ticker']} "
+        f"{intent['contracts']} {intent['side'].upper()} @ {intent['price_cents']}c "
+        f"stake={intent['stake_units']:.3f}u net_edge={intent['edge']:+.3f} "
+        f"SGP-adjusted scenario p={intent['sgp_adjusted_prob']:.3f}{hope}"
+    )
+    deliver(guardrails.with_footer(out), ctx.settings.deliver_to)
+    return result
+
+
+def _execute_live_or_reject(ctx: Context, store: ResearchStore, audit: AuditTrail,
+                            intent: object, decision: object) -> OrderReceipt:
+    blocked = _blocked_reason(ctx, intent)
+    if blocked:
+        request = build_order_request(intent, "live")
+        receipt = OrderReceipt(
+            request.client_order_id,
+            "live",
+            "rejected",
+            {"reasons": [blocked]},
+        )
+        audit.log(
+            "LIVE_REJECTED",
+            {
+                "signal_source": getattr(intent, "signal_source", "consensus"),
+                "confluence_verdict": getattr(intent, "confluence_verdict", "none"),
+                "client_order_id": receipt.client_order_id,
+                "mode": receipt.mode,
+                "status": receipt.status,
+                "response": receipt.response,
+            },
+            ctx.settings.game_id,
+        )
+        return receipt
+    return execute_live(intent, decision, ctx.settings, store, audit, ctx.kalshi)

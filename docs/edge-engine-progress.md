@@ -1480,6 +1480,34 @@ were changed, and no scheduler or cron work was added.
 
 ---
 
+## Round 23b - 2026-07-31 - Executor batch, schema, fills, slate categories, identity, demo taker toggle
+
+### What changed in code
+
+- Replaced single-intent returns in paper/demo/live execution with a shared batch loop that evaluates each intent, refreshes exposure before each order, records per-intent outcomes, and stops only when a named cap check fails.
+- Standardized `market_candidates.json` on canonical `market_candidates` while mirroring deprecated `rows` for one release.
+- Made fill-rate reporting use reconciled fills/order lifecycle and expose filled-contract totals without double-counting.
+- Added slate-verifier blocker categories so status can distinguish genuinely unpriceable rows from identity/mapping coverage blockers while keeping approval strict.
+- Added exact identity coverage for complementary spread sides on the same event/line. Fuzzy matches still cannot pass edge.
+- Added demo-only `NBABOT_DEMO_TAKER_MODE` with `off`, `always`, and `high_conviction`. Live ranking remains maker-default.
+
+### Tests
+
+- Targeted suite: `.venv/bin/python -m pytest tests/test_smoke.py -q -k "batch_executor or market_candidates_artifact or fill_rate or slate_verify_classifies or complementary_spread or demo_taker_modes or agent_taker_mode or candidate_ranker_evaluates_no_side"` -> `8 passed, 177 deselected`.
+- Full suite: `.venv/bin/python -m pytest -q` -> `180 passed, 5 failed`. The 5 failures are the existing missing fixture files under `docs/fixtures/*.json`.
+- Compile pass: `python3 -m py_compile` over changed modules passed.
+
+### Real behavior check
+
+- Current saved slate verification artifact before change: `229` candidates, `0` verified, `0` execution-ready. Reasons were `229` missing structured sportsbook source, `229` missing mapped scenario market, `29` missing Kalshi market mapping, and `29` fallback/hidden only.
+- Recomputed current slate verification after change: still `229` candidates, `0` verified, `0` execution-ready, now also classified as `229` unpriceable without structured sportsbook, `229` unmapped scenario market, `29` no Kalshi identity coverage, and `29` fallback-only.
+- Current saved ranker artifact before change: `200` candidates, `0` exact, `193` fuzzy, `7` none, `2` edge passes, `2` trade-eligible.
+- Recomputed current ranker artifact after change: `200` candidates, `0` exact, `192` fuzzy, `8` none, `0` edge passes, `0` trade-eligible. The current saved slate has no structured sportsbook line rows, so the complementary-spread identity fix had no real current row to rescue.
+- Current saved execution artifacts produce `2` trade-eligible intents. The old single-intent executor would attempt `1`; the new batch loop would attempt `2` before caps.
+- No execution phase was run, no live env vars were set, no keys/tokens were printed, and no live or demo orders were placed.
+
+---
+
 ## Round 26 - 2026-07-28 - Side-aware edges, retrieval evidence floor, and news latency instrumentation
 
 ### What changed in code

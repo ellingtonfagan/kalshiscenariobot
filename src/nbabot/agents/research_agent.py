@@ -54,13 +54,16 @@ def run(ctx: Context | None = None) -> dict:
         "candidate_ranker.json",
     ))
     ctx.write_json("research_bundle.json", payload)
+    eligible = [
+        row for row in payload.get("market_candidates", [])
+        if row.get("trade_eligible")
+    ]
     ctx.write_json("market_candidates.json", {
         "game_id": payload["game_id"],
         "source": "research-agent",
-        "rows": [
-            row for row in payload.get("market_candidates", [])
-            if row.get("trade_eligible")
-        ],
+        "deprecated_keys": ["rows"],
+        "market_candidates": eligible,
+        "rows": eligible,
     })
     deliver(guardrails.with_footer(_format(payload)), ctx.settings.deliver_to)
     return payload

@@ -1,7 +1,6 @@
 """Phase: demo-execute. Submit one gated order to Kalshi demo only."""
 from __future__ import annotations
 
-from dataclasses import asdict
 from pathlib import Path
 
 from .. import guardrails
@@ -10,11 +9,10 @@ from ..audit import AuditTrail
 from ..execution import execute_demo
 from ..kalshi import DEMO_CREDENTIALS_BLOCKED_REASON
 from ..research import ResearchStore
-from ..risk import RiskContext, evaluate_trade_intent
 from .base import Context, load_context
 from .paper import (
     _candidate_intents,
-    execution_limits,
+    execute_intent_batch,
     record_shadow_intents,
     refresh_research_for_execution,
 )
@@ -53,40 +51,28 @@ def run(ctx: Context | None = None) -> dict:
             "shadow_intents_inserted": shadow_inserted,
         }
 
-    limits = execution_limits(ctx, store, "demo_orders")
-    for intent in intents:
-        decision = evaluate_trade_intent(
-            intent,
-            ctx.settings,
-            RiskContext(
-                game_exposure_units=float(limits["game_exposure_units"]),
-                portfolio_exposure_units=float(limits["portfolio_exposure_units"]),
-                broad_slate_trade_count=int(limits["broad_slate_trade_count"]),
-                broad_slate_daily_trade_limit=int(limits["broad_slate_daily_trade_limit"]),
-                paper_demo_broad_slate_trade_count=int(
-                    limits["paper_demo_broad_slate_trade_count"]
-                ),
-                paper_demo_daily_trade_cap=int(limits["paper_demo_daily_trade_cap"]),
-                qual_daily_trade_count=int(limits["qual_daily_trade_count"]),
-                qual_daily_trade_cap=int(limits["qual_daily_trade_cap"]),
-            ),
-        )
-        receipt = execute_demo(intent, decision, ctx.settings, store, audit, ctx.kalshi)
-        result = {
-            "intent": asdict(intent),
-            "decision": asdict(decision),
-            "receipt": asdict(receipt),
-            "shadow_intents_inserted": shadow_inserted,
-        }
-        ctx.write_json("demo_execute.json", result)
-        hope = " HOPE BET" if intent.hope_bet else ""
-        out = (
-            f"[demo-execute] {receipt.status}: {intent.scenario_id} {intent.ticker} "
-            f"{intent.contracts} {intent.side.upper()} @ {intent.price_cents}c "
-            f"stake={intent.stake_units:.3f}u net_edge={intent.edge:+.3f} "
-            f"SGP-adjusted scenario p={intent.sgp_adjusted_prob:.3f}{hope}"
-        )
-        deliver(guardrails.with_footer(out), ctx.settings.deliver_to)
-        return result
-
-    return {"orders": [], "reason": "no-approved"}
+    result = execute_intent_batch(
+        ctx=ctx,
+        store=store,
+        audit=audit,
+        intents=intents,
+        table="demo_orders",
+        mode="demo",
+        executor=lambda intent, decision: execute_demo(intent, decision, ctx.settings, store, audit, ctx.kalshi),
+        artifact="demo_execute.json",
+        shadow_intents_inserted=shadow_inserted,
+    )
+    first = result["orders"][0]
+    intent = first["intent"]
+    receipt = first["receipt"]
+    hope = " HOPE BET" if intent["hope_bet"] else ""
+    out = (
+        f"[demo-execute] {result['attempted_count']} attempted, "
+        f"{result['approved_count']} approved; first {receipt['status']}: "
+        f"{intent['scenario_id']} {intent['ticker']} "
+        f"{intent['contracts']} {intent['side'].upper()} @ {intent['price_cents']}c "
+        f"stake={intent['stake_units']:.3f}u net_edge={intent['edge']:+.3f} "
+        f"SGP-adjusted scenario p={intent['sgp_adjusted_prob']:.3f}{hope}"
+    )
+    deliver(guardrails.with_footer(out), ctx.settings.deliver_to)
+    return result

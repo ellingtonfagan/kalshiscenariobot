@@ -13,6 +13,7 @@ from ..exposure import reconcile_open_exposure, write_reconciliation
 from ..research import ResearchStore
 from ..risk import (
     RiskContext,
+    RiskDecision,
     broad_slate_daily_trade_limit,
     evaluate_trade_intent,
 )
@@ -163,6 +164,87 @@ def execution_limits(ctx: Context, store: ResearchStore, table: str) -> dict[str
             10,
         )),
     }
+
+
+CAP_CHECK_NAMES = {
+    "game_exposure",
+    "daily_portfolio_exposure",
+    "broad_slate_daily_trade_limit",
+    "paper_demo_broad_slate_daily_trade_cap",
+    "qual_daily_trade_cap",
+}
+
+
+def _risk_context_from_limits(limits: dict[str, float | int]) -> RiskContext:
+    return RiskContext(
+        game_exposure_units=float(limits["game_exposure_units"]),
+        portfolio_exposure_units=float(limits["portfolio_exposure_units"]),
+        broad_slate_trade_count=int(limits["broad_slate_trade_count"]),
+        broad_slate_daily_trade_limit=int(limits["broad_slate_daily_trade_limit"]),
+        paper_demo_broad_slate_trade_count=int(limits["paper_demo_broad_slate_trade_count"]),
+        paper_demo_daily_trade_cap=int(limits["paper_demo_daily_trade_cap"]),
+        qual_daily_trade_count=int(limits["qual_daily_trade_count"]),
+        qual_daily_trade_cap=int(limits["qual_daily_trade_cap"]),
+    )
+
+
+def _cap_reasons(decision: RiskDecision) -> list[str]:
+    return [
+        check.reason
+        for check in decision.checks
+        if check.name in CAP_CHECK_NAMES and not check.passed
+    ]
+
+
+def execute_intent_batch(
+    *,
+    ctx: Context,
+    store: ResearchStore,
+    audit: AuditTrail,
+    intents: list[TradeIntent],
+    table: str,
+    mode: str,
+    executor: Any,
+    artifact: str,
+    shadow_intents_inserted: int = 0,
+) -> dict[str, Any]:
+    receipts: list[dict[str, Any]] = []
+    stop_reason: str | None = None
+    for intent in intents:
+        limits = execution_limits(ctx, store, table)
+        decision = evaluate_trade_intent(intent, ctx.settings, _risk_context_from_limits(limits))
+        receipt = executor(intent, decision)
+        item = {
+            "intent": asdict(intent),
+            "decision": asdict(decision),
+            "receipt": asdict(receipt),
+        }
+        receipts.append(item)
+        cap_reasons = _cap_reasons(decision)
+        if cap_reasons:
+            stop_reason = cap_reasons[0]
+            audit.log(
+                f"{mode.upper()}_BATCH_STOPPED",
+                {
+                    "client_order_id": receipt.client_order_id,
+                    "reason": stop_reason,
+                    "cap_reasons": cap_reasons,
+                },
+                ctx.settings.game_id,
+            )
+            break
+
+    result: dict[str, Any] = {
+        "orders": receipts,
+        "attempted_count": len(receipts),
+        "approved_count": sum(1 for row in receipts if row["decision"]["approved"]),
+        "rejected_count": sum(1 for row in receipts if not row["decision"]["approved"]),
+        "shadow_intents_inserted": shadow_intents_inserted,
+    }
+    if stop_reason:
+        result["stopped_reason"] = stop_reason
+    ctx.write_json(artifact, result)
+    return result
 
 
 def _intent_from_row(
@@ -514,61 +596,28 @@ def run(ctx: Context | None = None) -> dict:
         deliver(msg, ctx.settings.deliver_to)
         return {"orders": [], "reason": "no-candidates", "shadow_intents_inserted": shadow_inserted}
 
-    limits = execution_limits(ctx, store, "paper_orders")
-    game_exposure = float(limits["game_exposure_units"])
-    portfolio_exposure = float(limits["portfolio_exposure_units"])
-    broad_slate_count = int(limits["broad_slate_trade_count"])
-    broad_slate_limit = int(limits["broad_slate_daily_trade_limit"])
-    paper_demo_broad_slate_count = int(limits["paper_demo_broad_slate_trade_count"])
-    paper_demo_daily_cap = int(limits["paper_demo_daily_trade_cap"])
-    qual_daily_trade_count = int(limits["qual_daily_trade_count"])
-    qual_daily_trade_cap = int(limits["qual_daily_trade_cap"])
-    receipts = []
-    for intent in intents:
-        decision = evaluate_trade_intent(
-            intent,
-            ctx.settings,
-            RiskContext(
-                game_exposure_units=game_exposure,
-                portfolio_exposure_units=portfolio_exposure,
-                broad_slate_trade_count=broad_slate_count,
-                broad_slate_daily_trade_limit=broad_slate_limit,
-                paper_demo_broad_slate_trade_count=paper_demo_broad_slate_count,
-                paper_demo_daily_trade_cap=paper_demo_daily_cap,
-                qual_daily_trade_count=qual_daily_trade_count,
-                qual_daily_trade_cap=qual_daily_trade_cap,
-            ),
-        )
-        receipt = execute_paper(intent, decision, ctx.settings, store, audit)
-        receipts.append({"intent": asdict(intent), "decision": asdict(decision), "receipt": asdict(receipt)})
-        if decision.approved:
-            game_exposure += intent.stake_units
-            portfolio_exposure += intent.stake_units
-            if intent.broad_slate:
-                broad_slate_count += 1
-                paper_demo_broad_slate_count += 1
-            if intent.signal_source in {"qual", "qual_activated_quant"}:
-                qual_daily_trade_count += 1
-        if (
-            game_exposure >= ctx.settings.max_game_exposure_units
-            or portfolio_exposure >= float(getattr(
-                ctx.settings,
-                "max_daily_exposure_units",
-                guardrails.MAX_STAKE_UNITS,
-            ))
-        ):
-            break
+    result = execute_intent_batch(
+        ctx=ctx,
+        store=store,
+        audit=audit,
+        intents=intents,
+        table="paper_orders",
+        mode="paper",
+        executor=lambda intent, decision: execute_paper(intent, decision, ctx.settings, store, audit),
+        artifact="paper.json",
+        shadow_intents_inserted=shadow_inserted,
+    )
 
+    limits = execution_limits(ctx, store, "paper_orders")
     store.record_risk_snapshot(ctx.settings.game_id, {
-        "game_exposure_units": game_exposure,
-        "portfolio_exposure_units": portfolio_exposure,
+        "game_exposure_units": float(limits["game_exposure_units"]),
+        "portfolio_exposure_units": float(limits["portfolio_exposure_units"]),
         "daily_pnl_units": 0.0,
-        "open_positions": len([r for r in receipts if r["decision"]["approved"]]),
+        "open_positions": len(store.open_exposure_rows("paper_orders", game_id=ctx.settings.game_id)),
         "circuit_breaker_on": False,
         "unit": unit_payload(ctx),
     })
-    ctx.write_json("paper.json", {"orders": receipts})
-    first = receipts[0]
+    first = result["orders"][0]
     intent = first["intent"]
     status = first["receipt"]["status"]
     hope = " HOPE BET" if intent["hope_bet"] else ""
@@ -579,4 +628,4 @@ def run(ctx: Context | None = None) -> dict:
         f"SGP-adjusted scenario p={intent['sgp_adjusted_prob']:.3f}{hope}"
     )
     deliver(guardrails.with_footer(out), ctx.settings.deliver_to)
-    return {"orders": receipts, "shadow_intents_inserted": shadow_inserted}
+    return result
