@@ -34,3 +34,4 @@ data/monitor_snapshot.json
 data/monitor_gist_id.txt
 data/monitor_delivery_health.json
 data/monitor_alert_state.json
+data/monitor_heartbeat.txt
