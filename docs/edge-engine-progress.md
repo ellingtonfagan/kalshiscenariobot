@@ -1839,3 +1839,27 @@ were changed, and no scheduler or cron work was added.
   Claude was not invoked and no key material was printed.
 - No live execution env vars were set to live values and no live orders were
   placed.
+## Round 25 - 2026-07-31 - Phase 25 oversight severity, notification policy, and meta-check
+
+### What changed in code
+
+- Extended `MonitorSnapshot` with `severity`, named severity reasons, 7-day trend metrics, and advisory `recommendations`.
+- Added pure severity rules for red/yellow/green triage, including health alerts, cycle silence, consecutive hard errors, balance drawdown, delivery failures, live-gate defense, blocked eligible edges, qual unsupported rate, win-rate drift, config drift warnings, and stalled running phases.
+- Changed monitor delivery policy so the gist remains the state-of-record on every run, while Telegram/osascript pushes are suppressed for routine green snapshots, transition-gated for yellow, repeated every run for red, and cleared with a resolved message.
+- Added `data/monitor_heartbeat.txt` on every monitor run and a separate `ksobot meta-check` phase with `scheduler/meta-check.plist`; it checks heartbeat freshness, gist reachability/content, and whether `com.nbabot.monitor` is present in `launchctl list`.
+- Recommendations are text-only and do not trigger any phase, order, or side effect.
+
+### Tests and verification
+
+- Focused monitor/meta-check tests: `.venv/bin/pytest -q tests/test_smoke.py -k 'monitor or meta_check'` -> `14 passed, 178 deselected`.
+- Compile pass: `.venv/bin/python -m compileall src/nbabot tests/test_smoke.py`.
+- Full suite: `.venv/bin/pytest -q` -> `187 passed, 5 failed`; all 5 failures were missing pre-existing fixture files under `docs/fixtures/` (`sportsgameodds_events_mlb_sample.json`, `parlay_api_baseball_mlb_odds_decimal_sample.json`, `kalshi_mlb_spread_market_sample.json`, `the_odds_api_baseball_mlb_odds_sample.json`).
+
+### Real behavior check
+
+- Real `ksobot monitor` exited `0`, wrote the heartbeat, updated local snapshot/markdown, sent Telegram, and pushed the public gist.
+- Real current severity: `yellow`.
+- Real severity reasons: `last cycle placed 0 orders and had trade-eligible edges`; `currently-running phase is 94.8h old`.
+- Real `ksobot meta-check` exited `0` but correctly returned `ok=false` because `com.nbabot.monitor` was missing from `launchctl list`; heartbeat was fresh and gist HTTP status was `200`. It sent the escalated Telegram alert.
+- Public gist raw content was fetched and confirmed to show `severity: yellow` and a `recommendations` section (`none` on this run).
+- No live execution env vars were set, no live gates were changed, and no live orders were placed.

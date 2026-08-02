@@ -47,6 +47,7 @@ from nbabot import (  # noqa: E402
     odds_refresh,
     performance_learner,
     qual_learning,
+    oversight as oversight_core,
     qual_postmortem as qual_postmortem_core,
     qual_rag,
     qual_research as qual_research_core,
@@ -77,10 +78,12 @@ from nbabot.agents import (  # noqa: E402
     health_check,
     historical_backtest,
     market_matcher,
+    meta_check,
     monitor as monitor_agent,
     live_execute,
     news_ingest,
     news_watch,
+    oversight as oversight_agent,
     paper,
     portfolio_sync,
     qual_postmortem,
@@ -565,6 +568,7 @@ class _ExecSettings:
     qual_lessons_top_n = 5
     qual_llm_cmd = "/missing/codex exec"
     qual_llm_timeout_seconds = 600
+    qual_fallback_model = "claude-test"
     news_window_hours = 48
     news_user_agent = "nbabot-test/0.1"
     event_trigger_cooldown_minutes = 45
@@ -1349,6 +1353,97 @@ def test_qual_model_empty_key_keeps_primary_unavailable_behavior():
     assert result["status"] == "unavailable"
     assert result["engine"] == "codex"
     assert called["claude"] is False
+
+
+def test_oversight_phase_registered():
+    assert "oversight" in PHASES
+
+
+def test_oversight_skips_without_artifacts(tmp_path):
+    settings = _ExecSettings(tmp_path)
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+        def read_json(self, suffix):
+            return None
+
+    result = oversight_core.run_oversight_analysis(
+        DummyContext(),
+        command="/fake/codex exec",
+        timeout_seconds=1,
+        fallback_model="claude-test",
+    )
+    assert result["status"] == "skipped"
+    assert result["reason"] == "no-artifacts"
+
+
+def test_oversight_uses_claude_when_codex_unavailable(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    (tmp_path / "monitor_snapshot.json").write_text(json.dumps({
+        "severity": "yellow",
+        "severity_reason_names": ["codex_phase_stalled_gt_6h"],
+    }))
+    settings.data_path("daily_cycle.json").write_text(json.dumps({
+        "status": "ok",
+        "steps": [{"name": "qual-research", "status": "ok", "result": {"engine": "codex"}}],
+    }))
+
+    analysis = {
+        "severity": "yellow",
+        "summary": "Qual engine stalled; no new trades recommended.",
+        "anomalies": [{"id": "codex_stall", "detail": "qual-research running >6h"}],
+        "recommendations": [{"action": "inspect qual-research logs", "priority": "high"}],
+    }
+    calls = {"codex": 0, "claude": 0}
+
+    def invoker(command, prompt, timeout_seconds):
+        calls["codex"] += 1
+        return False, "", "usage-limit"
+
+    def claude_invoker(prompt, schema, model):
+        calls["claude"] += 1
+        assert schema == oversight_core.OVERSIGHT_SCHEMA
+        return True, json.dumps(analysis), ""
+
+    messages = []
+    monkeypatch.setattr(oversight_agent, "deliver", lambda text, to="stdout": messages.append(text))
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+        def read_json(self, suffix):
+            path = settings.data_path(suffix)
+            return json.loads(path.read_text()) if path.exists() else None
+
+        def write_json(self, suffix, payload):
+            path = settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    monkeypatch.setattr(
+        oversight_agent,
+        "run_oversight_analysis",
+        lambda ctx, **kwargs: oversight_core.run_oversight_analysis(
+            ctx,
+            command="/fake/codex exec",
+            timeout_seconds=1,
+            fallback_model="claude-test",
+            invoker=invoker,
+            claude_invoker=claude_invoker,
+            anthropic_api_key="test-key",
+        ),
+    )
+    result = oversight_agent.run(DummyContext())
+
+    assert calls == {"codex": 1, "claude": 1}
+    assert result["status"] == "ok"
+    assert result["engine"] == "claude"
+    assert result["analysis"]["severity"] == "yellow"
+    assert (tmp_path / "TEST-GAME.oversight_report.json").exists()
+    assert guardrails.GUARDRAIL_FOOTER in messages[0]
 
 
 def test_near_miss_investigation_justified_output_validates():
@@ -7288,7 +7383,7 @@ def _monitor_ctx(tmp_path, *, execution_mode="paper", dry_run=True):
     return DummyContext(settings)
 
 
-def _record_monitor_order(store, intent):
+def _record_monitor_order(store, intent, created_at: str | None = None):
     request = execution.OrderRequest(
         client_order_id=f"cid-{intent.ticker}-{intent.signal_source}",
         ticker=intent.ticker,
@@ -7301,6 +7396,20 @@ def _record_monitor_order(store, intent):
     decision = risk.RiskDecision(True, [])
     receipt = execution.OrderReceipt(request.client_order_id, "demo", "submitted", {"order_id": "demo-1"})
     assert store.record_order("demo_orders", intent.game_id, intent, decision, request, receipt)
+    # store.record_order stamps `created_at` with real wall-clock time; fixture
+    # tests pin `now` to a fixed date, so we mutate the row's timestamp to match
+    # the test's fake "now" or the test's `today` window collapses to empty.
+    if created_at is not None:
+        import sqlite3
+        conn = sqlite3.connect(str(store.path))
+        try:
+            conn.execute(
+                "UPDATE demo_orders SET created_at = ? WHERE client_order_id = ?",
+                (created_at, request.client_order_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def test_monitor_snapshot_deterministic_and_per_engine_sql(tmp_path):
@@ -7340,6 +7449,7 @@ def test_monitor_snapshot_deterministic_and_per_engine_sql(tmp_path):
             stake_units=1.0,
             unit_size_dollars=15.0,
         ),
+        created_at=now.isoformat(),
     )
     _record_monitor_order(
         store,
@@ -7350,6 +7460,7 @@ def test_monitor_snapshot_deterministic_and_per_engine_sql(tmp_path):
             stake_units=0.5,
             unit_size_dollars=15.0,
         ),
+        created_at=now.isoformat(),
     )
     store.record_settlement({
         **_settlement_fixture(501, ticker="KXCONSENSUS", outcome=1, market_prob=0.40, clv_cents=4.0),
@@ -7392,7 +7503,136 @@ def test_monitor_snapshot_deterministic_and_per_engine_sql(tmp_path):
     assert snap.per_engine["consensus"]["wins"] == 1
     assert snap.per_engine["qual"]["losses"] == 1
     assert snap.pnl["today_usd"] == pytest.approx(0.10)
+    assert snap.severity == "green"
+    assert "pnl_7d_usd" in snap.trends
     assert "monitor" in monitor_core.format_monitor_md(snap)
+
+
+def test_monitor_severity_names_reasons_and_recommendations(tmp_path):
+    ctx = _monitor_ctx(tmp_path)
+    store = research.ResearchStore(ctx.settings.research_db_path)
+    store.init_schema()
+    now = datetime(2026, 7, 31, 16, tzinfo=timezone.utc)
+    (tmp_path / "scheduled_cycle_runs.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "event": "finished",
+                "finished_at": (now - timedelta(hours=10)).isoformat(),
+                "exit_code": 0,
+                "edges": 0,
+                "orders_placed": 0,
+                "hard_error": None,
+            }),
+            json.dumps({
+                "event": "finished",
+                "finished_at": (now - timedelta(hours=2)).isoformat(),
+                "exit_code": 1,
+                "edges": 1,
+                "orders_placed": 0,
+                "hard_error": "boom",
+            }),
+            json.dumps({
+                "event": "finished",
+                "finished_at": (now - timedelta(hours=1)).isoformat(),
+                "exit_code": 1,
+                "edges": 1,
+                "orders_placed": 0,
+                "hard_error": "boom again",
+            }),
+        ]) + "\n"
+    )
+    (tmp_path / "health_status.json").write_text(json.dumps({
+        "ok": False,
+        "alert": True,
+        "reasons": ["cycle hard-error threshold breached"],
+        "recent_cycles": [
+            {"exit_code": 1, "hard_error": "boom"},
+            {"exit_code": 1, "hard_error": "boom again"},
+        ],
+    }))
+    (tmp_path / "portfolio_sync.json").write_text(json.dumps({
+        "balance_usd_exact": 1000,
+        "exposure_reconciliation": {"diverged": True},
+    }))
+    (tmp_path / "monitor_delivery_health.json").write_text(json.dumps({
+        "last_zero_success_at": (now - timedelta(hours=13)).isoformat(),
+        "consecutive_failures": 13,
+        "failing": True,
+    }))
+
+    snap = monitor_core.build_monitor_snapshot(
+        ctx,
+        store,
+        generated_at=now.isoformat(),
+        balance_drop_pct=0.06,
+    )
+
+    assert snap.severity == "red"
+    assert "health_check_alert" in snap.severity_reason_names
+    assert "consecutive_hard_errors" in snap.severity_reason_names
+    assert "balance_drop_gt_5pct_24h" in snap.severity_reason_names
+    assert any("cycle hard-error" in reason for reason in snap.severity_reasons)
+    assert "Investigate phantom exposure -- likely blocking trades" in snap.recommendations
+
+
+def test_monitor_yellow_from_trends_and_blocked_edges(tmp_path):
+    ctx = _monitor_ctx(tmp_path)
+    store = research.ResearchStore(ctx.settings.research_db_path)
+    store.init_schema()
+    now = datetime(2026, 7, 31, 16, tzinfo=timezone.utc)
+    (tmp_path / "scheduled_cycle_runs.jsonl").write_text(
+        json.dumps({
+            "event": "finished",
+            "finished_at": (now - timedelta(hours=1)).isoformat(),
+            "exit_code": 0,
+            "edges": 2,
+            "orders_placed": 0,
+            "hard_error": None,
+        }) + "\n"
+    )
+    for i in range(5):
+        store.record_settlement({
+            **_settlement_fixture(600 + i, ticker=f"KXQOLD{i}", outcome=1),
+            "client_order_id": f"old-{i}",
+            "signal_source": "qual",
+            "audited_at": (now - timedelta(days=10, hours=i)).isoformat(),
+            "settled_at": (now - timedelta(days=10, hours=i)).isoformat(),
+            "pnl_cents": 100,
+        })
+    for i in range(5):
+        store.record_settlement({
+            **_settlement_fixture(700 + i, ticker=f"KXQNEW{i}", outcome=0),
+            "client_order_id": f"new-{i}",
+            "signal_source": "qual",
+            "audited_at": (now - timedelta(days=1, hours=i)).isoformat(),
+            "settled_at": (now - timedelta(days=1, hours=i)).isoformat(),
+            "pnl_cents": -100,
+        })
+
+    snap = monitor_core.build_monitor_snapshot(ctx, store, generated_at=now.isoformat())
+
+    assert snap.severity == "yellow"
+    assert "eligible_edges_no_orders" in snap.severity_reason_names
+    assert "qual_win_rate_drop_gt_20pp" in snap.severity_reason_names
+    assert snap.trends["win_rate_7d"]["qual"] == pytest.approx(0.0)
+    assert snap.trends["win_rate_7d_delta_pp_vs_prior_7d"]["qual"] == pytest.approx(-1.0)
+    assert "Qual engine performance degrading; check retrieval / groundedness" in snap.recommendations
+
+
+def test_monitor_trends_empty_windows_no_divide_by_zero(tmp_path):
+    ctx = _monitor_ctx(tmp_path)
+    store = research.ResearchStore(ctx.settings.research_db_path)
+    store.init_schema()
+    snap = monitor_core.build_monitor_snapshot(
+        ctx,
+        store,
+        generated_at="2026-07-31T16:00:00+00:00",
+    )
+
+    assert snap.trends["pnl_7d_usd"] == 0
+    assert snap.trends["pnl_7d_delta_vs_prior_7d_pct"] is None
+    assert snap.trends["win_rate_7d"]["consensus"] is None
+    assert snap.trends["clv_beat_rate_7d"]["qual"] is None
 
 
 def test_monitor_snapshot_missing_sources_is_partial_with_errors(tmp_path):
@@ -7469,6 +7709,77 @@ def test_monitor_alert_state_machine_fires_once_and_clears(tmp_path):
     assert clear_state["active_conditions"] == []
 
 
+def test_monitor_delivery_policy_signal_not_noise(tmp_path):
+    ctx = _monitor_ctx(tmp_path)
+    store = research.ResearchStore(ctx.settings.research_db_path)
+    store.init_schema()
+    now = datetime(2026, 7, 31, 16, tzinfo=timezone.utc)
+    base_raw = monitor_core.build_monitor_snapshot(ctx, store, generated_at=now.isoformat())
+    base = monitor_core.MonitorSnapshot(**{
+        **base_raw.to_dict(),
+        "severity": "green",
+        "severity_reasons": [],
+        "severity_reason_names": [],
+    })
+
+    green_recent = monitor_agent._delivery_policy(
+        base,
+        {"severity": "green", "reason_names": [], "last_push_at": (now - timedelta(hours=2)).isoformat()},
+        now,
+    )
+    green_old = monitor_agent._delivery_policy(
+        base,
+        {"severity": "green", "reason_names": [], "last_push_at": (now - timedelta(hours=25)).isoformat()},
+        now,
+    )
+    yellow = monitor_core.MonitorSnapshot(**{
+        **base.to_dict(),
+        "severity": "yellow",
+        "severity_reasons": ["last cycle placed 0 orders and had trade-eligible edges"],
+        "severity_reason_names": ["eligible_edges_no_orders"],
+    })
+    yellow_first = monitor_agent._delivery_policy(yellow, {"severity": "green", "reason_names": []}, now)
+    yellow_repeat = monitor_agent._delivery_policy(
+        yellow,
+        {"severity": "yellow", "reason_names": ["eligible_edges_no_orders"], "last_push_at": now.isoformat()},
+        now,
+    )
+    red = monitor_core.MonitorSnapshot(**{
+        **base.to_dict(),
+        "severity": "red",
+        "severity_reasons": ["no successful cycle in >8h"],
+        "severity_reason_names": ["no_successful_cycle_gt_8h"],
+    })
+    red_repeat = monitor_agent._delivery_policy(
+        red,
+        {"severity": "red", "reason_names": ["no_successful_cycle_gt_8h"], "last_push_at": now.isoformat()},
+        now,
+    )
+    clear = monitor_agent._delivery_policy(base, {"severity": "yellow", "reason_names": ["eligible_edges_no_orders"]}, now)
+
+    assert green_recent["push"] is False
+    assert green_old["push"] is True
+    assert yellow_first == {"push": True, "event": "yellow"}
+    assert yellow_repeat["push"] is False
+    assert red_repeat == {"push": True, "event": "red"}
+    assert clear == {"push": True, "event": "resolved"}
+
+
+def test_monitor_green_suppresses_push_but_keeps_gist(tmp_path, monkeypatch):
+    ctx = _monitor_ctx(tmp_path)
+    md_path = tmp_path / "monitor.md"
+    md_path.write_text("monitor")
+    calls = []
+    monkeypatch.setattr(monitor_agent, "_deliver_telegram", lambda ctx, text: calls.append("telegram") or (True, "ok"))
+    monkeypatch.setattr(monitor_agent, "_deliver_osascript", lambda text: calls.append("osascript") or (True, "ok"))
+    monkeypatch.setattr(monitor_agent, "_deliver_gist", lambda ctx, path: calls.append("gist") or (True, "url"))
+
+    attempts = monitor_agent._attempt_delivery(ctx, text="body", monitor_path=md_path, escalated=False, push=False)
+
+    assert calls == ["gist"]
+    assert [row["channel"] for row in attempts] == ["push", "gist"]
+
+
 def test_monitor_phase_registered_and_cli_callable(monkeypatch, tmp_path):
     assert PHASES["monitor"] == monitor_agent.run
     called = {}
@@ -7482,3 +7793,45 @@ def test_monitor_phase_registered_and_cli_callable(monkeypatch, tmp_path):
 
     assert cli.main(["monitor", "--game-id", "TEST-GAME"]) == 0
     assert called["game_id"] == "TEST-GAME"
+
+
+def test_meta_check_detects_failures_and_escalates(monkeypatch, tmp_path):
+    ctx = _monitor_ctx(tmp_path)
+    sent = []
+    (tmp_path / "monitor_heartbeat.txt").write_text(
+        (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+    )
+    (tmp_path / "monitor_gist_id.txt").write_text("https://gist.github.com/u/abc\n")
+
+    monkeypatch.setattr(meta_check, "_http_get", lambda url: (False, "", 500))
+    monkeypatch.setattr(meta_check, "_launchd_has_monitor", lambda label=meta_check.MONITOR_LABEL: (False, "missing"))
+    monkeypatch.setattr(meta_check, "deliver", lambda text, to="stdout": sent.append((text, to)) or True)
+
+    result = meta_check.run(ctx)
+
+    assert result["ok"] is False
+    assert any("heartbeat older than 3h" in item for item in result["failures"])
+    assert any("gist HTTP status" in item for item in result["failures"])
+    assert any("launchd agent missing" in item for item in result["failures"])
+    assert sent and "URGENT" in sent[0][0]
+    assert result["alert_sent"] is True
+
+
+def test_meta_check_healthy_no_alert(monkeypatch, tmp_path):
+    ctx = _monitor_ctx(tmp_path)
+    sent = []
+    (tmp_path / "monitor_heartbeat.txt").write_text(datetime.now(timezone.utc).isoformat())
+    (tmp_path / "monitor_gist_id.txt").write_text("https://gist.github.com/u/abc\n")
+    monkeypatch.setattr(meta_check, "_http_get", lambda url: (True, "# monitor\n2026-07-31\n", 200))
+    monkeypatch.setattr(meta_check, "_launchd_has_monitor", lambda label=meta_check.MONITOR_LABEL: (True, "com.nbabot.monitor"))
+    monkeypatch.setattr(meta_check, "deliver", lambda text, to="stdout": sent.append((text, to)) or True)
+
+    result = meta_check.run(ctx)
+
+    assert result["ok"] is True
+    assert result["failures"] == []
+    assert sent == []
+
+
+def test_meta_check_phase_registered():
+    assert PHASES["meta-check"] == meta_check.run

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ from .base import Context, load_context
 DELIVERY_STATE = "monitor_delivery_health.json"
 ALERT_STATE = "monitor_alert_state.json"
 BALANCE_HISTORY = "monitor_balance_history.jsonl"
+HEARTBEAT = "monitor_heartbeat.txt"
 
 
 def _data_path(ctx: Context, name: str) -> Path:
@@ -65,35 +66,40 @@ def _git_commit() -> str | None:
     return out.strip() if ok and out else None
 
 
-def _pending_prs() -> tuple[list[int], str | None]:
+def _pending_prs() -> tuple[list[int], dict[str, float], str | None]:
     ok, out = _run_command(
         [
             "gh",
             "pr",
             "list",
-            "--head",
-            "codex/broad-slate-market-matcher",
             "--json",
-            "number",
+            "number,createdAt",
         ],
         timeout=10,
     )
     if not ok:
-        return [], out
+        return [], {}, out
     try:
         loaded = json.loads(out or "[]")
     except json.JSONDecodeError as exc:
-        return [], f"gh pr list parse failed: {exc}"
+        return [], {}, f"gh pr list parse failed: {exc}"
     if not isinstance(loaded, list):
-        return [], "gh pr list returned non-list"
+        return [], {}, "gh pr list returned non-list"
     numbers = []
+    ages: dict[str, float] = {}
+    now = datetime.now(timezone.utc)
     for item in loaded:
         if isinstance(item, dict) and item.get("number") is not None:
             try:
-                numbers.append(int(item["number"]))
+                number = int(item["number"])
+                numbers.append(number)
+                created = item.get("createdAt")
+                if created:
+                    parsed = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                    ages[str(number)] = round((now - parsed).total_seconds() / 86400.0, 4)
             except (TypeError, ValueError):
                 pass
-    return numbers, None
+    return numbers, ages, None
 
 
 def _append_balance(ctx: Context, snapshot: MonitorSnapshot) -> None:
@@ -121,6 +127,54 @@ def _transition_events(ctx: Context, active_conditions: list[str]) -> tuple[list
     }
     _write_json(path, new_state)
     return events, new_state
+
+
+def _severity_message(snapshot: MonitorSnapshot, event: str) -> str:
+    reason = "; ".join(snapshot.severity_reasons) or "routine"
+    if event == "red":
+        return f"🔴 URGENT: {reason}"
+    if event == "yellow":
+        return f"🟡 attention: {reason}"
+    if event == "resolved":
+        return f"✅ resolved: {reason}"
+    return f"monitor heartbeat: {reason}"
+
+
+def _read_delivery_policy_state(ctx: Context) -> dict[str, Any]:
+    return _read_json(_data_path(ctx, ALERT_STATE))
+
+
+def _write_delivery_policy_state(ctx: Context, state: dict[str, Any]) -> None:
+    _write_json(_data_path(ctx, ALERT_STATE), state)
+
+
+def _delivery_policy(snapshot: MonitorSnapshot, previous: dict[str, Any], now: datetime) -> dict[str, Any]:
+    prior_severity = str(previous.get("severity") or "green")
+    prior_reasons = set(previous.get("reason_names") or [])
+    current_reasons = set(snapshot.severity_reason_names)
+    last_push = None
+    if previous.get("last_push_at"):
+        try:
+            last_push = datetime.fromisoformat(str(previous["last_push_at"]).replace("Z", "+00:00"))
+        except ValueError:
+            last_push = None
+    event = "none"
+    push = False
+    if snapshot.severity == "red":
+        push = True
+        event = "red"
+    elif prior_severity in {"red", "yellow"} and snapshot.severity != prior_severity:
+        push = True
+        event = "resolved"
+    elif snapshot.severity == "yellow":
+        if prior_severity != "yellow" or current_reasons != prior_reasons:
+            push = True
+            event = "yellow"
+    else:
+        if last_push is None or now - last_push > timedelta(hours=24):
+            push = True
+            event = "green-heartbeat"
+    return {"push": push, "event": event}
 
 
 def _telegram_target(ctx: Context) -> str:
@@ -166,6 +220,7 @@ def _attempt_delivery(
     text: str,
     monitor_path: Path,
     escalated: bool,
+    push: bool = True,
 ) -> list[dict[str, Any]]:
     """Deliver the routine snapshot AND always update the persistent gist.
 
@@ -180,11 +235,14 @@ def _attempt_delivery(
         ("telegram", lambda: _deliver_telegram(ctx, text)),
         ("osascript", lambda: _deliver_osascript(text)),
     ]
-    for name, fn in push_channels:
-        ok, detail = fn()
-        attempts.append({"channel": name, "ok": bool(ok), "detail": str(detail)[:500]})
-        if ok and not escalated:
-            break
+    if push:
+        for name, fn in push_channels:
+            ok, detail = fn()
+            attempts.append({"channel": name, "ok": bool(ok), "detail": str(detail)[:500]})
+            if ok and not escalated:
+                break
+    else:
+        attempts.append({"channel": "push", "ok": True, "detail": "suppressed by delivery policy"})
     # Gist push always runs so the URL is always current.
     gist_ok, gist_detail = _deliver_gist(ctx, monitor_path)
     attempts.append({"channel": "gist", "ok": bool(gist_ok), "detail": str(gist_detail)[:500]})
@@ -218,9 +276,11 @@ def _record_delivery_health(ctx: Context, attempts: list[dict[str, Any]]) -> dic
 
 def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
+    heartbeat_path = _data_path(ctx, HEARTBEAT)
+    heartbeat_path.write_text(datetime.now(timezone.utc).isoformat() + "\n")
     store = ResearchStore(ctx.settings.research_db_path)
     generated_at = datetime.now(timezone.utc).isoformat()
-    pending_prs, pr_error = _pending_prs()
+    pending_prs, pending_pr_ages, pr_error = _pending_prs()
     history = read_balance_history(ctx.settings.data_dir)
     provisional = build_monitor_snapshot(
         ctx,
@@ -228,6 +288,7 @@ def run(ctx: Context | None = None) -> dict:
         generated_at=generated_at,
         git_commit=_git_commit(),
         pending_prs=pending_prs,
+        pending_pr_ages_days=pending_pr_ages,
     )
     balance_drop = trailing_balance_drop_pct(
         history,
@@ -240,6 +301,7 @@ def run(ctx: Context | None = None) -> dict:
         generated_at=generated_at,
         git_commit=provisional.git_commit,
         pending_prs=pending_prs,
+        pending_pr_ages_days=pending_pr_ages,
         balance_drop_pct=balance_drop,
     )
     errors = list(snapshot.errors)
@@ -248,23 +310,32 @@ def run(ctx: Context | None = None) -> dict:
     snapshot = MonitorSnapshot(**{**snapshot.to_dict(), "errors": errors})
     _append_balance(ctx, snapshot)
 
-    transition_events, _state = _transition_events(ctx, snapshot.escalated_alert_conditions)
     md = format_monitor_md(snapshot)
-    delivery_text = md
-    if transition_events:
-        delivery_text = "\n".join(transition_events) + "\n\n" + md
     snapshot_path = _data_path(ctx, "monitor_snapshot.json")
     md_path = _data_path(ctx, "monitor.md")
     snapshot_path.write_text(snapshot_to_json(snapshot))
     md_path.write_text(md)
 
+    now = datetime.fromisoformat(generated_at)
+    policy_state = _read_delivery_policy_state(ctx)
+    policy = _delivery_policy(snapshot, policy_state, now)
+    delivery_text = _severity_message(snapshot, str(policy["event"])) + "\n\n" + md
     attempts = _attempt_delivery(
         ctx,
         text=delivery_text,
         monitor_path=md_path,
-        escalated=bool(transition_events),
+        escalated=snapshot.severity == "red",
+        push=bool(policy["push"]),
     )
     delivery_health = _record_delivery_health(ctx, attempts)
+    _write_delivery_policy_state(ctx, {
+        "severity": snapshot.severity,
+        "reason_names": snapshot.severity_reason_names,
+        "severity_reasons": snapshot.severity_reasons,
+        "last_push_at": now.isoformat() if policy["push"] else policy_state.get("last_push_at"),
+        "last_event": policy["event"],
+        "updated_at": now.isoformat(),
+    })
     snapshot = MonitorSnapshot(**{
         **snapshot.to_dict(),
         "alerts_delivery_health": {

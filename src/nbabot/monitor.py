@@ -17,6 +17,7 @@ from .validation_report import report as build_validation_report
 ET = ZoneInfo("America/New_York")
 ENGINE_KEYS = ("consensus", "qual", "qual_activated_quant")
 LIVE_ACK = "LIVE_TRADES_REAL_MONEY"
+Severity = str
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,9 @@ class MonitorSnapshot:
     host: str
     git_commit: str | None
     game_id: str
+    severity: Severity
+    severity_reasons: list[str]
+    severity_reason_names: list[str]
     bot_alive: bool
     hours_since_last_successful_cycle: float | None
     last_cycle_run_time_et: str | None
@@ -40,11 +44,14 @@ class MonitorSnapshot:
     exposure_reconciliation_diverged: bool
     trades_today: dict[str, Any]
     pnl: dict[str, Any]
+    trends: dict[str, Any]
+    recommendations: list[str]
     per_engine: dict[str, dict[str, Any]]
     validation_distance: dict[str, dict[str, Any]]
     alerts_delivery_health: dict[str, Any]
     live_gates_status: dict[str, bool]
     pending_prs: list[int]
+    pending_pr_ages_days: dict[str, float]
     errors: list[str] = field(default_factory=list)
     escalated_alert_conditions: list[str] = field(default_factory=list)
     delivery_attempts: list[dict[str, Any]] = field(default_factory=list)
@@ -142,6 +149,18 @@ def _cycle_summary(data_dir: Path, now: datetime) -> tuple[dict[str, Any], list[
     hours = None
     if success_dt is not None:
         hours = round((now - success_dt).total_seconds() / 3600.0, 4)
+    starts = [row for row in rows if row.get("event") == "started"]
+    open_starts: list[tuple[datetime, dict[str, Any]]] = []
+    finished_starts = {
+        str(row.get("started_at"))
+        for row in finishes
+        if row.get("started_at")
+    }
+    for row in starts:
+        started = _parse_dt(row.get("started_at"))
+        if started and str(row.get("started_at")) not in finished_starts:
+            open_starts.append((started, row))
+    oldest_open = min(open_starts, key=lambda item: item[0])[0] if open_starts else None
     return {
         "bot_alive": bool(hours is not None and hours <= 6.0),
         "hours_since_last_successful_cycle": hours,
@@ -152,6 +171,10 @@ def _cycle_summary(data_dir: Path, now: datetime) -> tuple[dict[str, Any], list[
         "last_two_hard_errors": (
             len(finishes[-2:]) == 2
             and all(row.get("hard_error") or int(row.get("exit_code") or 0) for row in finishes[-2:])
+        ),
+        "currently_running_hours": (
+            round((now - oldest_open).total_seconds() / 3600.0, 4)
+            if oldest_open is not None else None
         ),
     }, errors
 
@@ -299,6 +322,125 @@ def _pnl(settlements: list[dict[str, Any]], now: datetime, max_share: float) -> 
     }
 
 
+def _settlement_time(row: dict[str, Any]) -> datetime | None:
+    return _parse_dt(row.get("settled_at") or row.get("audited_at"))
+
+
+def _settlements_between(
+    settlements: list[dict[str, Any]],
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    out = []
+    for row in settlements:
+        ts = _settlement_time(row)
+        if ts is not None and start <= ts < end:
+            out.append(row)
+    return out
+
+
+def _window_pnl_usd(rows: list[dict[str, Any]]) -> float:
+    return round(sum((_safe_float(row.get("pnl_cents")) or 0.0) for row in rows) / 100.0, 4)
+
+
+def _pct_delta(current: float, prior: float) -> float | None:
+    if prior == 0:
+        return None
+    return round((current - prior) / abs(prior), 6)
+
+
+def _win_rates(rows: list[dict[str, Any]]) -> dict[str, float | None]:
+    out: dict[str, float | None] = {}
+    for key in ENGINE_KEYS:
+        engine_rows = [row for row in rows if str(row.get("signal_source") or "consensus") == key]
+        out[key] = (
+            round(sum(1 for row in engine_rows if int(row.get("outcome") or 0) == 1) / len(engine_rows), 4)
+            if engine_rows else None
+        )
+    return out
+
+
+def _clv_beat_rates(rows: list[dict[str, Any]]) -> dict[str, float | None]:
+    out: dict[str, float | None] = {}
+    for key in ENGINE_KEYS:
+        engine_rows = [row for row in rows if str(row.get("signal_source") or "consensus") == key]
+        measured = [row for row in engine_rows if row.get("beat_closing_consensus") is not None or row.get("clv_cents") is not None]
+        beats = 0
+        for row in measured:
+            if row.get("beat_closing_consensus") is not None:
+                beats += 1 if int(row.get("beat_closing_consensus") or 0) == 1 else 0
+            else:
+                beats += 1 if (_safe_float(row.get("clv_cents")) or 0.0) > 0 else 0
+        out[key] = round(beats / len(measured), 4) if measured else None
+    return out
+
+
+def _cycle_success_rate_7d(data_dir: Path, now: datetime) -> tuple[float | None, list[str]]:
+    rows, error = _read_jsonl(data_dir / "scheduled_cycle_runs.jsonl")
+    errors = [error] if error else []
+    start = now - timedelta(days=7)
+    finishes = [
+        row for row in rows
+        if row.get("event") == "finished"
+        and (ts := _parse_dt(row.get("finished_at"))) is not None
+        and start <= ts < now
+    ]
+    if not finishes:
+        return None, errors
+    successes = sum(1 for row in finishes if int(row.get("exit_code") or 0) == 0 and not row.get("hard_error"))
+    return round(successes / len(finishes), 4), errors
+
+
+def _trends(settlements: list[dict[str, Any]], data_dir: Path, now: datetime) -> tuple[dict[str, Any], list[str]]:
+    current_start = now - timedelta(days=7)
+    prior_start = now - timedelta(days=14)
+    current = _settlements_between(settlements, current_start, now)
+    prior = _settlements_between(settlements, prior_start, current_start)
+    current_pnl = _window_pnl_usd(current)
+    prior_pnl = _window_pnl_usd(prior)
+    current_win = _win_rates(current)
+    prior_win = _win_rates(prior)
+    deltas = {
+        key: (
+            round(current_win[key] - prior_win[key], 4)
+            if current_win[key] is not None and prior_win[key] is not None
+            else None
+        )
+        for key in ENGINE_KEYS
+    }
+    positive = [(_safe_float(row.get("pnl_cents")) or 0.0) for row in current if (_safe_float(row.get("pnl_cents")) or 0.0) > 0]
+    total_positive = sum(positive)
+    concentration = round(max(positive) / total_positive, 6) if positive and total_positive > 0 else None
+    cycle_rate, errors = _cycle_success_rate_7d(data_dir, now)
+    return {
+        "pnl_7d_usd": current_pnl,
+        "pnl_prior_7d_usd": prior_pnl,
+        "pnl_7d_delta_vs_prior_7d_usd": round(current_pnl - prior_pnl, 4),
+        "pnl_7d_delta_vs_prior_7d_pct": _pct_delta(current_pnl, prior_pnl),
+        "win_rate_7d": current_win,
+        "win_rate_7d_delta_pp_vs_prior_7d": deltas,
+        "cycle_success_rate_7d": cycle_rate,
+        "clv_beat_rate_7d": _clv_beat_rates(current),
+        "concentration_share_7d": concentration,
+    }, errors
+
+
+def _qual_unsupported_rate(store: ResearchStore) -> tuple[float | None, list[str]]:
+    try:
+        with store.connect() as db:
+            row = db.execute(
+                """
+                SELECT AVG(unsupported_branch_rate) AS unsupported_rate
+                FROM qual_groundedness_scores
+                WHERE created_at >= datetime('now', '-7 days')
+                """
+            ).fetchone()
+    except Exception as exc:
+        return None, [f"qual_groundedness_scores: {exc}"]
+    value = row["unsupported_rate"] if row and row["unsupported_rate"] is not None else None
+    return (round(float(value), 6) if value is not None else None), []
+
+
 def _per_engine(orders: list[dict[str, Any]], settlements: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     filled_ids: set[str] = set()
     try:
@@ -409,26 +551,89 @@ def _live_gates(ctx: Any) -> dict[str, bool]:
     }
 
 
+def _all_live_gates_set(gates: dict[str, bool]) -> bool:
+    return all(bool(value) for value in gates.values())
+
+
+def evaluate_severity(
+    snapshot: MonitorSnapshot,
+    *,
+    balance_drop_pct: float | None = None,
+    currently_running_hours: float | None = None,
+    qual_unsupported_rate: float | None = None,
+) -> dict[str, Any]:
+    red: list[tuple[str, str]] = []
+    yellow: list[tuple[str, str]] = []
+    if snapshot.health.get("alert"):
+        reasons = "; ".join(str(reason) for reason in snapshot.health.get("reasons") or []) or "health-check alert active"
+        red.append(("health_check_alert", reasons))
+    if (
+        snapshot.hours_since_last_successful_cycle is None
+        or snapshot.hours_since_last_successful_cycle > 8.0
+    ):
+        red.append(("no_successful_cycle_gt_8h", "no successful cycle in >8h"))
+    if snapshot.last_cycle_hard_error and snapshot.health.get("recent_cycle_hard_error_count", 0) >= 2:
+        red.append(("consecutive_hard_errors", "2+ consecutive hard errors"))
+    if balance_drop_pct is not None and balance_drop_pct > 0.05:
+        red.append(("balance_drop_gt_5pct_24h", f"balance dropped {balance_drop_pct:.1%} in trailing 24h"))
+    delivery_zero = _parse_dt(snapshot.alerts_delivery_health.get("last_zero_success_at"))
+    generated = _parse_dt(snapshot.generated_at) or datetime.now(timezone.utc)
+    if delivery_zero and generated - delivery_zero > timedelta(hours=12):
+        red.append(("delivery_failing_gt_12h", "delivery-failing counter >12h"))
+    elif int(snapshot.alerts_delivery_health.get("consecutive_failures") or 0) > 12:
+        red.append(("delivery_failing_gt_12h", "delivery-failing counter >12h"))
+    if _all_live_gates_set(snapshot.live_gates_status):
+        red.append(("all_live_gates_set", "all four live gates are set"))
+
+    if snapshot.exposure_reconciliation_diverged:
+        yellow.append(("exposure_reconciliation_diverged", "exposure reconciliation diverged"))
+    if (snapshot.last_cycle_orders_placed == 0 and (snapshot.last_cycle_edges_found or 0) > 0):
+        yellow.append(("eligible_edges_no_orders", "last cycle placed 0 orders and had trade-eligible edges"))
+    if qual_unsupported_rate is not None and qual_unsupported_rate > 0.90:
+        yellow.append(("qual_rag_unsupported_gt_90pct", f"qual RAG unsupported rate {qual_unsupported_rate:.1%}"))
+    for key, delta in (snapshot.trends.get("win_rate_7d_delta_pp_vs_prior_7d") or {}).items():
+        if delta is not None and float(delta) < -0.20:
+            yellow.append((f"{key}_win_rate_drop_gt_20pp", f"{key} win rate dropped {abs(float(delta)):.1%} vs 7-day baseline"))
+    drift_text = " ".join([*snapshot.errors, *[str(reason) for reason in snapshot.health.get("reasons") or []]]).lower()
+    if "legacy yaml" in drift_text or "unit invariant" in drift_text or "unit_usd diverges" in drift_text:
+        yellow.append(("test_config_drift", "test/config drift warning active"))
+    if currently_running_hours is not None and currently_running_hours > 6.0:
+        yellow.append(("codex_phase_stalled_gt_6h", f"currently-running phase is {currently_running_hours:.1f}h old"))
+
+    selected = red if red else yellow
+    return {
+        "severity": "red" if red else ("yellow" if yellow else "green"),
+        "reasons": [reason for _name, reason in selected],
+        "reason_names": [name for name, _reason in selected],
+    }
+
+
 def evaluate_alert_conditions(
     snapshot: MonitorSnapshot,
     *,
     balance_drop_pct: float | None = None,
 ) -> list[str]:
-    conditions = []
-    if (
-        snapshot.hours_since_last_successful_cycle is None
-        or snapshot.hours_since_last_successful_cycle > 6.0
-    ):
-        conditions.append("bot silent > 6h")
-    if snapshot.last_cycle_hard_error and snapshot.health.get("recent_cycle_hard_error_count", 0) >= 2:
-        conditions.append("consecutive cycle failures")
-    if balance_drop_pct is not None and balance_drop_pct > 0.05:
-        conditions.append("balance drop")
-    if int(snapshot.alerts_delivery_health.get("consecutive_failures") or 0) > 12:
-        conditions.append(
-            f"your alerts have been failing for {snapshot.alerts_delivery_health.get('consecutive_failures')} hours"
-        )
-    return conditions
+    return evaluate_severity(snapshot, balance_drop_pct=balance_drop_pct).get("reasons") or []
+
+
+def build_recommendations(snapshot: MonitorSnapshot) -> list[str]:
+    recommendations: list[str] = []
+    if snapshot.exposure_reconciliation_diverged:
+        recommendations.append("Investigate phantom exposure -- likely blocking trades")
+    qual_delta = (snapshot.trends.get("win_rate_7d_delta_pp_vs_prior_7d") or {}).get("qual")
+    if qual_delta is not None and float(qual_delta) < -0.20:
+        recommendations.append("Qual engine performance degrading; check retrieval / groundedness")
+    cycle_rate = snapshot.trends.get("cycle_success_rate_7d")
+    if cycle_rate is not None and float(cycle_rate) < 0.80:
+        recommendations.append("Cycles are failing at high rate; check hard_error in monitor snapshot")
+    diagnostics = snapshot.health.get("candidate_ranker_diagnostics") or {}
+    slate_matches = _safe_int(diagnostics.get("slate_candidate_count")) or 0
+    consensus = snapshot.per_engine.get("consensus") or {}
+    if int(consensus.get("placed") or 0) == 0 and slate_matches > 0:
+        recommendations.append("Consensus not producing intents; check candidate_ranker output")
+    if any(float(days) > 7.0 for days in (snapshot.pending_pr_ages_days or {}).values()):
+        recommendations.append("Long-lived PR -- consider merge or close")
+    return recommendations
 
 
 def build_monitor_snapshot(
@@ -439,6 +644,7 @@ def build_monitor_snapshot(
     host: str | None = None,
     git_commit: str | None = None,
     pending_prs: list[int] | None = None,
+    pending_pr_ages_days: dict[str, float] | None = None,
     balance_drop_pct: float | None = None,
 ) -> MonitorSnapshot:
     generated = generated_at or datetime.now(timezone.utc).isoformat()
@@ -474,12 +680,22 @@ def build_monitor_snapshot(
     errors.extend(validation_errors)
     delivery_health, delivery_errors = _delivery_health(data_dir)
     errors.extend(delivery_errors)
+    trends, trend_errors = _trends(settlements, data_dir, now)
+    errors.extend(trend_errors)
+    qual_unsupported_rate, qual_errors = _qual_unsupported_rate(store)
+    errors.extend(qual_errors)
+    candidate_ranker, candidate_error = _read_json(data_dir / f"{ctx.settings.game_id}.candidate_ranker.json")
+    if candidate_error:
+        errors.append(candidate_error)
 
     snapshot = MonitorSnapshot(
         generated_at=generated,
         host=host or socket.gethostname(),
         git_commit=git_commit,
         game_id=ctx.settings.game_id,
+        severity="green",
+        severity_reasons=[],
+        severity_reason_names=[],
         bot_alive=bool(cycle["bot_alive"]),
         hours_since_last_successful_cycle=cycle["hours_since_last_successful_cycle"],
         last_cycle_run_time_et=cycle["last_cycle_run_time_et"],
@@ -499,20 +715,51 @@ def build_monitor_snapshot(
             now,
             float(getattr(ctx.settings, "concentration_max_winner_share", 0.50)),
         ),
+        trends=trends,
+        recommendations=[],
         per_engine=per_engine,
         validation_distance=validation_distance,
-        alerts_delivery_health=delivery_health,
+        alerts_delivery_health={
+            **delivery_health,
+            "qual_unsupported_rate_7d": qual_unsupported_rate,
+        },
         live_gates_status=_live_gates(ctx),
         pending_prs=sorted(pending_prs or []),
+        pending_pr_ages_days=pending_pr_ages_days or {},
         errors=errors,
+    )
+    snapshot = MonitorSnapshot(
+        **{
+            **snapshot.to_dict(),
+            "health": {
+                **snapshot.health,
+                "candidate_ranker_diagnostics": (
+                    candidate_ranker.get("diagnostics")
+                    if isinstance(candidate_ranker.get("diagnostics"), dict)
+                    else {}
+                ),
+            },
+        }
+    )
+    severity = evaluate_severity(
+        snapshot,
+        balance_drop_pct=balance_drop_pct,
+        currently_running_hours=cycle.get("currently_running_hours"),
+        qual_unsupported_rate=qual_unsupported_rate,
+    )
+    snapshot = MonitorSnapshot(
+        **{
+            **snapshot.to_dict(),
+            "severity": severity["severity"],
+            "severity_reasons": severity["reasons"],
+            "severity_reason_names": severity["reason_names"],
+            "escalated_alert_conditions": severity["reasons"],
+        }
     )
     return MonitorSnapshot(
         **{
             **snapshot.to_dict(),
-            "escalated_alert_conditions": evaluate_alert_conditions(
-                snapshot,
-                balance_drop_pct=balance_drop_pct,
-            ),
+            "recommendations": build_recommendations(snapshot),
         }
     )
 
@@ -522,10 +769,12 @@ def format_monitor_md(snapshot: MonitorSnapshot) -> str:
     health = s["health"]
     trades = s["trades_today"]
     pnl = s["pnl"]
+    trends = s["trends"]
     delivery = s["alerts_delivery_health"]
     engines = s["per_engine"]
     lines = [
         f"# monitor {s['game_id']}",
+        f"- severity: {s['severity']} reasons={'; '.join(s['severity_reasons']) or 'routine'}",
         "## alive",
         f"- alive: {s['bot_alive']} last_success_hours={s['hours_since_last_successful_cycle']}",
         f"- last_cycle: {s['last_cycle_run_time_et']} edges={s['last_cycle_edges_found']} orders={s['last_cycle_orders_placed']} hard_error={s['last_cycle_hard_error']}",
@@ -542,6 +791,7 @@ def format_monitor_md(snapshot: MonitorSnapshot) -> str:
         f"- errors: {'; '.join(s['errors']) or 'none'}",
         "## performance",
         f"- pnl: today=${pnl['today_usd']} week=${pnl['week_usd']} all_time=${pnl['all_time_usd']} concentration={pnl['concentration_flag']}",
+        f"- trends: pnl_7d=${trends['pnl_7d_usd']} delta=${trends['pnl_7d_delta_vs_prior_7d_usd']} pct={trends['pnl_7d_delta_vs_prior_7d_pct']} cycle_success={trends['cycle_success_rate_7d']} concentration_7d={trends['concentration_share_7d']}",
     ]
     for key in ENGINE_KEYS:
         row = engines.get(key) or {}
@@ -551,7 +801,12 @@ def format_monitor_md(snapshot: MonitorSnapshot) -> str:
             f"win_rate={row.get('win_rate')} avg_clv={row.get('avg_clv')} pnl=${row.get('pnl_usd')}"
         )
     lines.append(f"- pending_prs: {','.join(str(n) for n in s['pending_prs']) or 'none'}")
-    return "\n".join(lines[:39]) + "\n"
+    lines.append("## recommendations")
+    if s["recommendations"]:
+        lines.extend(f"- {item}" for item in s["recommendations"])
+    else:
+        lines.append("- none")
+    return "\n".join(lines[:48]) + "\n"
 
 
 def read_balance_history(data_dir: Path) -> list[dict[str, Any]]:
