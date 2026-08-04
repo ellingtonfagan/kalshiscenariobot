@@ -14,10 +14,12 @@ from ..risk import RiskContext, evaluate_trade_intent
 from .base import Context, load_context
 from .paper import (
     _candidate_intents,
+    _failed_check_names,
     execution_limits,
     record_shadow_intents,
     refresh_research_for_execution,
 )
+from ..units import unit_payload
 
 
 def _blocked_reason(ctx: Context) -> str | None:
@@ -54,39 +56,77 @@ def run(ctx: Context | None = None) -> dict:
         }
 
     limits = execution_limits(ctx, store, "demo_orders")
+    game_exposure = float(limits["game_exposure_units"])
+    portfolio_exposure = float(limits["portfolio_exposure_units"])
+    broad_slate_count = int(limits["broad_slate_trade_count"])
+    broad_slate_limit = int(limits["broad_slate_daily_trade_limit"])
+    paper_demo_broad_slate_count = int(limits["paper_demo_broad_slate_trade_count"])
+    paper_demo_daily_cap = int(limits["paper_demo_daily_trade_cap"])
+    qual_daily_trade_count = int(limits["qual_daily_trade_count"])
+    qual_daily_trade_cap = int(limits["qual_daily_trade_cap"])
+    receipts = []
     for intent in intents:
         decision = evaluate_trade_intent(
             intent,
             ctx.settings,
             RiskContext(
-                game_exposure_units=float(limits["game_exposure_units"]),
-                portfolio_exposure_units=float(limits["portfolio_exposure_units"]),
-                broad_slate_trade_count=int(limits["broad_slate_trade_count"]),
-                broad_slate_daily_trade_limit=int(limits["broad_slate_daily_trade_limit"]),
-                paper_demo_broad_slate_trade_count=int(
-                    limits["paper_demo_broad_slate_trade_count"]
-                ),
-                paper_demo_daily_trade_cap=int(limits["paper_demo_daily_trade_cap"]),
-                qual_daily_trade_count=int(limits["qual_daily_trade_count"]),
-                qual_daily_trade_cap=int(limits["qual_daily_trade_cap"]),
+                game_exposure_units=game_exposure,
+                portfolio_exposure_units=portfolio_exposure,
+                broad_slate_trade_count=broad_slate_count,
+                broad_slate_daily_trade_limit=broad_slate_limit,
+                paper_demo_broad_slate_trade_count=paper_demo_broad_slate_count,
+                paper_demo_daily_trade_cap=paper_demo_daily_cap,
+                qual_daily_trade_count=qual_daily_trade_count,
+                qual_daily_trade_cap=qual_daily_trade_cap,
             ),
         )
         receipt = execute_demo(intent, decision, ctx.settings, store, audit, ctx.kalshi)
-        result = {
+        receipts.append({
             "intent": asdict(intent),
             "decision": asdict(decision),
             "receipt": asdict(receipt),
-            "shadow_intents_inserted": shadow_inserted,
-        }
-        ctx.write_json("demo_execute.json", result)
-        hope = " HOPE BET" if intent.hope_bet else ""
-        out = (
-            f"[demo-execute] {receipt.status}: {intent.scenario_id} {intent.ticker} "
-            f"{intent.contracts} {intent.side.upper()} @ {intent.price_cents}c "
-            f"stake={intent.stake_units:.3f}u net_edge={intent.edge:+.3f} "
-            f"SGP-adjusted scenario p={intent.sgp_adjusted_prob:.3f}{hope}"
-        )
-        deliver(guardrails.with_footer(out), ctx.settings.deliver_to)
-        return result
+        })
+        if decision.approved:
+            game_exposure += intent.stake_units
+            portfolio_exposure += intent.stake_units
+            if intent.broad_slate:
+                broad_slate_count += 1
+                paper_demo_broad_slate_count += 1
+            if intent.signal_source in {"qual", "qual_activated_quant"}:
+                qual_daily_trade_count += 1
+        if (
+            game_exposure >= ctx.settings.max_game_exposure_units
+            or portfolio_exposure >= float(getattr(
+                ctx.settings,
+                "max_daily_exposure_units",
+                guardrails.MAX_STAKE_UNITS,
+            ))
+        ):
+            break
 
-    return {"orders": [], "reason": "no-approved"}
+    store.record_risk_snapshot(ctx.settings.game_id, {
+        "game_exposure_units": game_exposure,
+        "portfolio_exposure_units": portfolio_exposure,
+        "daily_pnl_units": 0.0,
+        "open_positions": len([r for r in receipts if r["decision"]["approved"]]),
+        "circuit_breaker_on": False,
+        "unit": unit_payload(ctx),
+    })
+    result = {"orders": receipts, "shadow_intents_inserted": shadow_inserted}
+    ctx.write_json("demo_execute.json", result)
+    if receipts:
+        first = receipts[0]
+        intent = first["intent"]
+        receipt = first["receipt"]
+        hope = " HOPE BET" if intent["hope_bet"] else ""
+        out = (
+            f"[demo-execute] {receipt['status']}: {intent['scenario_id']} {intent['ticker']} "
+            f"{intent['contracts']} {intent['side'].upper()} @ {intent['price_cents']}c "
+            f"stake={intent['stake_units']:.3f}u net_edge={intent['edge']:+.3f} "
+            f"SGP-adjusted scenario p={intent['sgp_adjusted_prob']:.3f}{hope}"
+        )
+        failed = _failed_check_names(first["decision"])
+        if failed:
+            out += f" reasons={', '.join(failed)}"
+        deliver(guardrails.with_footer(out), ctx.settings.deliver_to)
+    return result

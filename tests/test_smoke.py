@@ -3117,6 +3117,156 @@ def test_demo_execute_blocks_missing_demo_credentials_without_request(tmp_path, 
     assert messages[0][0].startswith("[demo-execute] blocked:")
 
 
+def test_execution_limits_ignore_submitted_order_after_terminal_rejection(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    store = research.ResearchStore(settings.research_db_path)
+    intent = _intent(stake_units=2.25)
+    decision = risk.RiskDecision(approved=True, checks=[])
+    request = execution.build_order_request(intent, "paper")
+    receipt = execution.OrderReceipt(request.client_order_id, "paper", "rejected", {})
+    store.record_order("paper_orders", intent.game_id, intent, decision, request, receipt)
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+        def read_json(self, suffix):
+            return {}
+
+    assert paper.execution_limits(DummyContext(), store, "paper_orders")[
+        "game_exposure_units"
+    ] == pytest.approx(0.0)
+
+    store.record_order_lifecycle(
+        client_order_id=request.client_order_id,
+        game_id=intent.game_id,
+        mode="paper",
+        status="rejected",
+        terminal=True,
+        raw={"status": "rejected"},
+    )
+
+    assert paper.execution_limits(DummyContext(), store, "paper_orders")[
+        "game_exposure_units"
+    ] == pytest.approx(0.0)
+
+
+def test_demo_execute_batches_after_first_rejected_intent(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    settings.kalshi_demo_api_key = "demo-key"
+    settings.kalshi_demo_private_key_path.write_text("demo-private-key")
+    messages = []
+    writes = {}
+    intents = [
+        _intent(scenario_id="S1", ticker="KX1"),
+        _intent(scenario_id="S2", ticker="KX2"),
+        _intent(scenario_id="S3", ticker="KX3"),
+    ]
+    evaluated = []
+
+    class DummyKalshi:
+        def demo_positions(self, demo_api_base):
+            return {}
+
+        def demo_orders(self, demo_api_base, limit=500):
+            return {"orders": []}
+
+        def demo_balance_cents(self, demo_api_base):
+            return 100_000
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def read_json(self, suffix):
+            return {}
+
+        def write_json(self, suffix, payload):
+            writes[suffix] = payload
+
+    def fake_evaluate(intent, settings_arg, risk_context):
+        evaluated.append(intent.ticker)
+        if intent.ticker == "KX1":
+            return risk.RiskDecision(
+                approved=False,
+                checks=[
+                    risk.RiskCheck("game_exposure", False, "game exposure blocked"),
+                ],
+            )
+        return risk.RiskDecision(approved=True, checks=[])
+
+    def fake_execute(intent, decision, settings_arg, store, audit, kalshi):
+        status = "submitted" if decision.approved else "rejected"
+        return execution.OrderReceipt(intent.ticker or "", "demo", status, {})
+
+    monkeypatch.setattr(demo_execute, "refresh_research_for_execution", lambda ctx: {})
+    monkeypatch.setattr(demo_execute, "record_shadow_intents", lambda ctx, store, audit, mode: 0)
+    monkeypatch.setattr(demo_execute, "_candidate_intents", lambda ctx: intents)
+    monkeypatch.setattr(demo_execute, "evaluate_trade_intent", fake_evaluate)
+    monkeypatch.setattr(demo_execute, "execute_demo", fake_execute)
+    monkeypatch.setattr(demo_execute, "deliver", lambda text, to="stdout": messages.append(text))
+
+    result = demo_execute.run(DummyContext())
+
+    assert evaluated == ["KX1", "KX2", "KX3"]
+    assert len(result["orders"]) == 3
+    assert len(writes["demo_execute.json"]["orders"]) == 3
+
+
+def test_demo_execute_rejection_message_lists_failed_check_names(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    settings.kalshi_demo_api_key = "demo-key"
+    settings.kalshi_demo_private_key_path.write_text("demo-private-key")
+    messages = []
+    intent = _intent(scenario_id="S1", ticker="KX1")
+
+    class DummyKalshi:
+        def demo_positions(self, demo_api_base):
+            return {}
+
+        def demo_orders(self, demo_api_base, limit=500):
+            return {"orders": []}
+
+        def demo_balance_cents(self, demo_api_base):
+            return 100_000
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def read_json(self, suffix):
+            return {}
+
+        def write_json(self, suffix, payload):
+            pass
+
+    decision = risk.RiskDecision(
+        approved=False,
+        checks=[
+            risk.RiskCheck("game_exposure", False, "game exposure blocked"),
+            risk.RiskCheck("daily_portfolio_exposure", False, "portfolio blocked"),
+        ],
+    )
+    monkeypatch.setattr(demo_execute, "refresh_research_for_execution", lambda ctx: {})
+    monkeypatch.setattr(demo_execute, "record_shadow_intents", lambda ctx, store, audit, mode: 0)
+    monkeypatch.setattr(demo_execute, "_candidate_intents", lambda ctx: [intent])
+    monkeypatch.setattr(demo_execute, "evaluate_trade_intent", lambda *args: decision)
+    monkeypatch.setattr(
+        demo_execute,
+        "execute_demo",
+        lambda *args: execution.OrderReceipt("cid", "demo", "rejected", {}),
+    )
+    monkeypatch.setattr(demo_execute, "deliver", lambda text, to="stdout": messages.append(text))
+
+    demo_execute.run(DummyContext())
+
+    assert "reasons=game_exposure, daily_portfolio_exposure" in messages[0]
+
+
 def test_live_execution_requires_explicit_gates(tmp_path):
     settings = _ExecSettings(tmp_path)
     settings.execution_mode = "live"

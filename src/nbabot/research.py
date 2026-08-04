@@ -23,6 +23,8 @@ from .qual_rag import (
 ORDER_TABLES = {"paper_orders", "demo_orders", "live_orders"}
 DEFAULT_RISK_TIMEZONE = "America/New_York"
 OPEN_EXPOSURE_STATUSES = {"resting", "open", "pending", "accepted", "created"}
+TERMINAL_ORDER_STATUSES = {"filled", "executed", "canceled", "cancelled", "expired", "rejected"}
+RECEIPT_NON_EXPOSURE_STATUSES = {"canceled", "cancelled", "expired", "rejected"}
 
 
 def utc_now() -> str:
@@ -2730,14 +2732,23 @@ class ResearchStore:
             return 0.0
 
     @staticmethod
-    def _is_open_exposure_row(lifecycle: dict[str, Any] | None, settled: bool) -> bool:
+    def _is_open_exposure_row(
+        lifecycle: dict[str, Any] | None,
+        settled: bool,
+        receipt_status: str | None = None,
+    ) -> bool:
         if settled:
+            return False
+        receipt_status = str(receipt_status or "").lower()
+        if receipt_status in RECEIPT_NON_EXPOSURE_STATUSES:
             return False
         if not lifecycle:
             return True
         if int(lifecycle.get("terminal") or 0):
             return False
         status = str(lifecycle.get("status") or "").lower()
+        if status in TERMINAL_ORDER_STATUSES:
+            return False
         if not status:
             return True
         return status in OPEN_EXPOSURE_STATUSES
@@ -2769,7 +2780,7 @@ class ResearchStore:
                 rows = db.execute(
                     f"""
                     SELECT client_order_id, game_id, created_at, signal_source,
-                           intent_json, request_json
+                           intent_json, request_json, receipt_json
                     FROM {table}
                     {'' if game_id is None else 'WHERE game_id = ?'}
                     """,
@@ -2780,7 +2791,12 @@ class ResearchStore:
                         continue
                     client_order_id = row["client_order_id"]
                     lc = lifecycle.get(client_order_id)
-                    if not self._is_open_exposure_row(lc, client_order_id in settled):
+                    receipt = self._json_obj(row["receipt_json"])
+                    if not self._is_open_exposure_row(
+                        lc,
+                        client_order_id in settled,
+                        receipt.get("status"),
+                    ):
                         continue
                     intent = self._json_obj(row["intent_json"])
                     if broad_slate_only and not bool(intent.get("broad_slate")):

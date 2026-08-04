@@ -165,6 +165,21 @@ def execution_limits(ctx: Context, store: ResearchStore, table: str) -> dict[str
     }
 
 
+def _failed_check_names(decision: Any) -> list[str]:
+    checks = decision.get("checks", []) if isinstance(decision, dict) else getattr(decision, "checks", [])
+    names = []
+    for check in checks:
+        if isinstance(check, dict):
+            passed = bool(check.get("passed"))
+            name = check.get("name")
+        else:
+            passed = bool(getattr(check, "passed", False))
+            name = getattr(check, "name", None)
+        if not passed and name:
+            names.append(str(name))
+    return names
+
+
 def _intent_from_row(
     ctx: Context,
     row: dict,
@@ -578,5 +593,8 @@ def run(ctx: Context | None = None) -> dict:
         f"stake={intent['stake_units']:.3f}u net_edge={intent['edge']:+.3f} "
         f"SGP-adjusted scenario p={intent['sgp_adjusted_prob']:.3f}{hope}"
     )
+    failed = _failed_check_names(first["decision"])
+    if failed:
+        out += f" reasons={', '.join(failed)}"
     deliver(guardrails.with_footer(out), ctx.settings.deliver_to)
     return {"orders": receipts, "shadow_intents_inserted": shadow_inserted}

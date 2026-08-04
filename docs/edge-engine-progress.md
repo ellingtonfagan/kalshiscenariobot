@@ -1480,6 +1480,51 @@ were changed, and no scheduler or cron work was added.
 
 ---
 
+## Round 23d - 2026-08-04 - Phantom exposure, demo batch executor, rejection reasons
+
+### What changed
+
+- Hardened local execution exposure so terminal order rows do not count as open
+  exposure when lifecycle reconciliation is missing or stale. The local fallback
+  now honors terminal lifecycle statuses (`filled`, `executed`, `canceled`,
+  `cancelled`, `expired`, `rejected`) and receipt-only non-exposure statuses
+  (`canceled`, `cancelled`, `expired`, `rejected`) as zero open exposure.
+- Ported the paper executor's batch loop into `demo-execute`: all candidate
+  intents are evaluated in order, approved intents update running exposure and
+  trade counters, and the loop stops only when exposure caps trip.
+- Added failed risk-check names to paper/demo delivery strings, e.g.
+  `reasons=game_exposure, daily_portfolio_exposure`.
+
+### Root cause
+
+- The phantom exposure came from local order rows whose exchange lifecycle had
+  already become terminal but whose local exposure fallback had no reliable
+  terminal marker. `open_exposure_rows()` treated rows with no lifecycle as open,
+  so submitted-then-terminal demo rows could keep contributing their original
+  `stake_units` even when authoritative Kalshi demo positions/orders were zero.
+
+### Verification
+
+- Focused tests: `.venv/bin/pytest -q tests/test_smoke.py -k
+  "daily_portfolio_exposure_blocks_cross_game_order or
+  terminal_orders_are_excluded_from_open_exposure or
+  execution_limits_ignore_submitted_order_after_terminal_rejection or
+  demo_execute_batches_after_first_rejected_intent or
+  demo_execute_rejection_message_lists_failed_check_names"` -> `5 passed, 176
+  deselected`.
+- Full suite: `.venv/bin/pytest -q` -> `176 passed, 5 failed`. The remaining
+  failures are the known missing fixture files under `docs/fixtures/`.
+- Real demo run: `NBABOT_EXECUTION_MODE=demo NBABOT_DRY_RUN=1 .venv/bin/ksobot
+  demo-execute` exited `0`. Current Kalshi demo exposure is not zero: exchange
+  reports `KXMLBGAME-26AUG041905STLNYY-NYY: -73`, or `4.555411u`, with no open
+  orders. The STLNYY qual intent was evaluated first and rejected for real
+  exposure (`4.555411u + 2.074896u = 6.630u > 5.000u`), not phantom local
+  exposure. Demo batching continued and evaluated three intents.
+- No live execution gates, live executor code, sizing code, risk thresholds, or
+  env defaults were intentionally changed.
+
+---
+
 ## Round 26 - 2026-07-28 - Side-aware edges, retrieval evidence floor, and news latency instrumentation
 
 ### What changed in code
