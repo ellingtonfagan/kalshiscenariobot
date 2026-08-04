@@ -7415,3 +7415,98 @@ def test_exchange_exposure_ignores_terminal_orders():
     }
     result = exposure.exchange_exposure_units(state, unit_usd=15.70)
     assert result["total_exposure_units"] == pytest.approx(0.0)
+
+
+# ---------- Phase 23e demo-experiment threshold split ----------
+
+def _mk_settings_stub(mode: str):
+    from nbabot.config import Settings
+    from pathlib import Path as _P
+    # Only the fields the effective_* properties touch. Everything else stays
+    # dataclass-default-invalid but that's fine — we never construct via the
+    # normal path here, we're just testing property arithmetic.
+    return Settings.__new__(Settings) if False else _StubSettings(mode)
+
+
+class _StubSettings:
+    def __init__(self, mode: str):
+        self.execution_mode = mode
+        self.qual_min_edge = 0.06
+        self.demo_qual_min_edge = 0.03
+        self.max_game_exposure_units = 5.0
+        self.demo_max_game_exposure_units = 20.0
+        self.max_daily_exposure_units = 5.0
+        self.demo_max_daily_exposure_units = 30.0
+        self.max_daily_loss_units = 2.0
+        self.demo_max_daily_loss_units = 5.0
+        self.qual_daily_trade_cap = 10
+        self.demo_qual_daily_trade_cap = 60
+        self.qual_min_groundedness = 0.6
+        self.demo_qual_min_groundedness = 0.4
+
+    # borrow the real properties from Settings via unbound descriptor access
+    from nbabot.config import Settings as _S
+    _is_demo_mode = _S._is_demo_mode
+    effective_qual_min_edge = _S.effective_qual_min_edge
+    effective_max_game_exposure_units = _S.effective_max_game_exposure_units
+    effective_max_daily_exposure_units = _S.effective_max_daily_exposure_units
+    effective_max_daily_loss_units = _S.effective_max_daily_loss_units
+    effective_qual_daily_trade_cap = _S.effective_qual_daily_trade_cap
+    effective_qual_min_groundedness = _S.effective_qual_min_groundedness
+
+
+def test_phase23e_effective_thresholds_demo_mode_loosens():
+    s = _StubSettings("demo")
+    assert s.effective_qual_min_edge == 0.03
+    assert s.effective_max_game_exposure_units == 20.0
+    assert s.effective_max_daily_exposure_units == 30.0
+    assert s.effective_max_daily_loss_units == 5.0
+    assert s.effective_qual_daily_trade_cap == 60
+    assert s.effective_qual_min_groundedness == 0.4
+
+
+def test_phase23e_effective_thresholds_paper_mode_matches_demo():
+    s = _StubSettings("paper")
+    assert s.effective_qual_min_edge == 0.03
+    assert s.effective_max_game_exposure_units == 20.0
+    assert s.effective_max_daily_loss_units == 5.0
+
+
+def test_phase23e_effective_thresholds_live_mode_stays_strict():
+    s = _StubSettings("live")
+    assert s.effective_qual_min_edge == 0.06
+    assert s.effective_max_game_exposure_units == 5.0
+    assert s.effective_max_daily_exposure_units == 5.0
+    assert s.effective_max_daily_loss_units == 2.0
+    assert s.effective_qual_daily_trade_cap == 10
+    assert s.effective_qual_min_groundedness == 0.6
+
+
+def test_phase23e_row_min_edge_uses_effective_qual_floor_in_demo():
+    from nbabot.agents.paper import _row_min_edge
+    s = _StubSettings("demo")
+    # qual signal in demo → 0.03
+    assert _row_min_edge(s, "qual") == 0.03
+    # non-qual signal falls through to _execution_min_edge path (demo_min_edge)
+    # which we haven't stubbed — but the qual branch is the one we're gating.
+
+
+def test_phase23e_row_min_edge_uses_live_qual_floor_in_live():
+    from nbabot.agents.paper import _row_min_edge
+    s = _StubSettings("live")
+    assert _row_min_edge(s, "qual") == 0.06
+
+
+def test_phase23e_risk_reads_effective_thresholds_via_getattr():
+    # Verify the risk.py callsite fetches the effective_* attribute when present.
+    # Full integration is covered by real ksobot demo-execute runs; this asserts
+    # the wiring survived refactor.
+    import inspect
+    from nbabot import risk
+    src = inspect.getsource(risk.evaluate_trade_intent)
+    assert "effective_max_game_exposure_units" in src, \
+        "risk.evaluate_trade_intent must read effective_max_game_exposure_units"
+    assert "effective_max_daily_loss_units" in src, \
+        "risk.evaluate_trade_intent must read effective_max_daily_loss_units"
+    assert "effective_max_daily_exposure_units" in src, \
+        "risk.evaluate_trade_intent must read effective_max_daily_exposure_units"

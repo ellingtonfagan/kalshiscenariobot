@@ -63,6 +63,12 @@ class Settings:
     min_edge: float
     demo_min_edge: float
     qual_min_edge: float
+    demo_qual_min_edge: float
+    demo_max_game_exposure_units: float
+    demo_max_daily_exposure_units: float
+    demo_max_daily_loss_units: float
+    demo_qual_daily_trade_cap: int
+    demo_qual_min_groundedness: float
     kalshi_taker_fee_factor: float
     kalshi_maker_fee_factor: float
     near_miss_window: float
@@ -132,6 +138,46 @@ class Settings:
         if self.execution_mode in {"demo", "paper"}:
             return float(self.demo_min_edge)
         return float(self.min_edge)
+
+    @property
+    def _is_demo_mode(self) -> bool:
+        return self.execution_mode in {"demo", "paper"}
+
+    @property
+    def effective_qual_min_edge(self) -> float:
+        if self._is_demo_mode:
+            return float(self.demo_qual_min_edge)
+        return float(self.qual_min_edge)
+
+    @property
+    def effective_max_game_exposure_units(self) -> float:
+        if self._is_demo_mode:
+            return float(self.demo_max_game_exposure_units)
+        return float(self.max_game_exposure_units)
+
+    @property
+    def effective_max_daily_exposure_units(self) -> float:
+        if self._is_demo_mode:
+            return float(self.demo_max_daily_exposure_units)
+        return float(self.max_daily_exposure_units)
+
+    @property
+    def effective_max_daily_loss_units(self) -> float:
+        if self._is_demo_mode:
+            return float(self.demo_max_daily_loss_units)
+        return float(self.max_daily_loss_units)
+
+    @property
+    def effective_qual_daily_trade_cap(self) -> int:
+        if self._is_demo_mode:
+            return int(self.demo_qual_daily_trade_cap)
+        return int(self.qual_daily_trade_cap)
+
+    @property
+    def effective_qual_min_groundedness(self) -> float:
+        if self._is_demo_mode:
+            return float(self.demo_qual_min_groundedness)
+        return float(self.qual_min_groundedness)
 
     def data_path(self, suffix: str) -> Path:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -226,6 +272,21 @@ def load_settings(game_id: str | None = None) -> Settings:
         min_edge=float(os.environ.get("NBABOT_MIN_EDGE", "0.05")),
         demo_min_edge=float(os.environ.get("NBABOT_DEMO_MIN_EDGE", "0.03")),
         qual_min_edge=float(os.environ.get("NBABOT_QUAL_MIN_EDGE", "0.06")),
+        demo_qual_min_edge=float(os.environ.get("NBABOT_DEMO_QUAL_MIN_EDGE", "0.03")),
+        demo_max_game_exposure_units=float(
+            os.environ.get("NBABOT_DEMO_MAX_GAME_EXPOSURE_UNITS", "20")
+        ),
+        demo_max_daily_exposure_units=float(
+            os.environ.get("NBABOT_DEMO_MAX_DAILY_EXPOSURE_UNITS", "30")
+        ),
+        demo_max_daily_loss_units=float(
+            os.environ.get("NBABOT_DEMO_MAX_DAILY_LOSS_UNITS", "5")
+        ),
+        demo_qual_daily_trade_cap=int(
+            os.environ.get("NBABOT_DEMO_QUAL_DAILY_TRADE_CAP", "60")
+        ),
+        demo_qual_min_groundedness=float(
+            os.environ.get("NBABOT_DEMO_QUAL_MIN_GROUNDEDNESS", "0.4")),
         kalshi_taker_fee_factor=float(os.environ.get("NBABOT_KALSHI_TAKER_FEE_FACTOR", "0.07")),
         kalshi_maker_fee_factor=float(os.environ.get("NBABOT_KALSHI_MAKER_FEE_FACTOR", "0.0175")),
         near_miss_window=float(os.environ.get("NBABOT_NEAR_MISS_WINDOW", "0.02")),

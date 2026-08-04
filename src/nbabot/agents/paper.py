@@ -37,7 +37,7 @@ def _row_signal_source(row: dict, meta: dict) -> str:
 
 def _row_min_edge(settings: object, signal_source: str) -> float:
     if signal_source == "qual":
-        return float(getattr(settings, "qual_min_edge", 0.06))
+        return float(getattr(settings, "effective_qual_min_edge", getattr(settings, "qual_min_edge", 0.06)))
     return _execution_min_edge(settings)
 
 
@@ -159,8 +159,8 @@ def execution_limits(ctx: Context, store: ResearchStore, table: str) -> dict[str
         ),
         "qual_daily_trade_cap": int(getattr(
             ctx.settings,
-            "qual_daily_trade_cap",
-            10,
+            "effective_qual_daily_trade_cap",
+            getattr(ctx.settings, "qual_daily_trade_cap", 10),
         )),
     }
 

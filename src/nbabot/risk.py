@@ -167,7 +167,7 @@ def evaluate_trade_intent(intent: Any, settings: Any,
     ))
 
     new_exposure = context.game_exposure_units + stake_units
-    max_game = float(settings.max_game_exposure_units)
+    max_game = float(getattr(settings, "effective_max_game_exposure_units", settings.max_game_exposure_units))
     checks.append(RiskCheck(
         "game_exposure",
         new_exposure <= max_game,
@@ -177,8 +177,8 @@ def evaluate_trade_intent(intent: Any, settings: Any,
     portfolio_exposure = context.portfolio_exposure_units + stake_units
     max_daily_exposure = float(getattr(
         settings,
-        "max_daily_exposure_units",
-        MAX_STAKE_UNITS,
+        "effective_max_daily_exposure_units",
+        getattr(settings, "max_daily_exposure_units", MAX_STAKE_UNITS),
     ))
     checks.append(RiskCheck(
         "daily_portfolio_exposure",
@@ -189,7 +189,7 @@ def evaluate_trade_intent(intent: Any, settings: Any,
         ),
     ))
 
-    max_loss = float(settings.max_daily_loss_units)
+    max_loss = float(getattr(settings, "effective_max_daily_loss_units", settings.max_daily_loss_units))
     checks.append(RiskCheck(
         "daily_loss",
         context.daily_pnl_units >= -max_loss,
