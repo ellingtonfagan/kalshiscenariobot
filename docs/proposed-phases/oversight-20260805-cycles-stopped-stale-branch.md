@@ -119,3 +119,30 @@ that never happens again can never re-evaluate its own staleness.
 No commit/push beyond this doc. No live env vars set. No live orders. Do not
 edit live gates (`live_execute.py`, live gate env vars, `risk.py` thresholds,
 `sizing.py`, `MIN_EDGE` values).
+
+## Update 2026-08-05T12:26 UTC — one oversight cycle later, still frozen
+
+Re-fetched the gist 8h after this PR was opened. It is **byte-identical** to
+the snapshot quoted above:
+
+```
+severity: yellow reasons=last cycle placed 0 orders and had trade-eligible edges; currently-running phase is 172.3h old
+last_cycle: 2026-08-03T23:37:22.048421-04:00
+host: Ellingtons-MacBook-Pro-4.local commit=0d9ae5d37e93b563321c4f03c172e5ff4001385a
+pending_prs: 3,4,5,6,7,8
+```
+
+Same `last_cycle`, same host commit (still the unmerged `phase-25-oversight`
+tip), same `pending_prs` list missing #9/#10/#11/#12. Two things this confirms
+that the original doc could only infer:
+
+1. **The snapshot itself has not regenerated even once in this 8h window.**
+   This isn't just "the monitor was stopped as of 2026-08-04 ~00:25 ET" — it's
+   now confirmed stopped through at least 2026-08-05T12:26 UTC, i.e.
+   `now - last_cycle` ≈ **32.8h** and climbing, not a one-time stale read.
+2. Nothing about the host state changed between the last two oversight checks
+   (this one and the one that opened this PR) — whatever stopped the cron/
+   launchd job on 2026-08-03/04 is still stopped. It did not self-recover.
+
+No new root cause found beyond what's above — this is confirmation, not new
+diagnosis. The investigation checklist and guardrails are unchanged.
