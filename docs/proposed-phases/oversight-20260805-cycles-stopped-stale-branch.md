@@ -146,3 +146,24 @@ that the original doc could only infer:
 
 No new root cause found beyond what's above — this is confirmation, not new
 diagnosis. The investigation checklist and guardrails are unchanged.
+
+## Update 2026-08-05T20:09 UTC — third check, ~40.5h and still frozen
+
+Re-fetched the gist again, ~8h after the previous update. Still **byte-identical**:
+
+```
+severity: yellow reasons=last cycle placed 0 orders and had trade-eligible edges; currently-running phase is 172.3h old
+last_cycle: 2026-08-03T23:37:22.048421-04:00 edges=2 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=0d9ae5d37e93b563321c4f03c172e5ff4001385a
+pending_prs: 3,4,5,6,7,8
+```
+
+`now - last_cycle` ≈ **40.5h** (was 32.8h at the last check, 8h prior — the gap
+grew by exactly one oversight interval, confirming zero new cycles ran in
+between). `pending_prs` still stops at 8, still missing #9 (merged 2026-08-04),
+#10, #11, #12. Three consecutive 8-hourly checks now show the identical frozen
+snapshot — this is not measurement noise, the host has been non-producing for
+at least three full oversight windows.
+
+No new root cause beyond what's already documented above. No code changed on
+this branch. Still investigation-only pending hands-on-host verification.
