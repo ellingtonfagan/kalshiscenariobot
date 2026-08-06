@@ -167,3 +167,28 @@ at least three full oversight windows.
 
 No new root cause beyond what's already documented above. No code changed on
 this branch. Still investigation-only pending hands-on-host verification.
+
+## Update 2026-08-06T04:09 UTC — fourth check, ~48.5h and still frozen
+
+Re-fetched the gist again, ~8h after the previous update. Still **byte-identical**:
+
+```
+severity: yellow reasons=last cycle placed 0 orders and had trade-eligible edges; currently-running phase is 172.3h old
+last_cycle: 2026-08-03T23:37:22.048421-04:00 edges=2 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=0d9ae5d37e93b563321c4f03c172e5ff4001385a
+pending_prs: 3,4,5,6,7,8
+```
+
+`now - last_cycle` ≈ **48.5h** (was 40.5h at the last check, 8h prior — the gap
+grew by exactly one oversight interval again). `pending_prs` still stops at 8.
+Four consecutive 8-hourly checks now show the identical frozen snapshot,
+spanning two full calendar days with zero new cycles recorded. This has moved
+well past "confirm it's not noise" — the host has been non-producing since
+2026-08-04 ~00:25 ET and nothing in the repo or gist indicates it has been
+touched since. This session still cannot distinguish "host asleep/offline" from
+"cron/launchd job removed" from "process running but gist delivery broken"
+without hands-on access; the investigation checklist above is unchanged and is
+the fastest way to tell them apart.
+
+No new root cause beyond what's already documented above. No code changed on
+this branch. Still investigation-only pending hands-on-host verification.
