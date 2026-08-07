@@ -294,3 +294,26 @@ fifth check, so not re-notifying the user this round — will re-escalate on a
 move to red, or once elapsed time crosses that threshold (projected next
 check, ~88.9h, would still be under it; the check after, ~96.9h, would cross
 it if the pattern holds).
+
+## Update 2026-08-07T20:09 UTC — ninth check, ~88.5h and still frozen
+
+Re-fetched the gist again. Still **byte-identical** to every prior check:
+
+```
+severity: yellow reasons=last cycle placed 0 orders and had trade-eligible edges; currently-running phase is 172.3h old
+last_cycle: 2026-08-03T23:37:22.048421-04:00 edges=2 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=0d9ae5d37e93b563321c4f03c172e5ff4001385a
+pending_prs: 3,4,5,6,7,8
+```
+
+`now - last_cycle` ≈ **88.5h** (was 80.9h at the last check — the gap grew by
+almost exactly one oversight interval, the ninth in a row). `pending_prs`
+still stops at 8; #9 and #11 remain unlisted despite merging 2026-08-04. No
+new root cause, no state transition (severity still yellow, not red), no code
+changed on this branch.
+
+Still under the ~96h/4-day re-escalation threshold set at the fifth check, so
+not re-notifying the user this round — but the *next* scheduled check
+(~96.5h) is projected to cross it for the first time. Absent a change before
+then, the following check should escalate on elapsed time alone even without
+a severity transition.
