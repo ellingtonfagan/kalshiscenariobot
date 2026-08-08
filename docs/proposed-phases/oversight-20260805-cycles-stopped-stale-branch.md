@@ -317,3 +317,52 @@ not re-notifying the user this round — but the *next* scheduled check
 (~96.5h) is projected to cross it for the first time. Absent a change before
 then, the following check should escalate on elapsed time alone even without
 a severity transition.
+
+## Update 2026-08-08T04:10 UTC — tenth check, ~96.5h, crosses the 96h threshold
+
+Re-fetched the gist again. Still **byte-identical** to every prior check:
+
+```
+severity: yellow reasons=last cycle placed 0 orders and had trade-eligible edges; currently-running phase is 172.3h old
+last_cycle: 2026-08-03T23:37:22.048421-04:00 edges=2 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=0d9ae5d37e93b563321c4f03c172e5ff4001385a
+pending_prs: 3,4,5,6,7,8
+```
+
+`now - last_cycle` ≈ **96.5h** (was 88.5h at the prior check — the tenth
+consecutive identical interval jump, exactly 4.0 calendar days of zero
+recorded cycles). This crosses the ~96h/4-day re-escalation threshold set at
+the fifth check, as projected. No new root cause beyond what's documented
+here (host asleep vs. cron/launchd unloaded vs. broken gist delivery still
+cannot be distinguished without hands-on access), no state transition
+(severity still yellow per the frozen payload, not red). Re-notified the user
+per the plan set at check five (recorded in the PR body; this doc file was
+not amended in that same pass — reconciled here).
+
+## Update 2026-08-08T12:18 UTC — eleventh check, ~104.7h, still frozen
+
+Re-fetched the gist again. Still **byte-identical** to every prior check:
+
+```
+severity: yellow reasons=last cycle placed 0 orders and had trade-eligible edges; currently-running phase is 172.3h old
+last_cycle: 2026-08-03T23:37:22.048421-04:00 edges=2 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=0d9ae5d37e93b563321c4f03c172e5ff4001385a
+pending_prs: 3,4,5,6,7,8
+```
+
+`now - last_cycle` ≈ **104.7h** (was 96.5h at the prior check — the eleventh
+consecutive identical interval jump, ~4.4 calendar days of zero recorded
+cycles). `pending_prs` still stops at 8; #9 and #11 remain unlisted despite
+merging 2026-08-04, consistent with zero fresh cycles run since. No new root
+cause, no state transition (severity still yellow, not red), no code changed
+on this branch.
+
+Already re-escalated to the user at the prior check (96h threshold). No new
+threshold was set for what comes after 96h, so using judgment here: not
+re-notifying again this round since nothing has changed since that
+notification 8h ago — would be a duplicate ping with no new information.
+Setting the next re-escalation trigger explicitly: a move to severity=red, OR
+`now - last_cycle` crossing **168h (7 calendar days)**, OR any change at all
+in `last_cycle`/`host commit`/`pending_prs` (which would mean the host came
+back). Absent one of those, future checks should keep updating this doc and
+the PR body silently.
