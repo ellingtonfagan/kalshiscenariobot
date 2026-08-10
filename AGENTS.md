@@ -25,9 +25,13 @@ These live in `guardrails.py` and are asserted in `tests/test_smoke.py`. **If yo
 or soften them, the tests must fail.** Do not delete the assertions to make tests pass.
 
 Default run mode is **monitor-only** (`NBABOT_DRY_RUN=1`). Live order placement exists
-only because the human explicitly requested it. It must remain gated behind
-`NBABOT_EXECUTION_MODE=live`, `NBABOT_DRY_RUN=0`, and
-`NBABOT_LIVE_TRADING_ACK=LIVE_TRADES_REAL_MONEY`, and every order must pass `risk.py`.
+only because the human explicitly requested it. It must remain gated behind ALL FOUR
+of these acknowledgments: `NBABOT_EXECUTION_MODE=live`, `NBABOT_DRY_RUN=0`,
+`NBABOT_LIVE_TRADING_ACK=LIVE_TRADES_REAL_MONEY`, and — for broad-slate intents
+(anything other than the single configured game) — `NBABOT_BROAD_SLATE_EXECUTION=
+BROAD_SLATE_TRADES_REAL_MONEY`. `execution.py` enforces all four; the honesty
+contract is that this list stays synchronized with the code, not that it stays
+short. Every order must also pass `risk.py`.
 The research override may waive only the minimum-edge check. It requires the exact
 environment acknowledgment, a named human approver, an evidence rationale, at least
 two sources, and a stake of at most 1 unit. It must never bypass any other risk check,
@@ -209,5 +213,7 @@ The signing logic and ESPN win-prob math were ported from a working Kalshi plugi
 (`cle_watcher.py` / `live_signals.py`). Behavior preserved:
 - RSA-PSS, SHA-256, digest-length salt; timestamp in ms; sign `ts+METHOD+path`.
 - Implied prob = `yes_price_cents / 100`. DraftKings "Live" line is de-vigged for a fair prob.
-The old `monitor-cron.jsonc` (OpenClaw scheduler) is kept under `scheduler/` for reference;
-the portable `scheduler/crontab.txt` is the one that runs anywhere.
+The old `monitor-cron.openclaw.jsonc` (OpenClaw scheduler) is kept under `scheduler/`
+for reference; `scheduler/combined-crontab.txt` is the single portable crontab that
+runs anywhere. `crontab <file>` REPLACES the entire user table, so there is
+deliberately one file to install, not several.

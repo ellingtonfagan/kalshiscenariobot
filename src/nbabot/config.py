@@ -146,7 +146,10 @@ def load_settings(game_id: str | None = None) -> Settings:
     scen = yaml.safe_load((CONFIG_DIR / f"{gid}.scenarios.yaml").read_text())
     sport = str(game.get("sport") or game.get("game", {}).get("sport") or "nba").lower()
 
-    pk_path = Path(os.environ.get("KALSHI_PRIVATE_KEY_PATH", "./secrets/kalshi-private-key.pem"))
+    # Kalshi RSA keys are usually distributed as .txt (PEM-formatted); both real
+    # keys on this repo live at *.txt. Default matches the demo key path and the
+    # README quickstart. .pem still works if you name your key file that way.
+    pk_path = Path(os.environ.get("KALSHI_PRIVATE_KEY_PATH", "./secrets/kalshi-private-key.txt"))
     if not pk_path.is_absolute():
         pk_path = (REPO_ROOT / pk_path).resolve()
 

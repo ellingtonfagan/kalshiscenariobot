@@ -6988,9 +6988,15 @@ def test_cli_returns_phase_exit_code(monkeypatch):
 
 
 def test_demo_scheduler_files_force_demo_without_live_gates():
+    # The 3 overlapping crontabs (demo-crontab.txt / news-watch-crontab.txt /
+    # overnight-crontab.txt / crontab.txt) were consolidated into a single
+    # combined-crontab.txt on branch phase-23a-hygiene, because `crontab <file>`
+    # replaces the entire user table -- shipping four separate installable files
+    # was a documented footgun. Same safety properties are asserted here on the
+    # one remaining file, with the added property that it merges both cadences.
     root = Path(__file__).resolve().parents[1]
     script = (root / "scheduler" / "run-demo-cycle.sh").read_text()
-    crontab = (root / "scheduler" / "demo-crontab.txt").read_text()
+    crontab = (root / "scheduler" / "combined-crontab.txt").read_text()
     combined = script + "\n" + crontab
 
     assert "NBABOT_EXECUTION_MODE=demo" in script
@@ -6999,9 +7005,13 @@ def test_demo_scheduler_files_force_demo_without_live_gates():
     assert "NBABOT_LIVE_TRADING_ACK" not in combined
     assert "LIVE_TRADES_REAL_MONEY" not in combined
     assert "CRON_TZ=America/New_York" in crontab
-    assert "crontab scheduler/demo-crontab.txt" in crontab
+    assert "crontab" in crontab and "combined-crontab.txt" in crontab
     assert "caffeinate -s" in crontab
-    assert crontab.count("$ENTRYPOINT") == 4
+    # Four scheduled demo cycles + one news-watch every 5 min. Different from
+    # the old $ENTRYPOINT-based crontab; combined-crontab uses absolute paths
+    # per the earlier discovery that macOS cron does not expand crontab vars.
+    assert crontab.count("run-demo-cycle.sh") == 4
+    assert "news-watch" in crontab
     assert "date +\\%Y\\%m\\%dT\\%H\\%M\\%S" in crontab
 
 

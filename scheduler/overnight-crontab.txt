@@ -1,7 +1,0 @@
-CRON_TZ=America/New_York
-REPO=/Users/ellingtonfagan/Downloads/nba-scenario-bot
-KSOBOT=$REPO/.venv/bin/ksobot
-# 9 hourly runs, 12am-8am ET (all before 9am), MLB scope. MONITOR-ONLY — no orders.
-# Each run: scan/rank + settlement audit + a status report to your Telegram.
-0 0-8 * * * cd $REPO && NBABOT_SLATE_SPORTS=mlb $KSOBOT daily-cycle >> $REPO/data/overnight_cron.log 2>&1 && $KSOBOT settlement-audit >> $REPO/data/overnight_cron.log 2>&1 && $KSOBOT status >> $REPO/data/overnight_cron.log 2>&1
-
