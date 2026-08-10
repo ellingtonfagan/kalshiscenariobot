@@ -417,6 +417,7 @@ def _fill_rate_rows(ctx: Context) -> list[dict[str, Any]]:
             "liquidity_role": row.get("liquidity_role"),
             "placed": placed,
             "filled": filled,
+            "filled_contracts": row.get("filled_contracts", 0),
             "fill_rate": "n/a" if placed <= 0 else f"{filled / placed * 100:.1f}%",
             "canceled_unfilled": row.get("canceled_unfilled", 0),
         })
@@ -599,7 +600,7 @@ def render_dashboard(ctx: Context) -> str:
     <section class="block"><h2>Edge Candidates</h2>{_render_edge_table(candidates)}</section>
     <section class="block"><h2>Signal Engines</h2>{_table(signal_engine_rows, ["engine","trades_placed","settled","brier","clv_beat_rate","clv_available"])}</section>
     <section class="block"><h2>Validation</h2>{_table(_validation_rows(validation), ["market_family","signal_source","settled","wins","pnl","clv_measured","clv_beat_rate","avg_clv","distance"])}</section>
-    <section class="block"><h2>Fill Rate</h2>{_table(fill_rate_rows, ["signal_source","liquidity_role","placed","filled","fill_rate","canceled_unfilled"])}</section>
+    <section class="block"><h2>Fill Rate</h2>{_table(fill_rate_rows, ["signal_source","liquidity_role","placed","filled","filled_contracts","fill_rate","canceled_unfilled"])}</section>
     <section class="block"><h2>Qual Learning</h2>{_table(_qual_calibration_rows(qual_learning), ["bucket","count","correct","correct_rate","observed_rate","brier"])}</section>
     <section class="block"><h2>Qual Retrieval</h2>{_table(_qual_rag_rows(qual_rag), ["metric","value"])}</section>
     <section class="block"><h2>Data Source Health</h2>{_table(provider_rows, ["provider","configured","state","rows","remaining_credits","detail"])}</section>

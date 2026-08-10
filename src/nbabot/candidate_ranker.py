@@ -27,6 +27,7 @@ EDGE_BELOW_BLOCKER = "edge below dynamic required edge"
 QAQ_SIGNAL_SOURCE = "qual_activated_quant"
 QAQ_MIN_NET_EDGE = 0.005
 SIDES = ("yes", "no")
+LIQUIDITY_ROLES = ("maker", "taker")
 
 
 def _execution_min_edge(settings: Any) -> float:
@@ -149,6 +150,38 @@ def _candidate_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
         -(item.get("net_edge") if item.get("net_edge") is not None else item.get("edge") if item.get("edge") is not None else -999),
         item.get("required_edge", 999),
     )
+
+
+def _role_options(liquidity_role: str) -> tuple[str, ...]:
+    role = str(liquidity_role or "maker").lower()
+    if role == "taker":
+        return ("taker",)
+    if role == "high_conviction":
+        return LIQUIDITY_ROLES
+    return ("maker",)
+
+
+def _choose_liquidity_payload(
+    side_payloads: list[dict[str, Any]],
+    *,
+    liquidity_role: str,
+) -> dict[str, Any]:
+    role = str(liquidity_role or "maker").lower()
+    if role != "high_conviction":
+        return sorted(side_payloads, key=_candidate_sort_key)[0]
+    maker_payloads = [row for row in side_payloads if row.get("liquidity_role") == "maker"]
+    taker_payloads = [row for row in side_payloads if row.get("liquidity_role") == "taker"]
+    maker_choice = sorted(maker_payloads, key=_candidate_sort_key)[0]
+    taker_choice = sorted(taker_payloads, key=_candidate_sort_key)[0]
+    taker_edge = taker_choice.get("net_edge")
+    taker_required = taker_choice.get("required_edge")
+    if (
+        taker_edge is not None
+        and taker_required is not None
+        and float(taker_edge) >= 2 * float(taker_required)
+    ):
+        return taker_choice
+    return maker_choice
 
 
 def select_near_miss_candidates(
@@ -657,7 +690,7 @@ def build_candidate_rankings(
             )
             target = identity.side or identity.participant
             consensus = consensus_prob(consensus_rows, target_name=target)
-        maker = str(liquidity_role or "maker").lower() != "taker"
+        role_options = _role_options(liquidity_role)
         signal_source = "consensus"
         qual_signal = _qual_signal_for(row, qual_signals)
         qual_delta = None
@@ -673,7 +706,7 @@ def build_candidate_rankings(
         yes_executable = ExecutablePrice.from_orderbook_metrics(
             row.get("orderbook") or {},
             "yes",
-            maker=maker,
+            maker=True,
         )
         confluence = evaluate_confluence(
             consensus=consensus,
@@ -715,52 +748,56 @@ def build_candidate_rankings(
             require_consensus = False
         side_payloads = []
         side_economics: dict[str, dict[str, Any]] = {}
-        for side in SIDES:
-            executable = ExecutablePrice.from_orderbook_metrics(
-                row.get("orderbook") or {},
-                side,
-                maker=maker,
-            )
-            edge = evaluate_market(
-                {
-                    **match,
-                    "ticker": ticker,
-                    "close_time": row.get("close_time"),
-                },
-                eval_consensus,
-                executable,
-                ctx.settings,
-                base_min_edge=eval_base_min_edge,
-                now=now,
-                require_consensus=require_consensus,
-                require_exact_match=signal_source != "qual",
-            )
-            side_payload = edge.as_dict()
-            side_payload["side"] = side
-            side_payload["yes_model_prob"] = eval_consensus.get("fair_prob")
-            side_payload["no_model_prob"] = (
-                round(1.0 - float(eval_consensus["fair_prob"]), 6)
-                if eval_consensus.get("fair_prob") is not None else None
-            )
-            side_payloads.append(side_payload)
-            side_economics[side] = {
-                key: side_payload.get(key)
-                for key in (
-                    "side",
-                    "model_prob",
-                    "executable_price",
-                    "raw_edge",
-                    "net_edge",
-                    "edge",
-                    "expected_fee_cents",
-                    "expected_fee_prob",
-                    "liquidity_role",
-                    "required_edge",
-                    "passes_edge",
-                    "blockers",
+        for role in role_options:
+            maker = role == "maker"
+            for side in SIDES:
+                executable = ExecutablePrice.from_orderbook_metrics(
+                    row.get("orderbook") or {},
+                    side,
+                    maker=maker,
                 )
-            }
-        payload = sorted(side_payloads, key=_candidate_sort_key)[0]
+                edge = evaluate_market(
+                    {
+                        **match,
+                        "ticker": ticker,
+                        "close_time": row.get("close_time"),
+                    },
+                    eval_consensus,
+                    executable,
+                    ctx.settings,
+                    base_min_edge=eval_base_min_edge,
+                    now=now,
+                    require_consensus=require_consensus,
+                    require_exact_match=signal_source != "qual",
+                )
+                side_payload = edge.as_dict()
+                side_payload["side"] = side
+                side_payload["yes_model_prob"] = eval_consensus.get("fair_prob")
+                side_payload["no_model_prob"] = (
+                    round(1.0 - float(eval_consensus["fair_prob"]), 6)
+                    if eval_consensus.get("fair_prob") is not None else None
+                )
+                side_payloads.append(side_payload)
+                side_economics[f"{role}:{side}"] = {
+                    key: side_payload.get(key)
+                    for key in (
+                        "side",
+                        "model_prob",
+                        "executable_price",
+                        "raw_edge",
+                        "net_edge",
+                        "edge",
+                        "expected_fee_cents",
+                        "expected_fee_prob",
+                        "liquidity_role",
+                        "required_edge",
+                        "passes_edge",
+                        "blockers",
+                    )
+                }
+                if role_options == (role,):
+                    side_economics[side] = side_economics[f"{role}:{side}"]
+        payload = _choose_liquidity_payload(side_payloads, liquidity_role=liquidity_role)
         chosen_signal_source = signal_source
         would_pass_before_confluence = bool(payload["passes_edge"])
         confluence_shadow = False
@@ -768,7 +805,7 @@ def build_candidate_rankings(
         chosen_executable = ExecutablePrice.from_orderbook_metrics(
             row.get("orderbook") or {},
             str(payload.get("side") or "yes"),
-            maker=maker,
+            maker=str(payload.get("liquidity_role") or "maker") == "maker",
         )
         if signal_source == "consensus" and qaq_verdict is not None and not confluence.veto:
             payload = _with_qaq_evidence(
@@ -793,8 +830,9 @@ def build_candidate_rankings(
             if COMPOSITE_TRADE_BLOCKER not in payload["blockers"]:
                 payload["blockers"].append(COMPOSITE_TRADE_BLOCKER)
             payload["passes_edge"] = False
-        side_economics[str(payload.get("side") or "yes")] = {
-            **side_economics.get(str(payload.get("side") or "yes"), {}),
+        side_key = f"{payload.get('liquidity_role') or 'maker'}:{payload.get('side') or 'yes'}"
+        side_economics[side_key] = {
+            **side_economics.get(side_key, {}),
             "passes_edge": payload.get("passes_edge"),
             "blockers": payload.get("blockers"),
             "required_edge": payload.get("required_edge"),

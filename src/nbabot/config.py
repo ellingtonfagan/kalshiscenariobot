@@ -49,6 +49,7 @@ class Settings:
     research_override_ack: str
     research_override_max_units: float
     demo_api_base: str
+    demo_taker_mode: str
     kalshi_demo_api_key: str
     kalshi_demo_private_key_path: Path
     paper_demo_daily_trade_cap: int
@@ -207,6 +208,7 @@ def load_settings(game_id: str | None = None) -> Settings:
             "NBABOT_DEMO_API_BASE",
             "https://external-api.demo.kalshi.co/trade-api/v2",
         ).rstrip("/"),
+        demo_taker_mode=os.environ.get("NBABOT_DEMO_TAKER_MODE", "off").lower(),
         kalshi_demo_api_key=os.environ.get("KALSHI_DEMO_API_KEY", ""),
         kalshi_demo_private_key_path=demo_pk_path,
         paper_demo_daily_trade_cap=int(os.environ.get("NBABOT_PAPER_DEMO_DAILY_TRADE_CAP", "50")),

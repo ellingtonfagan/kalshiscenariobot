@@ -20,6 +20,15 @@ def _format(payload: dict) -> str:
     )
 
 
+def _liquidity_role(ctx: Context) -> str:
+    if str(getattr(ctx.settings, "execution_mode", "paper") or "paper").lower() != "demo":
+        return "maker"
+    mode = str(getattr(ctx.settings, "demo_taker_mode", "off") or "off").lower()
+    if mode in {"always", "high_conviction"}:
+        return mode if mode == "high_conviction" else "taker"
+    return "maker"
+
+
 def run(ctx: Context | None = None) -> dict:
     ctx = ctx or load_context()
     from . import market_matcher, slate_discovery
@@ -62,7 +71,13 @@ def run(ctx: Context | None = None) -> dict:
         tickers=tickers,
     )
     store = ResearchStore(ctx.settings.research_db_path)
-    payload = build_candidate_rankings(ctx, slate, matches, qual_signals=qual_signals)
+    payload = build_candidate_rankings(
+        ctx,
+        slate,
+        matches,
+        qual_signals=qual_signals,
+        liquidity_role=_liquidity_role(ctx),
+    )
     near_misses = select_near_miss_candidates(payload.get("rows", []), ctx.settings)
     investigations: list[dict] = []
     investigation_inserts = 0
@@ -107,6 +122,7 @@ def run(ctx: Context | None = None) -> dict:
                 matches,
                 qual_signals=qual_signals,
                 qaq_verdicts=verdicts,
+                liquidity_role=_liquidity_role(ctx),
             )
     payload["near_miss_count"] = len(near_misses)
     payload["near_miss_investigations"] = investigations

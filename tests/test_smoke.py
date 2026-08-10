@@ -547,6 +547,7 @@ class _ExecSettings:
     research_override_max_units = 1.0
     dry_run = True
     demo_api_base = "https://demo-api.kalshi.co/trade-api/v2"
+    demo_taker_mode = "off"
     kalshi_demo_api_key = ""
     paper_demo_daily_trade_cap = 50
     qual_daily_trade_cap = 10
@@ -2161,6 +2162,7 @@ def test_reconciliation_grades_late_fill_and_excludes_unfilled_canceled(tmp_path
     fill_rate = store.fill_rate_summary()["buckets"][0]
     assert fill_rate["placed"] == 2
     assert fill_rate["filled"] == 1
+    assert fill_rate["filled_contracts"] == pytest.approx(1.0)
     assert fill_rate["canceled_unfilled"] == 1
 
 
@@ -2197,6 +2199,83 @@ def test_paper_execution_is_idempotent(tmp_path):
     assert first.status == "filled"
     assert second.client_order_id == first.client_order_id
     assert store.count_orders("paper_orders") == 1
+
+
+def test_batch_executor_attempts_each_intent_until_caps(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    store = research.ResearchStore(settings.research_db_path)
+    audit = __import__("nbabot.audit", fromlist=["AuditTrail"]).AuditTrail(tmp_path, store)
+    intents = [
+        _intent(scenario_id=f"S{i}", ticker=f"KXTEST{i}", stake_units=0.1)
+        for i in range(5)
+    ]
+
+    class DummyContext:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def read_json(self, suffix):
+            return {}
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    result = paper.execute_intent_batch(
+        ctx=DummyContext(settings),
+        store=store,
+        audit=audit,
+        intents=intents,
+        table="paper_orders",
+        mode="paper",
+        executor=lambda intent, decision: execution.execute_paper(intent, decision, settings, store, audit),
+        artifact="paper.json",
+    )
+
+    assert result["attempted_count"] == 5
+    assert result["approved_count"] == 5
+    assert store.count_orders("paper_orders") == 5
+
+
+def test_batch_executor_stops_on_daily_cap_with_reason(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.max_daily_exposure_units = 0.25
+    store = research.ResearchStore(settings.research_db_path)
+    audit = __import__("nbabot.audit", fromlist=["AuditTrail"]).AuditTrail(tmp_path, store)
+    intents = [
+        _intent(scenario_id=f"S{i}", ticker=f"KXCAP{i}", stake_units=0.1)
+        for i in range(5)
+    ]
+
+    class DummyContext:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def read_json(self, suffix):
+            return {}
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    result = paper.execute_intent_batch(
+        ctx=DummyContext(settings),
+        store=store,
+        audit=audit,
+        intents=intents,
+        table="paper_orders",
+        mode="paper",
+        executor=lambda intent, decision: execution.execute_paper(intent, decision, settings, store, audit),
+        artifact="paper.json",
+    )
+
+    assert result["attempted_count"] == 3
+    assert result["approved_count"] == 2
+    assert result["rejected_count"] == 1
+    assert result["stopped_reason"] == "daily portfolio exposure 0.300 units <= max 0.250"
+    assert store.count_orders("paper_orders") == 2
 
 
 def test_settlement_audit_records_paper_outcome_and_clv(tmp_path, monkeypatch):
@@ -3871,6 +3950,50 @@ def test_book_watch_captures_and_stores_orderbooks(tmp_path, monkeypatch):
     assert rows[0]["ticker"] == "KXTEST"
 
 
+def test_market_candidates_artifact_writes_canonical_key_and_deprecated_rows(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc).isoformat()
+
+    class DummyContext:
+        settings = _ExecSettings(tmp_path)
+
+        def read_json(self, suffix):
+            return {
+                "market_snapshot.json": {"generated_at": now, "rows": []},
+                "slate_candidates.json": {"generated_at": now, "candidates": []},
+                "slate_verification.json": {"generated_at": now, "rows": []},
+                "book_watch.json": {"generated_at": now},
+                "market_matches.json": {"generated_at": now, "rows": []},
+                "candidate_ranker.json": {"generated_at": now, "rows": []},
+            }.get(suffix)
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    payload = {
+        "game_id": "TEST-GAME",
+        "generated_at": now,
+        "candidate_count": 2,
+        "trade_eligible_count": 1,
+        "market_candidates": [
+            {"ticker": "KXYES", "trade_eligible": True},
+            {"ticker": "KXNO", "trade_eligible": False},
+        ],
+        "guardrail_footer": guardrails.GUARDRAIL_FOOTER,
+    }
+    monkeypatch.setattr(research_agent, "refresh_if_stale", lambda ctx, suffix, runner: {"fresh": True})
+    monkeypatch.setattr(research_agent, "research_bundle", lambda ctx, slate_payload, verification: dict(payload))
+    monkeypatch.setattr(research_agent, "deliver", lambda *args, **kwargs: None)
+
+    research_agent.run(DummyContext())
+    handoff = json.loads((tmp_path / "TEST-GAME.market_candidates.json").read_text())
+
+    assert handoff["market_candidates"] == [{"ticker": "KXYES", "trade_eligible": True}]
+    assert handoff["rows"] == handoff["market_candidates"]
+    assert handoff["deprecated_keys"] == ["rows"]
+
+
 def test_odds_refresh_marks_stale_and_fresh_artifacts(tmp_path):
     now = datetime.now(timezone.utc)
 
@@ -3894,6 +4017,48 @@ def test_odds_refresh_marks_stale_and_fresh_artifacts(tmp_path):
     ctx.payload = {"generated_at": now.isoformat()}
     fresh_report = odds_refresh.freshness_report(ctx, "slate_candidates.json")
     assert fresh_report["fresh"] is True
+
+
+def test_slate_verify_classifies_legitimate_blockers(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.data_path("log.jsonl").write_text("{}\n")
+    settings.data_path("backtest.json").write_text("{}")
+
+    class DummyContext:
+        def __init__(self, settings):
+            self.settings = settings
+
+    payload = slate.verify_slate(DummyContext(settings), {
+        "candidates": [
+            {
+                "candidate_id": "mlb:verified",
+                "structured_sources": ["kalshi", "the_odds_api"],
+                "kalshi_markets": [{"ticker": "KXMLBGAME-TEST"}],
+                "mapped_kalshi_markets": [{"ticker": "KXMLBGAME-TEST"}],
+                "line_markets": [{"provider": "the_odds_api", "market": "h2h"}],
+            },
+            {
+                "candidate_id": "kalshi:future",
+                "structured_sources": ["kalshi"],
+                "kalshi_markets": [{"ticker": "KXMLB-26-NYY", "mapping_status": "open_kalshi"}],
+                "mapped_kalshi_markets": [],
+            },
+            {
+                "candidate_id": "espn:hidden",
+                "structured_sources": [],
+                "fallback_sources": ["espn_public_site_api"],
+                "kalshi_markets": [],
+                "mapped_kalshi_markets": [],
+            },
+        ],
+    })
+
+    assert payload["verified_count"] == 1
+    counts = payload["blocker_category_counts"]
+    assert counts["unpriceable_no_structured_sportsbook"] == 2
+    assert counts["unmapped_scenario_market"] == 2
+    assert counts["identity_coverage_no_kalshi"] == 1
+    assert counts["fallback_only"] == 1
 
 
 def test_market_identity_exact_match_handles_team_order_and_totals():
@@ -3921,6 +4086,40 @@ def test_market_identity_exact_match_handles_team_order_and_totals():
 
     assert matches[0]["match_type"] == "exact"
     assert kalshi_identity.event_key == line_identity.event_key
+
+
+def test_market_identity_exact_match_handles_complementary_spread_side():
+    candidate = {
+        "candidate_id": "mlb:yankees:redsox",
+        "sport": "mlb",
+        "away_team": "Boston Red Sox",
+        "home_team": "New York Yankees",
+        "start_time": "2026-07-27T23:10:00Z",
+    }
+    kalshi_identity = market_identity.resolve_kalshi_market({
+        "ticker": "KXMLBSPREAD-26JUL271910BOSNYY-NYY2",
+        "event_ticker": "KXMLBSPREAD-26JUL271910BOSNYY",
+        "series_ticker": "KXMLBSPREAD",
+        "sport": "mlb",
+    }, candidate)
+    line_identity = market_identity.resolve_line_market({
+        "provider": "the_odds_api",
+        "market": "spreads",
+        "name": "Boston Red Sox",
+        "point": 1.5,
+    }, candidate)
+
+    matches = market_identity.match_identities(kalshi_identity, [{
+        "candidate_id": candidate["candidate_id"],
+        "line": {"point": 1.5, "name": "Boston Red Sox"},
+        "identity": line_identity,
+    }])
+
+    assert kalshi_identity.side == "newyorkyankees"
+    assert kalshi_identity.line == pytest.approx(-1.5)
+    assert line_identity.side == "bostonredsox"
+    assert line_identity.line == pytest.approx(1.5)
+    assert matches[0]["match_type"] == "exact"
 
 
 def test_market_identity_resolves_open_kalshi_title_to_event_key():
@@ -4951,6 +5150,91 @@ def test_candidate_ranker_demo_floor_passes_marginal_edge_while_live_is_unchange
         now=now_dt,
     )
     assert unchanged_live["rows"][0] == live_row
+
+
+def test_candidate_ranker_demo_taker_modes_preserve_fee_edge_floor(tmp_path, monkeypatch):
+    now_dt = datetime(2026, 7, 7, 19, 0, tzinfo=timezone.utc)
+    now = now_dt.isoformat()
+    slate_payload, market_matches = _ranker_fixture(now)
+
+    def fixed_consensus(_rows, target_name=None):
+        return {
+            "fair_prob": 0.64,
+            "book_count": 6,
+            "sources": ["pinnacle", "circa", "draftkings"],
+            "disagreement_std": 0.0,
+        }
+
+    monkeypatch.setattr(candidate_ranker_core, "consensus_prob", fixed_consensus)
+
+    class DummyContext:
+        def __init__(self, settings):
+            self.settings = settings
+
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    off = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(settings),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        liquidity_role="maker",
+    )["rows"][0]
+    always = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(settings),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        liquidity_role="taker",
+    )["rows"][0]
+    high = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(settings),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        liquidity_role="high_conviction",
+    )["rows"][0]
+
+    assert off["liquidity_role"] == "maker"
+    assert always["liquidity_role"] == "taker"
+    assert high["liquidity_role"] == "taker"
+    assert high["net_edge"] >= 2 * high["required_edge"]
+    assert high["passes_edge"] is True
+
+    def marginal_consensus(_rows, target_name=None):
+        return {
+            "fair_prob": 0.565,
+            "book_count": 6,
+            "sources": ["pinnacle", "circa", "draftkings"],
+            "disagreement_std": 0.0,
+        }
+
+    monkeypatch.setattr(candidate_ranker_core, "consensus_prob", marginal_consensus)
+    marginal = candidate_ranker_core.build_candidate_rankings(
+        DummyContext(settings),
+        slate_payload,
+        market_matches,
+        now=now_dt,
+        liquidity_role="high_conviction",
+    )["rows"][0]
+
+    assert marginal["liquidity_role"] == "maker"
+
+
+def test_candidate_ranker_agent_taker_mode_is_demo_only(tmp_path):
+    class DummyContext:
+        def __init__(self, settings):
+            self.settings = settings
+
+    demo_settings = _ExecSettings(tmp_path / "demo")
+    demo_settings.execution_mode = "demo"
+    demo_settings.demo_taker_mode = "always"
+    live_settings = _ExecSettings(tmp_path / "live")
+    live_settings.execution_mode = "live"
+    live_settings.demo_taker_mode = "always"
+
+    assert candidate_ranker._liquidity_role(DummyContext(demo_settings)) == "taker"
+    assert candidate_ranker._liquidity_role(DummyContext(live_settings)) == "maker"
 
 
 def _qual_ranker_fixture(now: str):

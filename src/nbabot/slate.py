@@ -1059,23 +1059,41 @@ def verify_slate(ctx: Any, slate: dict[str, Any]) -> dict[str, Any]:
     for candidate in candidates:
         structured = set(candidate.get("structured_sources") or [])
         hidden_only = structured <= set() and candidate.get("fallback_sources")
-        has_structured_book = bool(STRUCTURED_BOOK_PROVIDERS & structured)
-        has_kalshi = "kalshi" in structured or bool(candidate.get("kalshi_markets"))
-        mapped = bool(candidate.get("mapped_kalshi_markets"))
+        line_markets = candidate.get("line_markets") or []
+        line_providers = {
+            str(line.get("provider") or "")
+            for line in line_markets
+            if isinstance(line, dict)
+        }
+        has_structured_book = bool(STRUCTURED_BOOK_PROVIDERS & (structured | line_providers))
+        kalshi_markets = candidate.get("kalshi_markets") or []
+        mapped_markets = candidate.get("mapped_kalshi_markets") or [
+            market for market in kalshi_markets
+            if isinstance(market, dict) and market.get("mapping_status") == "mapped"
+        ]
+        has_kalshi = "kalshi" in structured or bool(kalshi_markets or mapped_markets)
+        mapped = bool(mapped_markets)
         reasons = []
+        categories = []
         if not has_structured_book:
             reasons.append("missing structured sportsbook source")
+            categories.append("unpriceable_no_structured_sportsbook")
         if not has_kalshi:
             reasons.append("missing Kalshi market mapping")
+            categories.append("identity_coverage_no_kalshi")
         if not mapped:
             reasons.append("missing mapped scenario market")
+            categories.append("unmapped_scenario_market")
         if hidden_only:
             reasons.append("fallback/hidden sources only")
+            categories.append("fallback_only")
         if candidate["candidate_id"] in duplicate_keys:
             reasons.append("duplicate candidate identity")
+            categories.append("duplicate_identity")
         needs_backtest = not learning_log.exists() or not backtest_artifact.exists()
         if needs_backtest:
             reasons.append("needs local learning-log/backtest coverage before autonomous sizing confidence")
+            categories.append("needs_backtest")
         approved = has_structured_book and has_kalshi and mapped and not hidden_only and candidate["candidate_id"] not in duplicate_keys
         rows.append({
             "candidate_id": candidate["candidate_id"],
@@ -1085,7 +1103,12 @@ def verify_slate(ctx: Any, slate: dict[str, Any]) -> dict[str, Any]:
             "requires_more_backtest_data": needs_backtest,
             "structured_sources": sorted(structured),
             "reasons": reasons,
+            "blocker_categories": categories,
         })
+    category_counts: dict[str, int] = {}
+    for row in rows:
+        for category in row["blocker_categories"]:
+            category_counts[category] = category_counts.get(category, 0) + 1
     return {
         "game_id": ctx.settings.game_id,
         "verified_at": utc_now(),
@@ -1094,6 +1117,7 @@ def verify_slate(ctx: Any, slate: dict[str, Any]) -> dict[str, Any]:
         "execution_ready_count": sum(1 for row in rows if row["approved_for_execution"]),
         "learning_log_exists": learning_log.exists(),
         "backtest_artifact_exists": backtest_artifact.exists(),
+        "blocker_category_counts": dict(sorted(category_counts.items())),
         "rows": rows,
         "guardrail_footer": GUARDRAIL_FOOTER,
     }
