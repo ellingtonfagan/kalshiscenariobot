@@ -194,6 +194,15 @@ If you change a contract, update every caller AND `tests/test_smoke.py` in the s
   at the edge.
 - Keep alerts to the compact block in `alerts.format_block`. No walls of text.
 
+## 5b. Branch-per-phase rule (set 2026-07-29)
+
+Every improvement / Codex phase runs on its own branch cut from the trunk tip.
+
+- Naming convention: `phase-NN-short-slug` (e.g. `phase-23-batch-executor`).
+- Trunk is `codex/broad-slate-market-matcher`; do **not** commit new phase work directly to trunk.
+- Work + independent verification happen on the branch. Push the branch, then merge only after verification passes.
+- Rationale: this project surfaced 6+ silent defects in shipped Codex work when everything landed on a single long-lived branch. Branching contains blast radius — `git branch -D phase-N` reverts a bad phase in one command.
+
 ## 6. Porting notes (this came from a Claude Code plugin)
 
 The signing logic and ESPN win-prob math were ported from a working Kalshi plugin
