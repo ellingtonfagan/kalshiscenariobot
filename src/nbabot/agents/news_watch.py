@@ -1,6 +1,7 @@
 """Phase: news-watch. Cheap RSS diff that can trigger one demo cycle."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,7 +21,14 @@ from .base import Context, load_context
 
 
 def _history_from_artifact(ctx: Context) -> list[dict[str, Any]]:
-    prior = ctx.read_json("news_watch.json") or {}
+    try:
+        prior = ctx.read_json("news_watch.json") or {}
+    except json.JSONDecodeError:
+        path = ctx.settings.data_path("news_watch.json")
+        try:
+            prior, _ = json.JSONDecoder().raw_decode(path.read_text())
+        except Exception:
+            prior = {}
     rows = prior.get("trigger_history")
     return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 

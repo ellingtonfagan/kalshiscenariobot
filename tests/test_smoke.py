@@ -41,6 +41,7 @@ from nbabot import (  # noqa: E402
     market_identity,
     market_matcher as market_matcher_core,
     market_discovery,
+    monitor as monitor_core,
     orderbook,
     odds_math,
     odds_refresh,
@@ -60,6 +61,7 @@ from nbabot import (  # noqa: E402
     slate,
     soccer_research,
     sports,
+    telegram_bot as telegram_bot_core,
     validation_report as validation_report_core,
     units,
     ui,
@@ -76,9 +78,12 @@ from nbabot.agents import (  # noqa: E402
     health_check,
     historical_backtest,
     market_matcher,
+    meta_check,
+    monitor as monitor_agent,
     live_execute,
     news_ingest,
     news_watch,
+    order_reconcile,
     paper,
     portfolio_sync,
     qual_postmortem,
@@ -93,6 +98,7 @@ from nbabot.agents import (  # noqa: E402
     snapshot_market,
     source_check,
     status,
+    telegram_bot as telegram_bot_agent,
     telegram_test,
     validation_report as validation_report_agent,
 )
@@ -160,6 +166,137 @@ def test_telegram_test_phase_requires_telegram_target(monkeypatch):
     assert result["ok"] is False
     assert result["reason"] == "deliver-target-not-telegram"
     assert "NBABOT_DELIVER_TO" in messages[0][0]
+
+
+def test_telegram_bot_status_command_uses_local_monitor_artifact(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    (settings.data_dir / "monitor.md").write_text("# monitor TEST-GAME\n- severity: green\n")
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    sent = []
+
+    class FakeRequests:
+        @staticmethod
+        def post(url, data=None, headers=None, timeout=None):
+            payload = json.loads(data)
+            if url.endswith("/getUpdates"):
+                assert payload["allowed_updates"] == ["message"]
+
+                class Response:
+                    def json(self):
+                        return {
+                            "ok": True,
+                            "result": [
+                                {
+                                    "update_id": 40,
+                                    "message": {
+                                        "chat": {"id": "123"},
+                                        "text": "/status",
+                                    },
+                                }
+                            ],
+                        }
+
+                return Response()
+            sent.append((url, payload))
+
+            class Response:
+                def json(self):
+                    return {"ok": True}
+
+            return Response()
+
+    monkeypatch.setenv("NBABOT_TELEGRAM_BOT_TOKEN", "TOKEN")
+    monkeypatch.setenv("NBABOT_TELEGRAM_CHAT_ID", "123")
+
+    result = telegram_bot_core.run_once(DummyContext(), requests_module=FakeRequests)
+
+    assert result["ok"] is True
+    assert result["handled_count"] == 1
+    assert result["next_offset"] == 41
+    assert sent[0][0] == "https://api.telegram.org/botTOKEN/sendMessage"
+    assert sent[0][1]["chat_id"] == "123"
+    assert "# monitor TEST-GAME" in sent[0][1]["text"]
+    assert "HOPENY" in sent[0][1]["text"]
+    assert json.loads((settings.data_dir / "telegram_bot_offset.json").read_text())["offset"] == 41
+
+
+def test_telegram_bot_ignores_unconfigured_chat_and_phase_registered(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    sent = []
+
+    class FakeRequests:
+        @staticmethod
+        def post(url, data=None, headers=None, timeout=None):
+            if url.endswith("/getUpdates"):
+                class Response:
+                    def json(self):
+                        return {
+                            "ok": True,
+                            "result": [
+                                {
+                                    "update_id": 7,
+                                    "message": {
+                                        "chat": {"id": "999"},
+                                        "text": "/status",
+                                    },
+                                }
+                            ],
+                        }
+
+                return Response()
+            sent.append(json.loads(data))
+
+            class Response:
+                def json(self):
+                    return {"ok": True}
+
+            return Response()
+
+    monkeypatch.setenv("NBABOT_TELEGRAM_BOT_TOKEN", "TOKEN")
+    monkeypatch.setenv("NBABOT_TELEGRAM_CHAT_ID", "123")
+
+    result = telegram_bot_core.run_once(DummyContext(), requests_module=FakeRequests)
+
+    assert result["handled_count"] == 0
+    assert result["updates"][0]["reason"] == "unauthorized-chat"
+    assert sent == []
+    assert PHASES["telegram-bot"] == telegram_bot_agent.run
+
+
+def test_telegram_bot_requires_configured_chat_id(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+
+    monkeypatch.setenv("NBABOT_TELEGRAM_BOT_TOKEN", "TOKEN")
+    monkeypatch.delenv("NBABOT_TELEGRAM_CHAT_ID", raising=False)
+
+    result = telegram_bot_core.run_once(DummyContext())
+
+    assert result == {"ok": False, "reason": "missing-telegram-chat-id", "updates": []}
 
 
 # ── kalshi title parsing ────────────────────────────────────────────────────────
@@ -6853,6 +6990,11 @@ def test_scheduled_demo_cycle_reports_once_after_settlement_status(tmp_path, mon
             ],
         }
 
+    def fake_order_reconcile(ctx):
+        assert ctx.settings.deliver_to == "stdout"
+        calls.append("order-reconcile")
+        return {"checked_count": 2, "fills_inserted_count": 0, "canceled_count": 1}
+
     def fake_settlement(ctx):
         assert ctx.settings.deliver_to == "stdout"
         calls.append("settlement-audit")
@@ -6874,6 +7016,7 @@ def test_scheduled_demo_cycle_reports_once_after_settlement_status(tmp_path, mon
         return {"completed_count": 1, "queued_count": 0, "missing_recap_count": 0}
 
     messages = []
+    monkeypatch.setattr(order_reconcile, "run", fake_order_reconcile)
     monkeypatch.setattr(daily_cycle, "run", fake_daily)
     monkeypatch.setattr(settlement_audit, "run", fake_settlement)
     monkeypatch.setattr(qual_postmortem, "run", fake_postmortem)
@@ -6886,7 +7029,7 @@ def test_scheduled_demo_cycle_reports_once_after_settlement_status(tmp_path, mon
 
     result = scheduled_demo_cycle.run(DummyContext())
 
-    assert calls == ["daily-cycle", "settlement-audit", "qual-postmortem", "status"]
+    assert calls == ["order-reconcile", "daily-cycle", "settlement-audit", "qual-postmortem", "status"]
     assert settings.execution_mode == "demo"
     assert settings.deliver_to == "telegram:123"
     assert result["exit_code"] == 0
@@ -6899,9 +7042,161 @@ def test_scheduled_demo_cycle_reports_once_after_settlement_status(tmp_path, mon
     assert "sports=mlb,nba" in messages[0][0]
     assert "candidates=10 edges_found=2 trade_eligible=1" in messages[0][0]
     assert "demo_orders=1 tickers=KXDEMO-YES" in messages[0][0]
+    assert "pre_reconcile checked=2 fills=0 canceled=1" in messages[0][0]
     assert "settlement checked=1 settled=1 pending=0 errors=0" in messages[0][0]
     assert "postmortems completed=1 queued=0 missing_recaps=0" in messages[0][0]
     assert (tmp_path / "TEST-GAME.scheduled_demo_cycle.json").exists()
+
+
+def test_scheduled_demo_cycle_reconciles_stale_exchange_orders_before_exposure(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    settings.deliver_to = "telegram:123"
+    settings.kalshi_demo_api_key = "demo-key"
+    settings.effective_max_game_exposure_units = 20.0
+    settings.effective_max_daily_exposure_units = 30.0
+    store = research.ResearchStore(settings.research_db_path)
+    stale_intent = _intent(
+        scenario_id="STALE",
+        ticker="KXSTALE",
+        contracts=187,
+        price_cents=69,
+        stake_units=8.60,
+    )
+    stale_request = execution.OrderRequest(
+        client_order_id=execution.client_order_id(stale_intent, "demo"),
+        ticker=stale_intent.ticker,
+        action="buy",
+        side="yes",
+        order_type="limit",
+        count=stale_intent.contracts,
+        price_cents=stale_intent.price_cents,
+    )
+    stale_receipt = execution.OrderReceipt(
+        stale_request.client_order_id,
+        "demo",
+        "submitted",
+        {"order_id": "EX-STALE"},
+    )
+    store.record_order(
+        "demo_orders",
+        settings.game_id,
+        stale_intent,
+        risk.RiskDecision(True, []),
+        stale_request,
+        stale_receipt,
+    )
+    candidate = _intent(
+        scenario_id="NEXT",
+        ticker="KXNEXT",
+        contracts=47,
+        price_cents=31,
+        stake_units=0.93652,
+    )
+    calls = []
+    decisions = {}
+
+    class DummyKalshi:
+        open_order_active = True
+
+        def demo_balance_cents(self, base):
+            return 100000
+
+        def demo_positions(self, base):
+            return {"KXPOSITION": -162}
+
+        def demo_orders(self, base, **params):
+            if not self.open_order_active:
+                return {"orders": []}
+            return {
+                "orders": [
+                    {
+                        "ticker": "KXSTALE",
+                        "status": "resting",
+                        "side": "yes",
+                        "yes_price_dollars": "0.6900",
+                        "remaining_count_fp": "187.00",
+                    }
+                ]
+            }
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = DummyKalshi()
+
+        def read_json(self, suffix):
+            return {}
+
+        def write_json(self, suffix, payload):
+            path = self.settings.data_path(suffix)
+            path.write_text(json.dumps(payload, default=str))
+            return path
+
+    ctx = DummyContext()
+    stale_limits = paper.execution_limits(ctx, store, "demo_orders")
+    stale_decision = risk.evaluate_trade_intent(
+        candidate,
+        settings,
+        risk.RiskContext(
+            game_exposure_units=float(stale_limits["game_exposure_units"]),
+            portfolio_exposure_units=float(stale_limits["portfolio_exposure_units"]),
+        ),
+    )
+    assert not stale_decision.approved
+    assert any("game exposure" in reason for reason in stale_decision.reasons)
+
+    def fake_order_reconcile(inner_ctx):
+        assert inner_ctx.settings.deliver_to == "stdout"
+        calls.append("order-reconcile")
+        inner_ctx.kalshi.open_order_active = False
+        store.record_order_lifecycle(
+            client_order_id=stale_request.client_order_id,
+            game_id=settings.game_id,
+            mode="demo",
+            status="canceled",
+            terminal=True,
+            filled_count=0,
+            cancel_reason="resting_order_age_4313m_exceeds_90m",
+        )
+        return {"checked_count": 1, "fills_inserted_count": 0, "canceled_count": 1}
+
+    def fake_daily(inner_ctx):
+        assert inner_ctx.settings.deliver_to == "stdout"
+        calls.append("daily-cycle")
+        limits = paper.execution_limits(inner_ctx, store, "demo_orders")
+        decision = risk.evaluate_trade_intent(
+            candidate,
+            inner_ctx.settings,
+            risk.RiskContext(
+                game_exposure_units=float(limits["game_exposure_units"]),
+                portfolio_exposure_units=float(limits["portfolio_exposure_units"]),
+            ),
+        )
+        decisions["post_reconcile"] = decision
+        return {
+            "steps": [
+                {"name": "slate-discovery", "status": "ok", "result": {"sports": ["mlb"]}},
+                {"name": "candidate-ranker", "status": "ok", "result": {"candidate_count": 1, "edge_pass_count": 1}},
+                {"name": "research-agent", "status": "ok", "result": {"candidate_count": 1, "trade_eligible_count": 1}},
+                {"name": "demo-execute", "status": "ok", "result": {"orders": []}},
+            ]
+        }
+
+    monkeypatch.setattr(order_reconcile, "run", fake_order_reconcile)
+    monkeypatch.setattr(daily_cycle, "run", fake_daily)
+    monkeypatch.setattr(settlement_audit, "run", lambda inner_ctx: {"summary": {}})
+    monkeypatch.setattr(qual_postmortem, "run", lambda inner_ctx: {})
+    monkeypatch.setattr(status, "run", lambda inner_ctx: {})
+    monkeypatch.setattr(validation_report_agent, "run", lambda inner_ctx: {})
+    monkeypatch.setattr(scheduled_demo_cycle, "deliver", lambda *args, **kwargs: True)
+
+    result = scheduled_demo_cycle.run(ctx)
+
+    assert calls == ["order-reconcile", "daily-cycle"]
+    assert decisions["post_reconcile"].approved
+    assert result["pre_order_reconcile"]["canceled_count"] == 1
+    assert result["exit_code"] == 0
 
 
 def test_scheduled_demo_cycle_soft_reports_missing_demo_credentials(tmp_path, monkeypatch):
@@ -7208,6 +7503,7 @@ def test_new_automation_phases_registered():
     assert "settlement-audit" in PHASES
     assert "ports" in PHASES
     assert "status" in PHASES
+    assert "telegram-bot" in PHASES
     assert "telegram-test" in PHASES
     assert "scheduled-demo-cycle" in PHASES
 
@@ -7510,3 +7806,340 @@ def test_phase23e_risk_reads_effective_thresholds_via_getattr():
         "risk.evaluate_trade_intent must read effective_max_daily_loss_units"
     assert "effective_max_daily_exposure_units" in src, \
         "risk.evaluate_trade_intent must read effective_max_daily_exposure_units"
+
+
+# ── monitor phase ──────────────────────────────────────────────────────────────
+def _monitor_ctx(tmp_path, *, execution_mode="paper", dry_run=True):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = execution_mode
+    settings.dry_run = dry_run
+    settings.live_trading_ack = ""
+    settings.deliver_to = "telegram"
+
+    class DummyContext:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def read_json(self, suffix):
+            path = self.settings.data_dir / suffix
+            return json.loads(path.read_text()) if path.exists() else None
+
+    return DummyContext(settings)
+
+
+def _record_monitor_order(store, intent, created_at: str | None = None):
+    request = execution.OrderRequest(
+        client_order_id=f"cid-{intent.ticker}-{intent.signal_source}",
+        ticker=intent.ticker,
+        action="buy",
+        side="yes",
+        order_type="limit",
+        count=intent.contracts,
+        price_cents=intent.price_cents,
+    )
+    decision = risk.RiskDecision(True, [])
+    receipt = execution.OrderReceipt(request.client_order_id, "demo", "submitted", {"order_id": "demo-1"})
+    assert store.record_order("demo_orders", intent.game_id, intent, decision, request, receipt)
+    if created_at is not None:
+        import sqlite3
+        conn = sqlite3.connect(str(store.path))
+        try:
+            conn.execute(
+                "UPDATE demo_orders SET created_at = ? WHERE client_order_id = ?",
+                (created_at, request.client_order_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def test_monitor_snapshot_deterministic_and_effective_exposure_caps(tmp_path):
+    ctx = _monitor_ctx(tmp_path, execution_mode="demo")
+    ctx.settings.effective_max_game_exposure_units = 3.0
+    ctx.settings.effective_max_daily_exposure_units = 4.0
+    ctx.settings.effective_max_daily_loss_units = 1.25
+    ctx.settings.effective_qual_daily_trade_cap = 2
+    store = research.ResearchStore(ctx.settings.research_db_path)
+    store.init_schema()
+    now = datetime(2026, 7, 31, 16, tzinfo=timezone.utc)
+    (tmp_path / "scheduled_cycle_runs.jsonl").write_text(
+        json.dumps({
+            "event": "finished",
+            "finished_at": (now - timedelta(hours=2)).isoformat(),
+            "exit_code": 0,
+            "edges": 3,
+            "orders_placed": 2,
+            "hard_error": None,
+        }) + "\n"
+    )
+    (tmp_path / "health_status.json").write_text(json.dumps({"ok": True, "alert": False, "reasons": []}))
+    (tmp_path / "portfolio_sync.json").write_text(json.dumps({
+        "ok": True,
+        "balance_source": "kalshi-demo",
+        "balance_usd_exact": 1000.0,
+        "open_positions": 2,
+        "unit": {"unit_size_dollars": 15.0},
+        "exposure_reconciliation": {
+            "authoritative_game_exposure_units": 1.25,
+            "authoritative_portfolio_exposure_units": 1.5,
+            "diverged": False,
+            "warnings": [],
+        },
+    }))
+    _record_monitor_order(
+        store,
+        _intent(
+            ticker="KXCONSENSUS",
+            signal_source="consensus",
+            captured_at=now.isoformat(),
+            stake_units=1.0,
+            unit_size_dollars=15.0,
+        ),
+        created_at=now.isoformat(),
+    )
+    _record_monitor_order(
+        store,
+        _intent(
+            ticker="KXQUAL",
+            signal_source="qual",
+            captured_at=now.isoformat(),
+            stake_units=0.5,
+            unit_size_dollars=15.0,
+        ),
+        created_at=now.isoformat(),
+    )
+    store.record_settlement({
+        **_settlement_fixture(501, ticker="KXCONSENSUS", outcome=1, market_prob=0.40, clv_cents=4.0),
+        "client_order_id": "settled-KXCONSENSUS-consensus",
+        "signal_source": "consensus",
+        "audited_at": now.isoformat(),
+        "settled_at": now.isoformat(),
+    })
+    store.record_settlement({
+        **_settlement_fixture(502, ticker="KXQUAL", outcome=0, market_prob=0.50, clv_cents=-2.0),
+        "client_order_id": "settled-KXQUAL-qual",
+        "signal_source": "qual",
+        "audited_at": now.isoformat(),
+        "settled_at": now.isoformat(),
+    })
+
+    snap = monitor_core.build_monitor_snapshot(
+        ctx,
+        store,
+        generated_at=now.isoformat(),
+        host="host-a",
+        git_commit="abc123",
+        pending_prs=[12],
+    )
+    again = monitor_core.build_monitor_snapshot(
+        ctx,
+        store,
+        generated_at=now.isoformat(),
+        host="host-a",
+        git_commit="abc123",
+        pending_prs=[12],
+    )
+
+    assert snap.to_dict() == again.to_dict()
+    assert snap.bot_alive is True
+    assert snap.trades_today["count"] == 2
+    assert snap.trades_today["total_stake_usd"] == pytest.approx(22.5)
+    assert snap.per_engine["consensus"]["placed"] == 1
+    assert snap.per_engine["consensus"]["wins"] == 1
+    assert snap.per_engine["qual"]["losses"] == 1
+    assert snap.pnl["today_usd"] == pytest.approx(0.10)
+    assert snap.exposure["game_units_authoritative"] == pytest.approx(1.25)
+    assert snap.exposure["portfolio_units_authoritative"] == pytest.approx(1.5)
+    assert snap.exposure["game_units_running"] == pytest.approx(1.5)
+    assert snap.exposure["portfolio_units_running"] == pytest.approx(1.5)
+    assert snap.exposure["caps"]["effective_max_game_exposure_units"] == pytest.approx(3.0)
+    assert snap.exposure["caps"]["effective_max_daily_exposure_units"] == pytest.approx(4.0)
+    assert snap.exposure["caps"]["effective_max_daily_loss_units"] == pytest.approx(1.25)
+    assert snap.exposure["caps"]["effective_qual_daily_trade_cap"] == 2
+    assert snap.severity == "green"
+    assert "authoritative_game=1.25u" in monitor_core.format_monitor_md(snap)
+
+
+def test_monitor_severity_names_reasons_and_recommendations(tmp_path):
+    ctx = _monitor_ctx(tmp_path)
+    store = research.ResearchStore(ctx.settings.research_db_path)
+    store.init_schema()
+    now = datetime(2026, 7, 31, 16, tzinfo=timezone.utc)
+    (tmp_path / "scheduled_cycle_runs.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "event": "finished",
+                "finished_at": (now - timedelta(hours=10)).isoformat(),
+                "exit_code": 0,
+                "edges": 0,
+                "orders_placed": 0,
+                "hard_error": None,
+            }),
+            json.dumps({
+                "event": "finished",
+                "finished_at": (now - timedelta(hours=2)).isoformat(),
+                "exit_code": 1,
+                "edges": 1,
+                "orders_placed": 0,
+                "hard_error": "boom",
+            }),
+            json.dumps({
+                "event": "finished",
+                "finished_at": (now - timedelta(hours=1)).isoformat(),
+                "exit_code": 1,
+                "edges": 1,
+                "orders_placed": 0,
+                "hard_error": "boom again",
+            }),
+        ]) + "\n"
+    )
+    (tmp_path / "health_status.json").write_text(json.dumps({
+        "ok": False,
+        "alert": True,
+        "reasons": ["cycle hard-error threshold breached"],
+        "recent_cycles": [
+            {"exit_code": 1, "hard_error": "boom"},
+            {"exit_code": 1, "hard_error": "boom again"},
+        ],
+    }))
+    (tmp_path / "portfolio_sync.json").write_text(json.dumps({
+        "balance_usd_exact": 1000,
+        "exposure_reconciliation": {"diverged": True},
+    }))
+    (tmp_path / "monitor_delivery_health.json").write_text(json.dumps({
+        "last_zero_success_at": (now - timedelta(hours=13)).isoformat(),
+        "consecutive_failures": 13,
+        "failing": True,
+    }))
+
+    snap = monitor_core.build_monitor_snapshot(
+        ctx,
+        store,
+        generated_at=now.isoformat(),
+        balance_drop_pct=0.06,
+    )
+
+    assert snap.severity == "red"
+    assert "health_check_alert" in snap.severity_reason_names
+    assert "consecutive_hard_errors" in snap.severity_reason_names
+    assert "balance_drop_gt_5pct_24h" in snap.severity_reason_names
+    assert any("cycle hard-error" in reason for reason in snap.severity_reasons)
+    assert "Investigate phantom exposure -- likely blocking trades" in snap.recommendations
+
+
+def test_monitor_yellow_from_trends_and_blocked_edges(tmp_path):
+    ctx = _monitor_ctx(tmp_path)
+    store = research.ResearchStore(ctx.settings.research_db_path)
+    store.init_schema()
+    now = datetime(2026, 7, 31, 16, tzinfo=timezone.utc)
+    (tmp_path / "scheduled_cycle_runs.jsonl").write_text(
+        json.dumps({
+            "event": "finished",
+            "finished_at": (now - timedelta(hours=1)).isoformat(),
+            "exit_code": 0,
+            "edges": 2,
+            "orders_placed": 0,
+            "hard_error": None,
+        }) + "\n"
+    )
+    for i in range(5):
+        store.record_settlement({
+            **_settlement_fixture(600 + i, ticker=f"KXQOLD{i}", outcome=1),
+            "client_order_id": f"old-{i}",
+            "signal_source": "qual",
+            "audited_at": (now - timedelta(days=10, hours=i)).isoformat(),
+            "settled_at": (now - timedelta(days=10, hours=i)).isoformat(),
+            "pnl_cents": 100,
+        })
+    for i in range(5):
+        store.record_settlement({
+            **_settlement_fixture(700 + i, ticker=f"KXQNEW{i}", outcome=0),
+            "client_order_id": f"new-{i}",
+            "signal_source": "qual",
+            "audited_at": (now - timedelta(days=1, hours=i)).isoformat(),
+            "settled_at": (now - timedelta(days=1, hours=i)).isoformat(),
+            "pnl_cents": -100,
+        })
+
+    snap = monitor_core.build_monitor_snapshot(ctx, store, generated_at=now.isoformat())
+
+    assert snap.severity == "yellow"
+    assert "eligible_edges_no_orders" in snap.severity_reason_names
+    assert "qual_win_rate_drop_gt_20pp" in snap.severity_reason_names
+    assert snap.trends["win_rate_7d"]["qual"] == pytest.approx(0.0)
+    assert snap.trends["win_rate_7d_delta_pp_vs_prior_7d"]["qual"] == pytest.approx(-1.0)
+    assert "Qual engine performance degrading; check retrieval / groundedness" in snap.recommendations
+
+
+def test_monitor_delivery_policy_and_meta_check(tmp_path, monkeypatch):
+    ctx = _monitor_ctx(tmp_path)
+    md_path = tmp_path / "monitor.md"
+    md_path.write_text("monitor")
+    calls = []
+    monkeypatch.setattr(monitor_agent, "_deliver_telegram", lambda ctx, text: calls.append("telegram") or (False, "403"))
+    monkeypatch.setattr(monitor_agent, "_deliver_osascript", lambda text: calls.append("osascript") or (True, "ok"))
+    monkeypatch.setattr(monitor_agent, "_deliver_gist", lambda ctx, path: calls.append("gist") or (True, "url"))
+
+    attempts = monitor_agent._attempt_delivery(ctx, text="body", monitor_path=md_path, escalated=False)
+    health = monitor_agent._record_delivery_health(ctx, attempts)
+
+    assert calls == ["telegram", "osascript", "gist"]
+    assert health["consecutive_failures"] == 0
+    assert health["failing"] is False
+
+    store = research.ResearchStore(ctx.settings.research_db_path)
+    store.init_schema()
+    now = datetime(2026, 7, 31, 16, tzinfo=timezone.utc)
+    base_raw = monitor_core.build_monitor_snapshot(ctx, store, generated_at=now.isoformat())
+    base = monitor_core.MonitorSnapshot(**{
+        **base_raw.to_dict(),
+        "severity": "green",
+        "severity_reasons": [],
+        "severity_reason_names": [],
+    })
+    green_recent = monitor_agent._delivery_policy(
+        base,
+        {"severity": "green", "reason_names": [], "last_push_at": (now - timedelta(hours=2)).isoformat()},
+        now,
+    )
+    yellow = monitor_core.MonitorSnapshot(**{
+        **base.to_dict(),
+        "severity": "yellow",
+        "severity_reasons": ["last cycle placed 0 orders and had trade-eligible edges"],
+        "severity_reason_names": ["eligible_edges_no_orders"],
+    })
+    yellow_first = monitor_agent._delivery_policy(yellow, {"severity": "green", "reason_names": []}, now)
+    red = monitor_core.MonitorSnapshot(**{
+        **base.to_dict(),
+        "severity": "red",
+        "severity_reasons": ["no successful cycle in >8h"],
+        "severity_reason_names": ["no_successful_cycle_gt_8h"],
+    })
+    red_repeat = monitor_agent._delivery_policy(
+        red,
+        {"severity": "red", "reason_names": ["no_successful_cycle_gt_8h"], "last_push_at": now.isoformat()},
+        now,
+    )
+
+    assert green_recent["push"] is False
+    assert yellow_first == {"push": True, "event": "yellow"}
+    assert red_repeat == {"push": True, "event": "red"}
+    assert PHASES["monitor"] == monitor_agent.run
+    assert PHASES["meta-check"] == meta_check.run
+
+    sent = []
+    (tmp_path / "monitor_heartbeat.txt").write_text(
+        (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+    )
+    (tmp_path / "monitor_gist_id.txt").write_text("https://gist.github.com/u/abc\n")
+    monkeypatch.setattr(meta_check, "_http_get", lambda url: (False, "", 500))
+    monkeypatch.setattr(meta_check, "_launchd_has_monitor", lambda label=meta_check.MONITOR_LABEL: (False, "missing"))
+    monkeypatch.setattr(meta_check, "deliver", lambda text, to="stdout": sent.append((text, to)) or True)
+
+    result = meta_check.run(ctx)
+
+    assert result["ok"] is False
+    assert any("heartbeat older than 3h" in item for item in result["failures"])
+    assert any("gist HTTP status" in item for item in result["failures"])
+    assert any("launchd agent missing" in item for item in result["failures"])
+    assert sent and "URGENT" in sent[0][0]

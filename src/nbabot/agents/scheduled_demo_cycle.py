@@ -182,6 +182,7 @@ def _format_report(payload: dict[str, Any]) -> str:
     validation = payload.get("validation_report") or {}
     concentration = validation.get("overall_concentration") or {}
     reconciliation = settlement.get("reconciliation") or {}
+    pre_reconciliation = payload.get("pre_order_reconcile") or {}
     postmortem = payload.get("qual_postmortem") or {}
     news_counts = payload.get("news_counts") or {}
     news_text = ",".join(f"{team}:{count}" for team, count in sorted(news_counts.items())) or "none"
@@ -227,6 +228,11 @@ def _format_report(payload: dict[str, Any]) -> str:
             f"concentrated={bool(concentration.get('concentration_flag'))}"
         ),
         (
+            f"pre_reconcile checked={pre_reconciliation.get('checked_count', 0)} "
+            f"fills={pre_reconciliation.get('fills_inserted_count', 0)} "
+            f"canceled={pre_reconciliation.get('canceled_count', 0)}"
+        ),
+        (
             f"reconcile checked={reconciliation.get('checked_count', 0)} "
             f"fills={reconciliation.get('fills_inserted_count', 0)} "
             f"canceled={reconciliation.get('canceled_count', 0)}"
@@ -247,14 +253,20 @@ def run(ctx: Context | None = None) -> dict:
     report_to = ctx.settings.deliver_to
     ctx.settings.execution_mode = "demo"
 
-    from . import daily_cycle, qual_postmortem, settlement_audit, status, validation_report
+    from . import daily_cycle, order_reconcile, qual_postmortem, settlement_audit, status, validation_report
 
     hard_errors: list[str] = []
+    pre_order_reconcile: dict[str, Any] = {}
     cycle: dict[str, Any] = {}
     settlement: dict[str, Any] = {}
     postmortem: dict[str, Any] = {}
     final_status: dict[str, Any] = {}
     validation: dict[str, Any] = {}
+
+    try:
+        pre_order_reconcile = _run_muted(ctx, order_reconcile.run)
+    except Exception as exc:
+        hard_errors.append(f"order-reconcile: {exc}")
 
     try:
         cycle = _run_muted(ctx, daily_cycle.run)
@@ -308,6 +320,7 @@ def run(ctx: Context | None = None) -> dict:
         "qual_demo_orders_placed": _qual_order_count(cycle),
         "news_counts": _news_counts(cycle),
         "qual_engine": qual_summary,
+        "pre_order_reconcile": pre_order_reconcile,
         "blocked_reason": blocked_reason,
         "hard_error": "; ".join(hard_errors) if hard_errors else None,
         "exit_code": exit_code,
