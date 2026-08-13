@@ -15,10 +15,12 @@
 # Demo cycles at 11:15, 16:10, 18:40, 23:35 ET. News-watch every 5 min
 # 10:00-23:55 ET fires an immediate demo cycle on breaking injury/lineup news
 # (debounced 45 min/team, max 8 triggered cycles/day). Demo mode only; no live
-# gates are ever set here.
+# gates are ever set here. Telegram commands poll every minute 24/7 and currently
+# support /status.
 CRON_TZ=America/New_York
 15 11 * * * mkdir -p /Users/ellingtonfagan/Downloads/nba-scenario-bot/logs && /Users/ellingtonfagan/Downloads/nba-scenario-bot/scheduler/run-demo-cycle.sh >> /Users/ellingtonfagan/Downloads/nba-scenario-bot/logs/demo-cycle-$(date +\%Y\%m\%dT\%H\%M\%S)-1115.log 2>&1
 10 16 * * * mkdir -p /Users/ellingtonfagan/Downloads/nba-scenario-bot/logs && /Users/ellingtonfagan/Downloads/nba-scenario-bot/scheduler/run-demo-cycle.sh >> /Users/ellingtonfagan/Downloads/nba-scenario-bot/logs/demo-cycle-$(date +\%Y\%m\%dT\%H\%M\%S)-1610.log 2>&1
 40 18 * * * mkdir -p /Users/ellingtonfagan/Downloads/nba-scenario-bot/logs && /Users/ellingtonfagan/Downloads/nba-scenario-bot/scheduler/run-demo-cycle.sh >> /Users/ellingtonfagan/Downloads/nba-scenario-bot/logs/demo-cycle-$(date +\%Y\%m\%dT\%H\%M\%S)-1840.log 2>&1
 35 23 * * * mkdir -p /Users/ellingtonfagan/Downloads/nba-scenario-bot/logs && /Users/ellingtonfagan/Downloads/nba-scenario-bot/scheduler/run-demo-cycle.sh >> /Users/ellingtonfagan/Downloads/nba-scenario-bot/logs/demo-cycle-$(date +\%Y\%m\%dT\%H\%M\%S)-2335.log 2>&1
 */5 10-23 * * * mkdir -p /Users/ellingtonfagan/Downloads/nba-scenario-bot/logs && cd /Users/ellingtonfagan/Downloads/nba-scenario-bot && NBABOT_EXECUTION_MODE=demo .venv/bin/ksobot news-watch >> /Users/ellingtonfagan/Downloads/nba-scenario-bot/logs/news-watch-$(date +\%Y\%m\%dT\%H\%M\%S).log 2>&1
+* * * * * mkdir -p /Users/ellingtonfagan/Downloads/nba-scenario-bot/logs && cd /Users/ellingtonfagan/Downloads/nba-scenario-bot && NBABOT_EXECUTION_MODE=demo .venv/bin/ksobot telegram-bot >> /Users/ellingtonfagan/Downloads/nba-scenario-bot/logs/telegram-bot-$(date +\%Y\%m\%d).log 2>&1

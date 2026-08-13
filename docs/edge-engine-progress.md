@@ -7,6 +7,32 @@ rewrite history.
 
 ---
 
+## Round 26 - 2026-08-10 - Phase 26 monitor code integrated onto main
+
+- Re-integrated the monitor and meta-check phases onto a fresh branch from
+  current `main`, avoiding the stale Phase 24/25 conflict path.
+- Added `ksobot monitor` / `ksobot meta-check` agent registration, launchd plists,
+  monitor runtime-state ignores, and focused smoke coverage for severity,
+  delivery policy, trends, recommendations, phase registration, and meta-check
+  escalation.
+- Updated the monitor exposure section to report both authoritative portfolio
+  reconciliation and running order-ledger exposure, plus raw and `effective_*`
+  demo caps from the Phase 23e limit model.
+- Focused verification: `.venv/bin/pytest -q tests/test_smoke.py -k
+  'monitor or meta_check'` -> `4 passed, 187 deselected`.
+- Full suite: `.venv/bin/pytest -q` -> `186 passed, 5 failed`. The failures are
+  the pre-existing missing fixture files under `docs/fixtures/`.
+- Real monitor run: `NBABOT_EXECUTION_MODE=demo .venv/bin/ksobot monitor`
+  exited `0`, wrote `data/monitor.md`, `data/monitor_snapshot.json`, and
+  `data/monitor_heartbeat.txt`, and reported severity `yellow` for eligible
+  edges/no orders, qual win-rate drop, and a stalled running phase.
+- Real meta-check run: `NBABOT_EXECUTION_MODE=demo .venv/bin/ksobot meta-check`
+  exited `0` with `ok=false` because `com.nbabot.monitor` was missing from
+  `launchctl list`; heartbeat was fresh, gist HTTP status was `200`, and the
+  alert path was exercised.
+- No live gates, live execution code, sizing thresholds, risk thresholds, or live
+  env vars were changed.
+
 ## Round 1 — build steps 1-4 (market_identity, odds_math, edge_engine, candidate_ranker)
 
 *(Summarized from the prior session's handoff — not independently re-verified beyond

@@ -156,6 +156,7 @@ ksobot scheduled-demo-cycle   # daily-cycle + settlement + Telegram report
 ksobot portfolio-sync         # mirror Kalshi balance/positions locally
 ksobot source-check           # provider readiness (network probes opt-in)
 ksobot telegram-test          # verify alert delivery
+ksobot telegram-bot           # poll Telegram once; /status replies from local artifacts
 ksobot status | ksobot ui     # state summary / browser dashboard
 ```
 
