@@ -1,5 +1,50 @@
 # Oversight 2026-08-10/11: root cause found for stale "currently-running phase" alarm; host is back; new qual win-rate reason
 
+**Update (2026-08-13, 8-hourly check).** Fix still not landed. `main` moved
+(commit `424f5d6`, merge of PR #14 `phase-26-monitor-on-main`) and
+`src/nbabot/monitor.py` now lives on `main` itself (it didn't before — this
+doc's original diagnosis cited it on `phase-25-oversight`), but PR #14 did
+**not** include the one-function `open_starts` guard proposed below. Verified
+directly against `origin/main:src/nbabot/monitor.py`: `_cycle_summary()`
+(now at line 137) still builds `open_starts` at lines 154-165 with no
+"abandoned if a later cycle finished" check, and `oldest_open` (line 164)
+is still an unbounded min with no expiry — identical logic to what was
+diagnosed on 2026-08-11, just renumbered. This is the predicted outcome
+called out in that update's "re-notification trigger" note ("re-escalate
+... if the orphan-ledger fix lands and `currently-running phase` still
+doesn't clear — would mean this diagnosis was wrong"); here the fix simply
+hasn't landed at all, so the alarm keeps climbing at wall-clock rate as
+predicted: 172.3h (check eighteen) -> 333.7h (check nineteen, 2026-08-11)
+-> **389.7h** (this check, 2026-08-13).
+
+Current gist snapshot (fetched 2026-08-13):
+
+```
+severity: yellow reasons=currently-running phase is 389.7h old
+alive: True last_success_hours=4.2106
+last_cycle: 2026-08-12T21:41:20 edges=0 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=424f5d609a2e960367bd14fccde9540ef84bb6cc
+exposure: authoritative_game=0.0u authoritative_portfolio=0.0u diverged=False
+health_alert: False delivery.failing=False
+trades_today: count=0
+pending_prs: 6,8,13
+```
+
+Both other reasons from the 2026-08-11 update (`0 orders despite trade-eligible
+edges`, `qual win rate drop`) are **gone this round** — only the known,
+already-diagnosed `currently-running phase` alarm remains, and every other
+health signal (`alive`, `last_success_hours=4.21`, `health_alert=False`,
+`delivery.failing=False`, exposure clean/not diverged) confirms the bot
+itself is healthy. Nothing here is new or distinct from the existing
+diagnosis, so per this doc's own re-notification trigger this does not
+warrant a fresh investigation — it's the same unfixed bug, now with two
+more data points confirming the "climbs at wall-clock rate" prediction.
+The proposed fix below (`src/nbabot/monitor.py`, now at line 137/154-165 on
+`main` instead of `phase-25-oversight`) is unchanged and still applies
+directly to `main`.
+
+---
+
 **Update to this PR (nineteenth check, 2026-08-11).** Previous checks in this
 doc/#13 and predecessor #12 tracked 18 consecutive snapshots of a frozen
 `last_cycle` / stale host commit. That condition **cleared this round** — see
