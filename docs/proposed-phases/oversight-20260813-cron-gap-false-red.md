@@ -192,3 +192,109 @@ missed fixed-slot cycles.
 
 Same guardrails as above: no commit/push beyond this doc, no live env vars,
 no live orders, no live-gate edits.
+
+---
+
+## Update 2026-08-14 ~14:41 UTC (later 8-hourly check) — new evidence narrows the failure to before the ledger write, timed to the Phase 26 merge
+
+Gist fetched 2026-08-14 ~14:41 UTC:
+
+```
+severity: red reasons=no successful cycle in >8h
+alive: False last_success_hours=34.1174
+last_cycle: 2026-08-12T21:41:20.642162-04:00 edges=0 orders=0 hard_error=None
+host: EllingtonsMBP4.lan commit=424f5d609a2e960367bd14fccde9540ef84bb6cc
+exposure: authoritative_game=0.0u authoritative_portfolio=0.0u diverged=False
+health_alert: False reasons=none
+delivery: failing=False consecutive_failures=0 last_success=2026-08-14T05:22:54.036928+00:00
+errors: none
+trades_today: count=0 tickers=none
+pnl: today=$0.0 week=$12.23 all_time=$81.8639
+pending_prs: 6,8,13,15
+```
+
+Same `last_cycle` timestamp as the original report and both prior updates —
+now unchanged across four consecutive 8-hourly checks and 34.1 stale hours.
+Two new findings this round, both from re-reading the current
+`scheduled_demo_cycle.py` on `origin/main` rather than just the gist:
+
+**1. The stall's start lines up almost exactly with the Phase 26 merge, not
+with anything in `daily_cycle.py`.** `git log` on `main` shows
+`last_cycle` (21:41:20 -04:00, Aug 12) landed **12 minutes before**
+`424f5d6` (`Merge pull request #14 from
+ellingtonfagan/phase-26-monitor-on-main`, committed 21:53:10 -04:00, Aug 12
+— the same commit the gist's `host: commit=` field names as currently
+running). That merge's own message says it bundles three pieces "because
+they land together to get cycles completing again" — i.e. it was a fix
+attempt for a then-existing stall, and cycles have not completed since it
+landed. That commit is the prime suspect, not a coincidence of timing.
+
+**2. The absence of a "currently-running phase" reason rules out a hang
+inside the new pre-cycle code, and points further upstream than previously
+thought.** `scheduled_demo_cycle.py::run()` calls
+`record_cycle_started(ctx)` at line 252 — before `execution_mode` is even
+set and before any Phase 26 code runs — then (new in the 424f5d6 merge) runs
+`order_reconcile.run()` at line 267 inside a bare `try/except Exception`
+before `daily_cycle.run()`. If that pre-cycle call ever hung (blocked, never
+raised) instead of erroring, `scheduled_cycle_runs.jsonl` would carry a
+`started` row with no matching `finished` row, and
+`monitor.py:_cycle_summary()`'s `open_starts`/`oldest_open` logic (lines
+154-178) would surface a growing `currently-running phase is Xh old` red/
+yellow reason (exactly what PR #13 tracked for a different orphan). This
+gist shows only `no successful cycle in >8h` — no currently-running-phase
+reason at all, across four checks spanning 34+ hours. That means no new
+`started` row has been written since 21:41 Aug 12: the process is not
+reaching line 252, so it isn't hanging inside `order_reconcile.run()` (or
+anywhere else in `scheduled_demo_cycle.run()`) — the failure is upstream of
+that, in `run-demo-cycle.sh`, the `ksobot` CLI entrypoint, or the cron
+mechanism itself failing to invoke it, on or after the 424f5d6 merge.
+
+Everything else stays consistent with the prior updates: `health_alert=False`,
+`delivery.failing=False` with a `last_success` timestamp from ~9h before this
+fetch (so whatever runs `ksobot monitor` on its own 2h `launchd` interval is
+still alive and importing the package fine — ruling out a package-wide
+import error as the cause, since `monitor` and the new `meta_check`/
+`telegram_bot` modules share the same `agents/__init__.py` import list added
+in 424f5d6), `exposure.diverged=False`, no errors, and PnL/balance unchanged.
+This is a real, sustained scheduling/process failure, not a monitor false
+positive.
+
+### Revised investigation step (host-side, read-only, run first)
+
+None of this is confirmable from gist + git alone; the check that would
+disambiguate needs the host directly. In priority order:
+
+1. `crontab -l | grep run-demo-cycle` — confirm the four fixed slots
+   (`scheduler/combined-crontab.txt`) are actually installed and unchanged.
+   Note the crontab file's own header warns `crontab <file>` hangs on this
+   Mac and it must be piped via stdin (`cat ... | crontab -`) — if anyone
+   re-ran the wrong install form recently, that alone could explain missed
+   installs.
+2. `tail -n 100 logs/demo-cycle-*-2335.log logs/demo-cycle-*-1115.log
+   logs/demo-cycle-*-1610.log logs/demo-cycle-*-1840.log` for the four
+   slots since Aug 12 23:35 — did `run-demo-cycle.sh` even start (any
+   output), and if so, where did it stop? A silent/empty log for all four
+   points at cron not invoking the script at all (or invoking a stale/wrong
+   path) rather than a Python-level failure.
+3. If the logs show the script started: `ps aux | grep -i ksobot` /
+   `ps aux | grep -i scheduled_demo_cycle` for any process still alive from
+   one of those four slots — a hung foreground call inside
+   `daily_cycle.run()` (called after the ledger write at line 252, so it
+   would still show a `currently-running` reason once one *does* fire) or a
+   zombie left over from before 424f5d6 holding a resource (FD, DB lock) the
+   new invocations block on.
+4. Confirm `grep started data/scheduled_cycle_runs.jsonl | tail -5` — this
+   directly tests finding (2) above: if there is truly no `started` row after
+   21:41 Aug 12, that's conclusive that the process isn't reaching line 252,
+   and the fix belongs in `run-demo-cycle.sh` / cron / the CLI dispatch path,
+   not inside `scheduled_demo_cycle.py`.
+
+Once (1)-(4) identify where execution actually stops, land a scoped fix there
+(and keep the already-proposed `daily_cycle.py` ledger-recording fix from the
+original report above — still valid, still worth landing, but confirmed now
+not to be this failure's cause on its own). Do not touch `monitor.py`
+thresholds, `order_reconcile.py`, or any `scheduler/*` file based on
+speculation — only after (1)-(4) show which layer is actually failing.
+
+Same guardrails as above: no commit/push beyond this doc, no live env vars,
+no live orders, no live-gate edits.
