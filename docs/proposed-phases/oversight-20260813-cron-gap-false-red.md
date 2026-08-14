@@ -298,3 +298,55 @@ speculation — only after (1)-(4) show which layer is actually failing.
 
 Same guardrails as above: no commit/push beyond this doc, no live env vars,
 no live orders, no live-gate edits.
+
+---
+
+## Update 2026-08-14 ~21:19 UTC (later 8-hourly check) — fifth check, ~44.5h stale, no new root cause, still frozen
+
+Gist fetched 2026-08-14 ~21:19 UTC:
+
+```
+severity: red reasons=no successful cycle in >8h
+alive: False last_success_hours=44.4851
+last_cycle: 2026-08-12T21:41:20.642162-04:00 edges=0 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=424f5d609a2e960367bd14fccde9540ef84bb6cc
+exposure: authoritative_game=0.0u authoritative_portfolio=0.0u diverged=False
+health_alert: False reasons=none
+delivery: failing=False consecutive_failures=0 last_success=2026-08-14T21:19:32.484841+00:00
+errors: none
+trades_today: count=0 tickers=none
+pnl: today=$0.0 week=$12.23 all_time=$81.8639
+pending_prs: 6,8,13,15
+```
+
+`last_cycle` is still the exact same timestamp as the original report and all
+three prior updates — now unchanged across five consecutive 8-hourly checks
+and ~44.5 stale hours (was 34.1h at the last check, ~7h prior — the gap grew
+by roughly one oversight interval again). Every other signal remains clean:
+`health_alert=False`, `delivery.failing=False` with a `last_success` timestamp
+from the same minute as this fetch (the monitor/delivery loop is still alive
+and reporting), `exposure.diverged=False`, no errors, `pnl` unchanged from the
+prior two checks (`week=$12.23 all_time=$81.8639`) — consistent with a process
+that has not run a trading cycle at all since 21:41 ET Aug 12, not a process
+that ran and lost money.
+
+No new root cause beyond what's already documented at the ~14:41 UTC update:
+the stall still lines up with the `424f5d6` (Phase 26) merge, and the absence
+of any "currently-running phase" reason across five checks still points to the
+failure being upstream of `scheduled_demo_cycle.py:252`
+(`record_cycle_started`) — in `run-demo-cycle.sh`, the `ksobot` CLI dispatch,
+or cron itself — not a hang inside `order_reconcile.run()` or `daily_cycle.run()`.
+The four-step host-side investigation checklist above (crontab install check,
+the four missed slots' logs, `ps aux` for a hung process, `grep started
+data/scheduled_cycle_runs.jsonl`) is unchanged and still the fastest way to
+disambiguate; none of it is runnable from this checkout.
+
+No state transition (severity still red, unsurprising since nothing has run),
+no code changed on this branch. Given this has now spanned five checks and
+~44.5h with zero recorded cycles and no self-recovery, re-flagging this to the
+user this round as a genuinely stalled bot (not a monitor false positive) —
+the original PR title undersells current state; treat "no successful cycle in
+>8h" here as accurate, not a cadence artifact.
+
+Same guardrails as above: no commit/push beyond this doc, no live env vars,
+no live orders, no live-gate edits.
