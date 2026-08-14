@@ -124,3 +124,71 @@ exactly the case that would have caught tonight's false red.
 No commit/push beyond this doc. No live env vars set. No live orders. Do not
 edit live gates (`live_execute.py`, live gate env vars, `risk.py` thresholds,
 `sizing.py`, `MIN_EDGE` values).
+
+---
+
+## Update 2026-08-14: this is no longer a pure false positive — the demo-cycle cron appears to have stopped running
+
+Gist fetched 2026-08-14 (~00:16 UTC / ~20:16 ET Aug 13):
+
+```
+severity: red reasons=no successful cycle in >8h
+alive: False last_success_hours=23.2784
+last_cycle: 2026-08-12T21:41:20.642162-04:00 edges=0 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=424f5d609a2e960367bd14fccde9540ef84bb6cc
+exposure: authoritative_game=0.0u authoritative_portfolio=0.0u diverged=False
+health_alert: False reasons=none
+delivery: failing=False consecutive_failures=0 last_success=2026-08-14T00:06:25.021068+00:00
+errors: none
+trades_today: count=0 tickers=none
+pnl: today=$0.0 week=$12.23 all_time=$81.8639
+pending_prs: 6,8,13,15
+```
+
+`last_cycle` is byte-identical to the timestamp in both the original diagnosis
+(10.21h) and the first update (14.22h) — it has not advanced across two more
+8-hourly oversight checks. That by itself was already flagged as consistent
+with the diagnosis. But the fixed cron schedule
+(`scheduler/combined-crontab.txt`: 11:15, 16:10, 18:40, 23:35 ET) independently
+contradicts the pure-false-positive read: between `last_cycle` (21:41 ET Aug 12)
+and this snapshot (~20:16 ET Aug 13), **four** fixed demo-cycle slots should
+have fired — 23:35 (Aug 12), 11:15, 16:10, 18:40 (Aug 13) — and each one calls
+`scheduled_demo_cycle.py::run()`, which records to the ledger via
+`record_cycle_started` at line 252 *before* doing any real work. That path does
+not depend on the `daily_cycle.py` gap described above at all. Four consecutive
+misses on a mechanism that's supposed to be cron-gap-immune is a different
+failure mode: the demo-cycle process itself is not running or is dying before
+line `scheduled_demo_cycle.py:252`, not merely under-crediting overnight work.
+
+Everything else is still clean (`health_alert=False`, fresh `delivery.last_success`
+~10min before this snapshot, `exposure.diverged=False`, no errors) — whatever
+component runs the meta-monitor/delivery loop is alive. It's specifically the
+four fixed `run-demo-cycle.sh` cron slots that appear to be silent.
+
+This repo checkout cannot see the host's actual crontab install state, log
+files under `logs/demo-cycle-*.log`, or whether `run-demo-cycle.sh` is
+erroring before Python even starts (e.g. broken `.venv`, path change, macOS
+sleep/cron scheduling issue) — none of that is visible from gist + git alone.
+The original ledger-recording fix for `daily_cycle.py` is still valid and
+worth landing on its own merits, but it will **not** explain or fix four
+missed fixed-slot cycles.
+
+### Revised proposed action — investigate before assuming the original fix is sufficient
+
+1. Keep the original `daily_cycle.py` ledger-recording fix (still correct,
+   still monitoring-only, described above) — land it.
+2. Add an investigation step to the Codex prompt: on the host, check whether
+   `scheduler/combined-crontab.txt` is actually installed
+   (`crontab -l | grep run-demo-cycle`) and check
+   `logs/demo-cycle-*.log` for the most recent four expected slots
+   (23:35 Aug 12, 11:15/16:10/18:40 Aug 13 ET) — confirm whether the cron
+   fired at all, and if it fired, where `run-demo-cycle.sh` /
+   `scheduled_demo_cycle.py` failed before reaching line 252. This step is
+   read-only (log/crontab inspection), no code changes, and must be done on
+   the host directly — it cannot be verified from this checkout.
+3. Do not change `monitor.py` thresholds or crontab files based on this
+   update alone — the schedule itself isn't the problem this time; something
+   is preventing the schedule from executing.
+
+Same guardrails as above: no commit/push beyond this doc, no live env vars,
+no live orders, no live-gate edits.
