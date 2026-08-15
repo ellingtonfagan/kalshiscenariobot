@@ -350,3 +350,52 @@ the original PR title undersells current state; treat "no successful cycle in
 
 Same guardrails as above: no commit/push beyond this doc, no live env vars,
 no live orders, no live-gate edits.
+
+## Update 2026-08-15 ~05:20 UTC (later 8-hourly check) — sixth check, ~48.5h stale, still frozen
+
+Gist fetched 2026-08-15 ~05:20 UTC:
+
+```
+severity: red reasons=no successful cycle in >8h
+alive: False last_success_hours=48.487
+last_cycle: 2026-08-12T21:41:20.642162-04:00 edges=0 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=424f5d609a2e960367bd14fccde9540ef84bb6cc
+exposure: authoritative_game=0.0u authoritative_portfolio=0.0u diverged=False
+health_alert: False reasons=none
+delivery: failing=False consecutive_failures=0 last_success=2026-08-15T01:19:36.381377+00:00
+errors: none
+trades_today: count=0 tickers=none
+pnl: today=$0.0 week=$12.23 all_time=$81.8639
+pending_prs: 6,8,13,15
+```
+
+Still byte-identical `last_cycle`, host commit, and `pending_prs` — sixth
+consecutive check with zero recorded cycles, ~48.5h stale (was ~44.5h at the
+prior check, roughly one check-interval later; the gap between checks this
+round was ~4h rather than the usual ~8h, but the underlying `last_cycle`
+timestamp hasn't moved regardless of check cadence). Delivery is still fresh
+(`last_success` from the same minute as this fetch), `health_alert=False`,
+`exposure.diverged=False`, no errors, `pnl` unchanged — the monitor/delivery
+loop is alive and healthy; only the demo-cycle trading process itself remains
+stalled since 21:41 ET Aug 12.
+
+No new root cause beyond the ~14:43 UTC update: still points to something
+upstream of `scheduled_demo_cycle.py:252` (`record_cycle_started`) not
+executing since the `424f5d6` (Phase 26) merge — `run-demo-cycle.sh`, the
+`ksobot` CLI dispatch, or cron/launchd itself. The host-side investigation
+checklist above (crontab/launchd install check, the missed slots' logs,
+`ps aux` for a hung process, `grep started data/scheduled_cycle_runs.jsonl`)
+is unchanged and still the fastest way to disambiguate; none of it is
+runnable from this checkout. No code changed on this branch.
+
+Not re-notifying the user this round: the prior check already re-flagged this
+as a genuinely stalled bot ~4h ago, and nothing material has changed since
+(same `last_cycle`, same host commit, same `pending_prs`) — a second ping
+this soon with no new information would be a duplicate. Setting an explicit
+re-escalation trigger for future checks: re-notify immediately if severity
+changes, if `last_cycle`/host commit/`pending_prs` changes (host came back),
+or once `now - last_cycle` crosses **72h** without recovery. Absent one of
+those, future checks should keep updating this doc and the PR body silently.
+
+Same guardrails as above: no commit/push beyond this doc, no live env vars,
+no live orders, no live-gate edits.
