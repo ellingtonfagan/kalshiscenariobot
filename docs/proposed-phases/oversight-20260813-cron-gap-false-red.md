@@ -442,3 +442,47 @@ rule.
 
 Same guardrails as above: no commit/push beyond this doc, no live env vars,
 no live orders, no live-gate edits.
+
+## Update 2026-08-15 ~18:49 UTC (later 8-hourly check) — eighth check, ~65.1h stale, still frozen, re-escalation trigger not yet met
+
+Gist fetched 2026-08-15 ~18:49 UTC:
+
+```
+severity: red reasons=no successful cycle in >8h
+alive: False last_success_hours=65.1406
+last_cycle: 2026-08-12T21:41:20.642162-04:00 edges=0 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=424f5d609a2e960367bd14fccde9540ef84bb6cc
+exposure: authoritative_game=0.0u authoritative_portfolio=0.0u diverged=False
+health_alert: False reasons=none
+delivery: failing=False consecutive_failures=0 last_success=2026-08-15T17:58:38.776122+00:00
+errors: none
+trades_today: count=0 tickers=none
+pnl: today=$0.0 week=$12.23 all_time=$81.8639
+pending_prs: 6,8,13,15
+```
+
+Checking against the re-escalation trigger set at the sixth check: none met.
+Severity still red (unchanged), `last_cycle` still byte-identical to Aug 12
+21:41:20 ET (unchanged, eighth consecutive check with zero recorded cycles),
+host commit still `424f5d6` (unchanged, host has not come back), `pending_prs`
+still `6,8,13,15` (unchanged), and staleness is 65.1h — still under the 72h
+threshold, though close: at the current ~6-8h check cadence the *next* check
+is very likely to cross it. Delivery remains fresh (`last_success` ~51min
+before this fetch), `health_alert=False`, `exposure.diverged=False`, no
+errors, `pnl` unchanged — the monitor/delivery loop is still alive; only the
+demo-cycle trading process remains stalled.
+
+No new root cause investigation performed this round — nothing in the gist or
+`main` changed to warrant re-reading `scheduled_demo_cycle.py` again. The
+host-side checklist from the Aug 14 ~14:41 UTC update (crontab/launchd install
+check, the missed slots' logs, `ps aux` for a hung process, `grep started
+data/scheduled_cycle_runs.jsonl`) is unchanged and still the fastest way to
+disambiguate, and still cannot be run from this checkout. No code changed on
+this branch. Per the trigger set at the sixth check, not re-notifying the user
+this round — updating this doc and the PR body silently. Flagging for the next
+check: staleness will almost certainly cross 72h before or at the next
+8-hourly run, which should re-notify per the existing trigger regardless of
+whether anything else has changed.
+
+Same guardrails as above: no commit/push beyond this doc, no live env vars,
+no live orders, no live-gate edits.
