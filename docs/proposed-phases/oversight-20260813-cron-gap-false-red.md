@@ -399,3 +399,46 @@ those, future checks should keep updating this doc and the PR body silently.
 
 Same guardrails as above: no commit/push beyond this doc, no live env vars,
 no live orders, no live-gate edits.
+
+## Update 2026-08-15 ~12:14 UTC (later 8-hourly check) — seventh check, ~50.5h stale, still frozen, no re-escalation trigger met
+
+Gist fetched 2026-08-15 ~12:14 UTC:
+
+```
+severity: red reasons=no successful cycle in >8h
+alive: False last_success_hours=50.4897
+last_cycle: 2026-08-12T21:41:20.642162-04:00 edges=0 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=424f5d609a2e960367bd14fccde9540ef84bb6cc
+exposure: authoritative_game=0.0u authoritative_portfolio=0.0u diverged=False
+health_alert: False reasons=none
+delivery: failing=False consecutive_failures=0 last_success=2026-08-15T03:19:37.763495+00:00
+errors: none
+trades_today: count=0 tickers=none
+pnl: today=$0.0 week=$12.23 all_time=$81.8639
+pending_prs: 6,8,13,15
+```
+
+Checking against the explicit re-escalation trigger set at the prior (sixth)
+check — none are met: severity is still red (unchanged), `last_cycle` is
+still byte-identical to Aug 12 21:41:20 ET (unchanged, seventh consecutive
+check with zero recorded cycles), host commit is still `424f5d6` (unchanged,
+host has not come back), `pending_prs` is still `6,8,13,15` (unchanged), and
+staleness is 50.5h — still under the 72h threshold. Delivery remains fresh
+(`last_success` from the same fetch window), `health_alert=False`,
+`exposure.diverged=False`, no errors, `pnl` unchanged — the monitor/delivery
+loop is still alive; only the demo-cycle trading process remains stalled.
+
+No new root cause investigation performed this round (nothing in the gist or
+`main` changed to warrant re-reading `scheduled_demo_cycle.py` again); the
+host-side checklist from the ~14:41 UTC Aug 14 update is unchanged and still
+the fastest way to disambiguate, and still cannot be run from this checkout.
+No code changed on this branch. Per the trigger set last round, not
+re-notifying the user this check — updating this doc and the PR body
+silently. The 72h mark (next crossed sometime around ~19:41 UTC / ~15:41 ET
+today, roughly 7 hours from this fetch) is the next thing likely to change
+that state; if the eighth check lands after that point with `last_cycle`
+still unmoved, that check should re-notify regardless of this doc's silence
+rule.
+
+Same guardrails as above: no commit/push beyond this doc, no live env vars,
+no live orders, no live-gate edits.
