@@ -486,3 +486,160 @@ whether anything else has changed.
 
 Same guardrails as above: no commit/push beyond this doc, no live env vars,
 no live orders, no live-gate edits.
+
+
+## Update 2026-08-16 ~02:29 UTC (later 8-hourly check) — ninth check, host is back and a real root cause, not the cron/ledger gap
+
+Gist fetched 2026-08-16 ~02:29 UTC:
+
+```
+severity: red reasons=no successful cycle in >8h
+alive: False last_success_hours=73.6529
+last_cycle: 2026-08-15T20:48:27.218487-04:00 edges=1 orders=0 hard_error=demo-execute: 404 Client Error: Not Found for url: https://external-api.demo.kalshi.co/trade-api/v2/portfolio/events/orders
+host: Ellingtons-MacBook-Pro-4.local commit=424f5d609a2e960367bd14fccde9540ef84bb6cc
+exposure: authoritative_game=0.0u authoritative_portfolio=0.0u diverged=False
+health_alert: False reasons=none
+delivery: failing=False consecutive_failures=0 last_success=2026-08-16T02:29:11.106637+00:00
+errors: none
+trades_today: count=0
+```
+
+**This is the re-escalation trigger from the sixth check firing for real**:
+`last_cycle` moved for the first time in nine checks — from the frozen
+2026-08-12T21:41:20 ET to 2026-08-15T20:48:27 ET. The host came back and ran
+a cycle. But that cycle recorded `edges=1 orders=0` with a populated
+`hard_error`, so it still doesn't count as "successful" under
+`monitor.py:_cycle_summary()` (`successful = exit_code==0 and not
+hard_error`, lines 143-146) — hence staleness keeps climbing (73.65h) even
+though the process is demonstrably alive again. This supersedes every prior
+theory in this doc (cadence gap, `daily_cycle.py` not writing to the ledger,
+cron/launchd not invoking the script) — none of those explain a cycle that
+ran, found an edge, and then hard-failed on order placement.
+
+### Root cause, traced end to end with file:line citations
+
+1. `src/nbabot/agents/scheduled_demo_cycle.py:272` calls `daily_cycle.run(ctx)`
+   inside a `try/except Exception` (line 271-274) that only catches
+   exceptions escaping `daily_cycle.run` itself. Inside that run, the
+   `demo-execute` step's own exception is caught one level down and recorded
+   as a step with `status="error"` (this is what surfaces as
+   `hard_error=demo-execute: ...` in the gist — matches
+   `_hard_errors()` at `scheduled_demo_cycle.py:155-163`, which walks
+   `cycle`'s steps and appends `f"{name}: {error}"` for any step with
+   `status=="error"`).
+2. That exception originates in
+   `src/nbabot/execution.py:execute_demo()` lines 277-283:
+   ```
+   body = request.kalshi_v2_body()
+   try:
+       response = kalshi.demo_place_order(settings.demo_api_base, body)
+   except Exception as e:
+       audit.dead_letter("DEMO_ORDER", str(e), {"body": body}, intent.game_id)
+       raise
+   ```
+   `kalshi.demo_place_order()` (`src/nbabot/kalshi.py:319-321`) POSTs to
+   `/portfolio/events/orders` via `demo_post_to_base` →
+   `_request()` (`kalshi.py:140-170`), whose `r.raise_for_status()`
+   (`kalshi.py:160/162`) turns the 404 into a `requests.HTTPError`.
+   `execute_demo` dead-letters it (so it's not silently lost) but then
+   **re-raises**, so one failed order submission blows up the entire
+   `daily-cycle` step, which blows up the entire `scheduled-demo-cycle`
+   run's success flag, which blows up the monitor's 8h freshness signal —
+   for the whole system, not just the one order.
+3. **The URL itself is not a client-side bug.** Verified against Kalshi's
+   current V2 API docs (`docs.kalshi.com/api-reference/orders/create-order-v2`,
+   fetched live): the documented path really is `POST
+   /portfolio/events/orders` with no path parameters — the legacy
+   `POST /portfolio/orders` mutation endpoint was already removed
+   (deprecated and retired between 2026-06-18 and 2026-06-25). The
+   `_base_and_signed_path()` construction in `kalshi.py:178-185` reproduces
+   the exact URL in the gist's error
+   (`https://external-api.demo.kalshi.co/trade-api/v2/portfolio/events/orders`)
+   when `settings.demo_api_base` is the expected
+   `https://external-api.demo.kalshi.co/trade-api/v2` — so the path, host,
+   and construction logic all match the documented, current endpoint. **Why
+   the demo environment specifically 404s on a correctly-built request to
+   the documented path is not diagnosable from this checkout** — candidates
+   include the demo environment lagging production on this route, a stale
+   demo API key/base config on the host, or something ticker/market-specific
+   in this one order's body that Kalshi's router treats as not-found rather
+   than returning 400. `requests`' `raise_for_status()` message
+   (`kalshi.py:160`) only captures status + URL, not the response body, so
+   the actual Kalshi error detail was never captured anywhere — that's a
+   second, smaller gap worth closing regardless of the root cause.
+
+### Proposed fix — two small, independent, demo-only changes
+
+1. **Stop one order's exchange-side failure from poisoning the whole cycle's
+   health signal.** In `execution.py::execute_demo()` (lines 277-283),
+   replace the bare `except Exception: ... raise` with returning a `"failed"`
+   `OrderReceipt` (mirroring the existing `"rejected"` receipt pattern at
+   lines 245-257/258-275): keep the `audit.dead_letter(...)` call, then
+   `return OrderReceipt(request.client_order_id, "demo", "failed", {"error": str(e)})`
+   instead of re-raising. This only changes the *demo* execution path
+   (`execute_demo`, not `execute_live` at `execution.py:310`) — a demo order
+   failing to submit becomes a recorded, visible failure instead of an
+   unhandled exception, so the cycle can still finish and be marked
+   `exit_code=0`/no `hard_error` when everything else (research, ranking,
+   settlement, postmortem) genuinely succeeded. This directly fixes the
+   `monitor.py` freshness alarm's root cause without touching `monitor.py`,
+   any threshold, or any crontab file.
+2. **Capture the actual Kalshi error body**, not just status+URL, so the next
+   occurrence is diagnosable from the gist/logs alone: in `kalshi.py::_request()`
+   (around line 160/162), on a non-2xx response catch the JSON body (if any)
+   before calling `r.raise_for_status()` and include it when re-raising (e.g.
+   wrap `HTTPError` with the body text appended, or log it via whatever the
+   caller's audit path already is). Keep this minimal — do not change retry
+   behavior, headers, or the request path itself.
+
+### Investigation-only (cannot be resolved from this checkout)
+
+Why the demo API 404s on this specific, correctly-constructed, currently-documented
+endpoint needs host access: check `logs/demo-cycle-*-2335.log` (or whichever
+slot ran ~20:48 ET Aug 15) for the full response body Kalshi returned (once
+fix #2 above is landed, this will show up directly); confirm
+`settings.demo_api_base` on the host matches
+`https://external-api.demo.kalshi.co/trade-api/v2` exactly (no stray path
+segment); and check whether the specific `ticker` in that order's body
+(visible in `audit`'s dead-letter record for `DEMO_ORDER`, or
+`data/demo_orders.jsonl` if partially written) is a valid, currently-open
+market on the demo exchange.
+
+### Tests to add
+
+A test in `tests/test_smoke.py` (it already covers `execute_demo` — see the
+`demo_place_order` mocks around lines 3207/3233/3943) that makes a fake
+`kalshi.demo_place_order` raise (e.g. `requests.HTTPError("404 ...")`) and
+asserts: `execute_demo()` returns an `OrderReceipt` with `status="failed"`
+(not a raised exception), `audit.dead_letter` was still called, and — one
+level up — a `daily_cycle.run()` / `scheduled_demo_cycle.run()` invocation
+built around that fake client finishes with `exit_code=0` and `hard_error is
+None` for the cycle as a whole (assuming every other step genuinely
+succeeds). This is exactly the case that produced today's false "no
+successful cycle" alarm and would have caught it.
+
+### Verification checklist
+
+- `.venv/bin/pytest -q` — full suite should still pass; the new test above
+  should be red before the fix (current code re-raises → test would need to
+  assert the exception today) and green after.
+- Real invocation: `NBABOT_EXECUTION_MODE=demo .venv/bin/ksobot
+  scheduled-demo-cycle` (or `daily-cycle`) against a scratch `data/` dir with
+  a mocked/failing `kalshi.demo_place_order` — confirm the run still exits 0
+  and `scheduled_cycle_runs.jsonl` gets a `finished` row with `hard_error`
+  from the order failure isolated to the order-level status, not the
+  cycle-level `hard_error`, if that's how the fix ends up recording it (the
+  cycle should not blow up; whether a failed order still contributes some
+  narrower signal is an implementation choice — the test above is the actual
+  bar).
+- `git diff --stat` expectation: `src/nbabot/execution.py` (a few lines
+  changed in `execute_demo`), `src/nbabot/kalshi.py` (a few lines in
+  `_request`), plus the new/updated test in `tests/test_smoke.py`. No
+  changes to `monitor.py`, `risk.py`, `sizing.py`, `live_execute.py`, any
+  `scheduler/*` file, or live gate env vars.
+
+### Guardrails
+
+No commit/push beyond this doc. No live env vars set. No live orders. Do not
+edit live gates (`live_execute.py`, live gate env vars, `risk.py` thresholds,
+`sizing.py`, `MIN_EDGE` values).
