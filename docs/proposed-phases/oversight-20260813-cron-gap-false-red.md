@@ -643,3 +643,41 @@ successful cycle" alarm and would have caught it.
 No commit/push beyond this doc. No live env vars set. No live orders. Do not
 edit live gates (`live_execute.py`, live gate env vars, `risk.py` thresholds,
 `sizing.py`, `MIN_EDGE` values).
+
+## Update 2026-08-16 ~10:29 UTC (later 8-hourly check) — tenth check, same root cause reproduces on a fresh cycle, fix still not landed
+
+Gist fetched 2026-08-16 ~10:29 UTC:
+
+```
+severity: red reasons=no successful cycle in >8h
+alive: False last_success_hours=81.66
+last_cycle: 2026-08-15T23:36:43.036493-04:00 edges=1 orders=0 hard_error=demo-execute: 404 Client Error: Not Found for url: https://external-api.demo.kalshi.co/trade-api/v2/portfolio/events/orders
+host: Ellingtons-MacBook-Pro-4.local commit=424f5d609a2e960367bd14fccde9540ef84bb6cc
+exposure: authoritative_game=0.0u authoritative_portfolio=0.0u diverged=False
+health_alert: False reasons=none
+delivery: failing=False consecutive_failures=0 last_success=2026-08-16T10:29:21.545387+00:00
+errors: none
+trades_today: count=0
+pending_prs: 6,8,13,15
+```
+
+`last_cycle` moved again since the ninth check — from `2026-08-15T20:48:27`
+ET to `2026-08-15T23:36:43` ET (a ~2h48m later cycle actually ran) — so the
+host is still alive and attempting cycles. That newer cycle hit the exact
+same `hard_error=demo-execute: 404 ... /portfolio/events/orders` as the
+ninth check, confirming this is a reproducing, not one-off, failure: every
+cycle that finds an edge and reaches order placement dies the same way,
+which is exactly what the fix proposed in the "Update 2026-08-16 ~02:29 UTC"
+section above targets. No cycle has recorded `orders>0` or a clean
+`hard_error=None` since. `health_alert=False`, `delivery.failing=False`, and
+`exposure.diverged=False` are all still clean — this remains isolated to the
+one root cause already diagnosed, not a new failure mode.
+
+No new code changes proposed this round — the fix from the ninth-check
+update above still stands and has not been applied yet (`git diff --stat`
+against `main` remains empty on the host side as far as this checkout can
+tell). Re-raising this update mainly to record that the bug is still live
+and reproducing on real cycles, not stale evidence from three days ago.
+
+Guardrails unchanged: no commit/push beyond this doc, no live env vars, no
+live orders, no live-gate edits.
