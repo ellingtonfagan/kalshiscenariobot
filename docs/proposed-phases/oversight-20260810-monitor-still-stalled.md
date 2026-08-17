@@ -1,5 +1,47 @@
 # Oversight 2026-08-10/11: root cause found for stale "currently-running phase" alarm; host is back; new qual win-rate reason
 
+**Update (2026-08-17, 8-hourly check).** Fix still not landed; alarm still
+climbing at wall-clock rate as predicted. `main` tip is unchanged since the
+last check — still commit `424f5d609a2e960367bd14fccde9540ef84bb6cc`
+(verified: `git log -1 origin/main` matches the gist's `host commit`
+exactly, dated 2026-08-12). Re-verified directly against
+`origin/main:src/nbabot/monitor.py`: `_cycle_summary()` (line 137) still
+builds `open_starts` at lines 154-163 with no "abandoned once a later cycle
+finishes cleanly" check, and `oldest_open` (line 164) is still an unbounded
+`min()` with no expiry — byte-identical logic to every prior check in this
+doc, same line numbers. The proposed one-function fix below is unchanged and
+still applies directly to `main`.
+
+Alarm trajectory: 172.3h (check 18) -> 333.7h (check 19, 2026-08-11) ->
+389.7h (check 20, 2026-08-13) -> 475.2h (check 21, 2026-08-16) ->
+**483.2h** (this check, 2026-08-17) — still climbing at ~wall-clock rate
+(8.0h elapsed since the last check, alarm grew 8.0h), exactly as this doc's
+fix would predict for an orphaned ledger row that never expires.
+
+Current gist snapshot (fetched 2026-08-17):
+
+```
+severity: yellow reasons=currently-running phase is 483.2h old
+alive: True last_success_hours=4.6601
+last_cycle: 2026-08-16T18:41:50.050058-04:00 edges=0 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=424f5d609a2e960367bd14fccde9540ef84bb6cc
+exposure: authoritative_game=0.0u authoritative_portfolio=0.0u diverged=False
+health_alert: False delivery.failing=False
+trades_today: count=0
+pending_prs: 6,8,13,15,16
+```
+
+Only the known, already-diagnosed `currently-running phase` alarm is firing
+this round — no other reasons present. Every other health signal (`alive`,
+`last_success_hours=4.66`, `health_alert=False`, `delivery.failing=False`,
+exposure clean/not diverged, no hard_error) confirms the bot itself is
+healthy right now. `pending_prs` is unchanged from the last check (6, 8, 13,
+15, 16). Nothing here is new; per this doc's own re-notification trigger
+this does not warrant a fresh investigation or a new PR — same unfixed bug,
+one more data point confirming the "climbs at wall-clock rate" prediction.
+
+---
+
 **Update (2026-08-16, 8-hourly check).** Fix still not landed; alarm still
 climbing at wall-clock rate as predicted. `main` tip is unchanged since the
 last check — still commit `424f5d609a2e960367bd14fccde9540ef84bb6cc`
