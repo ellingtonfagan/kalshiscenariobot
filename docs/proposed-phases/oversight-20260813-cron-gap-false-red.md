@@ -681,3 +681,67 @@ and reproducing on real cycles, not stale evidence from three days ago.
 
 Guardrails unchanged: no commit/push beyond this doc, no live env vars, no
 live orders, no live-gate edits.
+
+## Update 2026-08-17 (eleventh check) — cycle now completes clean, but a fresh cadence gap reopens the alarm; the real fix is sitting unmerged in #16
+
+Gist fetched 2026-08-17:
+
+```
+severity: red reasons=no successful cycle in >8h
+alive: False last_success_hours=14.7048
+last_cycle: 2026-08-16T23:38:17.088393-04:00 edges=0 orders=0 hard_error=None
+host: Ellingtons-MacBook-Pro-4.local commit=424f5d609a2e960367bd14fccde9540ef84bb6cc
+exposure: authoritative_game=0.0u authoritative_portfolio=0.0u diverged=False
+health_alert: False reasons=none
+delivery: failing=False consecutive_failures=0 last_success=2026-08-17T17:28:28.167483+00:00
+errors: none
+trades_today: count=0
+pending_prs: 6,8,13,15,16
+```
+
+Two things changed from the tenth-check update above:
+
+1. **The `demo-execute` 404-poisoning bug (this doc's proposed fix, "Update
+   2026-08-16 ~02:29 UTC") did not reproduce this cycle.** `last_cycle` now
+   shows `hard_error=None` cleanly — the cycle that ran at
+   `2026-08-16T23:38:17` ET finished with no error, just `edges=0 orders=0`
+   (nothing tradeable found, not a failure). That two-part `execute_demo`
+   fix proposed earlier in this doc is still unapplied and still worth
+   landing for when a demo order-submission error *does* happen again, but
+   it is not what's driving today's red.
+2. **The red today is a plain cadence gap, not a poisoned cycle.** 14.7h
+   since the one clean success above — no cycle since, clean or otherwise.
+   Monitor/delivery itself is healthy (`delivery.failing=False`,
+   `last_success=2026-08-17T17:28:28Z`, only ~10 min before this gist
+   snapshot), so the always-on monitor process is fine; it's specifically
+   the scheduled demo-trading cycle that isn't firing on schedule. This is
+   the same *symptom* (cron/launchd not reliably invoking
+   `scheduled-demo-cycle`) documented in the "Update 2026-08-14" section
+   above, before the ninth-check update redirected attention to the 404
+   bug.
+
+**The fix for this already exists, unmerged: PR #16
+("Fix scheduled demo cycle silently blocked by macOS TCC",
+`claude/telegram-status-handoff-e51868` → `main`).** It root-causes a
+different but adjacent bug — macOS TCC denies `/bin/bash` (and `/bin/zsh`)
+filesystem access to the repo under `~/Downloads`, so the cron-invoked
+`scheduler/run-demo-cycle.sh` silently died with `Operation not permitted`
+while every `ksobot`-shebang job (which routes through the permitted venv
+python) kept working. The fix rewrites that entrypoint in python with an
+absolute venv-python shebang. PR #16 reports it verified in production for
+the 2026-08-15 23:35 cron slot (7119 bytes of real output, zero sandbox
+denials) — consistent with the one clean `hard_error=None` cycle seen in
+this gist snapshot. `host commit=424f5d609a2e...` is still exactly `main`'s
+HEAD (PR #14's merge commit), confirming #16 has not been merged, so any
+cron slot that didn't pick up the fixed entrypoint (or reverted to it) can
+still silently drop.
+
+**No new Codex prompt proposed this round.** The actionable next step is
+not new code — it's landing #16 (already reviewed, tests reported as 188
+passed, scope explicitly limited to the entrypoint script) — and, separately
+and not urgently, still landing this doc's `execute_demo` fix for the next
+time the 404 shows up. Re-raising this update to keep the "same reason,
+same PR" thread current rather than opening a duplicate oversight PR.
+
+No live-gate code touched. Guardrails unchanged: no commit/push beyond this
+doc, no live env vars, no live orders, no live-gate edits.
