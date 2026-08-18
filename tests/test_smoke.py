@@ -3223,6 +3223,46 @@ def test_demo_execution_builds_v2_payload(tmp_path):
     assert store.count_orders("demo_orders") == 1
 
 
+def test_demo_execution_returns_audited_receipt_for_http_rejection(tmp_path):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    store = research.ResearchStore(settings.research_db_path)
+    audit = __import__("nbabot.audit", fromlist=["AuditTrail"]).AuditTrail(tmp_path, store)
+    intent = _intent()
+    decision = risk.evaluate_trade_intent(intent, settings)
+
+    class DummyResponse:
+        status_code = 403
+
+        @staticmethod
+        def json():
+            return {
+                "error": {
+                    "code": "restricted_jurisdiction",
+                    "message": "Account location cannot open this position.",
+                },
+            }
+
+    class DummyHttpError(Exception):
+        response = DummyResponse()
+
+    class DummyKalshi:
+        def demo_place_order(self, demo_api_base, body):
+            raise DummyHttpError("403 Client Error")
+
+    receipt = execution.execute_demo(
+        intent, decision, settings, store, audit, DummyKalshi(),
+    )
+
+    assert receipt.status == "rejected"
+    assert receipt.response["status_code"] == 403
+    assert receipt.response["exchange_code"] == "restricted_jurisdiction"
+    assert receipt.response["reasons"] == ["Account location cannot open this position."]
+    assert store.count_orders("demo_orders") == 0
+    assert store.latest_rows("audit_events", 1)[0]["event_type"] == "DEMO_ORDER_REJECTED"
+    assert store.latest_rows("dead_letter_queue", 1)[0]["event_type"] == "DEMO_ORDER"
+
+
 def test_demo_execute_blocks_missing_demo_credentials_without_request(tmp_path, monkeypatch):
     settings = _ExecSettings(tmp_path)
     settings.execution_mode = "demo"
@@ -3350,6 +3390,52 @@ def test_demo_execute_batches_after_first_rejected_intent(tmp_path, monkeypatch)
     assert evaluated == ["KX1", "KX2", "KX3"]
     assert len(result["orders"]) == 3
     assert len(writes["demo_execute.json"]["orders"]) == 3
+
+
+def test_demo_execute_does_not_count_exchange_rejection_as_exposure(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "demo"
+    settings.kalshi_demo_api_key = "demo-key"
+    settings.kalshi_demo_private_key_path.write_text("demo-private-key")
+    intent = _intent(stake_units=2.0)
+
+    class DummyContext:
+        def __init__(self):
+            self.settings = settings
+            self.kalshi = object()
+
+        def read_json(self, suffix):
+            return {}
+
+        def write_json(self, suffix, payload):
+            return settings.data_path(suffix)
+
+    monkeypatch.setattr(demo_execute, "refresh_research_for_execution", lambda ctx: {})
+    monkeypatch.setattr(demo_execute, "record_shadow_intents", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(demo_execute, "_candidate_intents", lambda ctx: [intent])
+    monkeypatch.setattr(
+        demo_execute,
+        "evaluate_trade_intent",
+        lambda *args: risk.RiskDecision(approved=True, checks=[]),
+    )
+    monkeypatch.setattr(
+        demo_execute,
+        "execute_demo",
+        lambda *args: execution.OrderReceipt(
+            "cid", "demo", "rejected", {"reasons": ["exchange blocked"]},
+        ),
+    )
+    monkeypatch.setattr(demo_execute, "deliver", lambda *args, **kwargs: None)
+
+    demo_execute.run(DummyContext())
+
+    snapshot = research.ResearchStore(settings.research_db_path).latest_rows(
+        "risk_snapshots", 1,
+    )[0]
+    snapshot_payload = json.loads(snapshot["snapshot_json"])
+    assert snapshot["game_exposure_units"] == pytest.approx(0.0)
+    assert snapshot_payload["portfolio_exposure_units"] == pytest.approx(0.0)
+    assert snapshot["open_positions"] == 0
 
 
 def test_demo_execute_rejection_message_lists_failed_check_names(tmp_path, monkeypatch):

@@ -133,6 +133,38 @@ def _actual_fee_paid_cents(response: dict[str, Any] | None) -> float | None:
         return None
 
 
+def _http_rejection_details(error: Exception) -> dict[str, Any] | None:
+    """Return safe exchange details for a definitive client-side rejection."""
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if not isinstance(status_code, int) or not 400 <= status_code < 500:
+        return None
+
+    payload: Any = None
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        text = str(getattr(response, "text", "") or "").strip()
+        if text:
+            payload = {"message": text[:2000]}
+
+    error_payload = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error_payload, dict):
+        error_payload = payload if isinstance(payload, dict) else {}
+    message = str(error_payload.get("message") or error).strip()
+    details: dict[str, Any] = {
+        "reasons": [message],
+        "error_type": type(error).__name__,
+        "status_code": status_code,
+    }
+    code = error_payload.get("code")
+    if code:
+        details["exchange_code"] = str(code)
+    if payload is not None:
+        details["exchange_response"] = payload
+    return details
+
+
 def _audit_research_override(intent: TradeIntent, audit: AuditTrail) -> None:
     if not intent.research_override:
         return
@@ -279,8 +311,26 @@ def execute_demo(intent: TradeIntent, decision: RiskDecision, settings: Any,
     try:
         response = kalshi.demo_place_order(settings.demo_api_base, body)
     except Exception as e:
-        audit.dead_letter("DEMO_ORDER", str(e), {"body": body}, intent.game_id)
-        raise
+        rejection = _http_rejection_details(e)
+        audit.dead_letter(
+            "DEMO_ORDER",
+            str(e),
+            {"body": body, "exchange_rejection": rejection},
+            intent.game_id,
+        )
+        if rejection is None:
+            raise
+        receipt = OrderReceipt(request.client_order_id, "demo", "rejected", rejection)
+        audit.log(
+            "DEMO_ORDER_REJECTED",
+            {
+                "signal_source": intent.signal_source,
+                "confluence_verdict": intent.confluence_verdict,
+                **asdict(receipt),
+            },
+            intent.game_id,
+        )
+        return receipt
 
     receipt = OrderReceipt(request.client_order_id, "demo", "submitted", response)
     actual_fee_cents = _actual_fee_paid_cents(response)

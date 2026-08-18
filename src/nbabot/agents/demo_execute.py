@@ -86,7 +86,7 @@ def run(ctx: Context | None = None) -> dict:
             "decision": asdict(decision),
             "receipt": asdict(receipt),
         })
-        if decision.approved:
+        if receipt.status in {"submitted", "filled"}:
             game_exposure += intent.stake_units
             portfolio_exposure += intent.stake_units
             if intent.broad_slate:
@@ -108,7 +108,10 @@ def run(ctx: Context | None = None) -> dict:
         "game_exposure_units": game_exposure,
         "portfolio_exposure_units": portfolio_exposure,
         "daily_pnl_units": 0.0,
-        "open_positions": len([r for r in receipts if r["decision"]["approved"]]),
+        "open_positions": len([
+            r for r in receipts
+            if r["receipt"]["status"] in {"submitted", "filled"}
+        ]),
         "circuit_breaker_on": False,
         "unit": unit_payload(ctx),
     })
@@ -128,5 +131,7 @@ def run(ctx: Context | None = None) -> dict:
         failed = _failed_check_names(first["decision"])
         if failed:
             out += f" reasons={', '.join(failed)}"
+        elif receipt.get("response", {}).get("reasons"):
+            out += f" reasons={', '.join(receipt['response']['reasons'])}"
         deliver(guardrails.with_footer(out), ctx.settings.deliver_to)
     return result
