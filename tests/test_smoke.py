@@ -7963,6 +7963,58 @@ def test_monitor_snapshot_deterministic_and_effective_exposure_caps(tmp_path):
     assert "authoritative_game=1.25u" in monitor_core.format_monitor_md(snap)
 
 
+def test_monitor_ignores_abandoned_cycle_starts_after_later_finish(tmp_path):
+    now = datetime(2026, 7, 31, 16, tzinfo=timezone.utc)
+    orphan_start = (now - timedelta(hours=30)).isoformat()
+    (tmp_path / "scheduled_cycle_runs.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "event": "started",
+                "started_at": orphan_start,
+            }),
+            json.dumps({
+                "event": "finished",
+                "started_at": (now - timedelta(hours=2)).isoformat(),
+                "finished_at": (now - timedelta(hours=1)).isoformat(),
+                "exit_code": 0,
+                "edges": 0,
+                "orders_placed": 0,
+                "hard_error": None,
+            }),
+        ]) + "\n"
+    )
+
+    summary, errors = monitor_core._cycle_summary(tmp_path, now)
+
+    assert errors == []
+    assert summary["currently_running_hours"] is None
+    assert summary["bot_alive"] is True
+
+
+def test_monitor_keeps_old_unmatched_start_after_latest_finish(tmp_path):
+    now = datetime(2026, 7, 31, 16, tzinfo=timezone.utc)
+    (tmp_path / "scheduled_cycle_runs.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "event": "finished",
+                "started_at": (now - timedelta(hours=32)).isoformat(),
+                "finished_at": (now - timedelta(hours=31)).isoformat(),
+                "exit_code": 0,
+                "hard_error": None,
+            }),
+            json.dumps({
+                "event": "started",
+                "started_at": (now - timedelta(hours=30)).isoformat(),
+            }),
+        ]) + "\n"
+    )
+
+    summary, errors = monitor_core._cycle_summary(tmp_path, now)
+
+    assert errors == []
+    assert summary["currently_running_hours"] == pytest.approx(30.0)
+
+
 def test_monitor_severity_names_reasons_and_recommendations(tmp_path):
     ctx = _monitor_ctx(tmp_path)
     store = research.ResearchStore(ctx.settings.research_db_path)
@@ -8028,6 +8080,37 @@ def test_monitor_severity_names_reasons_and_recommendations(tmp_path):
     assert "balance_drop_gt_5pct_24h" in snap.severity_reason_names
     assert any("cycle hard-error" in reason for reason in snap.severity_reasons)
     assert "Investigate phantom exposure -- likely blocking trades" in snap.recommendations
+
+
+def test_scheduled_demo_cycle_records_finished_on_uncaught_exception(tmp_path, monkeypatch):
+    settings = _ExecSettings(tmp_path)
+    settings.execution_mode = "paper"
+    settings.dry_run = True
+    settings.deliver_to = "stdout"
+
+    class DummyContext:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def write_json(self, suffix, payload):
+            self.settings.data_path(suffix).write_text(json.dumps(payload, default=str))
+
+    def boom(ctx, report_to):
+        raise RuntimeError("delivery path exploded")
+
+    monkeypatch.setattr(scheduled_demo_cycle, "_run_cycle_body", boom)
+
+    with pytest.raises(RuntimeError, match="delivery path exploded"):
+        scheduled_demo_cycle.run(DummyContext(settings))
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "scheduled_cycle_runs.jsonl").read_text().splitlines()
+    ]
+    assert [row["event"] for row in rows] == ["started", "finished"]
+    assert rows[0]["execution_mode"] == "demo"
+    assert rows[-1]["exit_code"] == 1
+    assert "delivery path exploded" in rows[-1]["hard_error"]
 
 
 def test_monitor_yellow_from_trends_and_blocked_edges(tmp_path):
