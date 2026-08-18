@@ -159,8 +159,14 @@ def _cycle_summary(data_dir: Path, now: datetime) -> tuple[dict[str, Any], list[
     }
     for row in starts:
         started = _parse_dt(row.get("started_at"))
-        if started and str(row.get("started_at")) not in finished_starts:
-            open_starts.append((started, row))
+        if not started or str(row.get("started_at")) in finished_starts:
+            continue
+        # A later finish proves this unmatched row was abandoned; it is not a
+        # cycle that is still running. Starts newer than the latest finish stay
+        # open indefinitely so a genuinely hung process cannot age out.
+        if last_dt is not None and started <= last_dt:
+            continue
+        open_starts.append((started, row))
     oldest_open = min(open_starts, key=lambda item: item[0])[0] if open_starts else None
     return {
         "bot_alive": bool(hours is not None and hours <= 6.0),

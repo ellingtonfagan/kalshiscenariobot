@@ -247,12 +247,7 @@ def _format_report(payload: dict[str, Any]) -> str:
     ])
 
 
-def run(ctx: Context | None = None) -> dict:
-    ctx = ctx or load_context()
-    started_at = record_cycle_started(ctx)
-    report_to = ctx.settings.deliver_to
-    ctx.settings.execution_mode = "demo"
-
+def _run_cycle_body(ctx: Context, report_to: str) -> dict:
     from . import daily_cycle, order_reconcile, qual_postmortem, settlement_audit, status, validation_report
 
     hard_errors: list[str] = []
@@ -362,5 +357,58 @@ def run(ctx: Context | None = None) -> dict:
         phase="scheduled-demo-cycle",
     )
     ctx.write_json("scheduled_demo_cycle.json", payload)
-    record_cycle_finished(ctx, started_at=started_at, payload=payload)
     return payload
+
+
+def _uncaught_payload(ctx: Context, exc: BaseException) -> dict[str, Any]:
+    return {
+        "game_id": ctx.settings.game_id,
+        "run_time_et": _now_et(),
+        "mode": "demo",
+        "dry_run": ctx.settings.dry_run,
+        "sports_scanned": [],
+        "candidates_evaluated": 0,
+        "edges_found": 0,
+        "trade_eligible": 0,
+        "demo_orders_placed": 0,
+        "demo_order_tickers": [],
+        "qual_demo_orders_placed": 0,
+        "news_counts": {},
+        "qual_engine": {},
+        "pre_order_reconcile": {},
+        "blocked_reason": None,
+        "hard_error": f"scheduled-demo-cycle: {exc}",
+        "exit_code": 1,
+        "cycle": {},
+        "settlement": {},
+        "closing_snapshot": {},
+        "validation_report": {},
+        "qual_postmortem": {},
+        "status": {},
+    }
+
+
+def run(ctx: Context | None = None) -> dict:
+    ctx = ctx or load_context()
+    ctx.settings.execution_mode = "demo"
+    started_at = record_cycle_started(ctx)
+    report_to = ctx.settings.deliver_to
+    payload: dict[str, Any] | None = None
+    failure: BaseException | None = None
+    try:
+        payload = _run_cycle_body(ctx, report_to)
+        return payload
+    except BaseException as exc:
+        failure = exc
+        payload = _uncaught_payload(ctx, exc)
+        try:
+            ctx.write_json("scheduled_demo_cycle.json", payload)
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            record_cycle_finished(ctx, started_at=started_at, payload=payload or {})
+        except Exception:
+            if failure is None:
+                raise
