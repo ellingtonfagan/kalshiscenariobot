@@ -7438,7 +7438,10 @@ def test_demo_scheduler_files_force_demo_without_live_gates():
     crontab = (root / "scheduler" / "demo-crontab.txt").read_text()
     combined = script + "\n" + crontab
 
-    assert "NBABOT_EXECUTION_MODE=demo" in script
+    # run-demo-cycle.sh is python, not bash: macOS TCC forbids /bin/bash from
+    # reading files under ~/Downloads, so the entrypoint uses the venv python
+    # shebang instead. The demo-forcing assignment is python syntax.
+    assert 'os.environ["NBABOT_EXECUTION_MODE"] = "demo"' in script
     assert "scheduled-demo-cycle" in script
     assert "NBABOT_EXECUTION_MODE=live" not in combined
     assert "NBABOT_LIVE_TRADING_ACK" not in combined
