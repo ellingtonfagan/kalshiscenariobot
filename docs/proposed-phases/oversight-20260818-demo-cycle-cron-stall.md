@@ -208,3 +208,17 @@ the PR/handoff so it isn't mistaken for already done once this merges.
 ## 6. Guardrails
 
 No commit/push. No live env vars set. No live orders. Do not edit live gates.
+
+---
+
+## Update 2026-11-20T12:16 UTC (check 242): no change, 85d mark not yet reached — staying silent
+
+Fresh `curl` of the raw gist URL: still byte-for-byte identical to the 2026-08-27 freeze point — `last_cycle=2026-08-27T00:08:35.765807-04:00 edges=0 orders=0 hard_error=None`, `last_success_hours=10.845`, `delivery.last_success=2026-08-27T14:30:02.695884+00:00`, `trends.cycle_success=1.0`, `pnl.all_time=$81.8639`, `pending_prs=20,21`.
+
+`git fetch --prune` / branch inspection: no branch tip anywhere in the repo has moved since check 241 — `main`@`be48316`, this PR's branch@`79209bb`, PR #21's branch@`97a07d4`, `codex/broad-slate-market-matcher`@`0e2ea4a` all unchanged.
+
+Elapsed since `delivery.last_success` = 2037.78h / 84.91d (computed against this check's fire time, 2026-11-20T12:16:43Z). The next mark (85d/2040h) is due 2026-11-20T14:30:02Z — about 2.2h after this check's fire time — so it has **not** been crossed since check 241. Per the standing day-mark protocol, this check stays silent (no push notification), doc-only update.
+
+Standing recommendation unchanged since 2026-08-28T04:08 UTC: this needs eyes on the physical host (`Ellingtons-MacBook-Pro-4.local`) — `pmset -g log` and `launchctl list | grep com.nbabot` — not another remote diagnosis cycle. No code changes proposed — nothing new to infer remotely from an unchanging snapshot, now ~84.9 days past the last successful cycle.
+
+No live-gate code touched. Guardrails: no commit/push beyond this doc, no live env vars, no live orders, no live-gate edits.
