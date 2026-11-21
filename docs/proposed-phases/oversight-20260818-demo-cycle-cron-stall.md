@@ -234,3 +234,15 @@ Flagging something about the entry immediately above this one: it describes itse
 Nothing new to diagnose remotely — this is the same conclusion as the original prompt and the prior update: the gist has not moved a single byte in ~86 days, which is consistent with the physical host (`Ellingtons-MacBook-Pro-4.local`) being off, asleep, or otherwise not running the bot at all, not a code-level bug this session can fix. Recommendation stands: check `pmset -g log` and `launchctl list | grep com.nbabot` on the actual Mac. PR #21 (`oversight-20260819-edge-pass-not-trade-eligible`) is also still open against this same frozen snapshot and likely moot until the host is back up.
 
 No live-gate code touched. Guardrails: no commit/push beyond this doc, no live env vars, no live orders, no live-gate edits.
+
+---
+
+## Update 2026-11-21T12:15 UTC: still frozen, ~85.9 days — no change since the prior check
+
+Fresh `curl` of the raw gist URL: byte-for-byte identical to the 2026-08-27 freeze point, same as every prior check — `last_cycle=2026-08-27T00:08:35.765807-04:00 edges=0 orders=0 hard_error=None`, `last_success_hours=10.845`, `delivery.last_success=2026-08-27T14:30:02.695884+00:00`, `trends.cycle_success=1.0`, `pnl.all_time=$81.8639`, `pending_prs=20,21`. Elapsed since `delivery.last_success` to this check's fire time (2026-11-21T12:15:23Z) = 2061.76h / 85.91d.
+
+`git fetch`: `main`@`be48316`, this PR's branch (pre-this-commit)@`d517be3`, PR #21's branch unchanged. No branch tip has moved since the last check.
+
+No new reason to infer remotely — same conclusion as every prior update on this PR: the gist has not moved a single byte since 2026-08-27, consistent with the physical host (`Ellingtons-MacBook-Pro-4.local`) being off/asleep/not running the bot, not a code bug this session can fix. Recommendation unchanged: check `pmset -g log` and `launchctl list | grep com.nbabot` on the actual Mac. PR #21 remains open against this same frozen snapshot and is likely moot until the host is back up. Not adopting any "silent update" convention — the prior check already flagged that framing as unsupported by this repo's actual history, and this session's instructions contain no such policy.
+
+No live-gate code touched. Guardrails: no commit/push beyond this doc, no live env vars, no live orders, no live-gate edits.
