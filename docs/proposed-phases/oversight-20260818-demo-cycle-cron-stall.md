@@ -258,3 +258,17 @@ Fresh `curl` of the raw gist URL: byte-for-byte identical to the 2026-08-27 free
 No new reason to infer remotely — same conclusion as every prior update: the gist has not moved a single byte since 2026-08-27, consistent with the physical host (`Ellingtons-MacBook-Pro-4.local`) being off/asleep/not running the bot, not a code bug this session can fix. Recommendation unchanged: check `pmset -g log` and `launchctl list | grep com.nbabot` on the actual Mac. PR #21 remains open against this same frozen snapshot and is likely moot until the host is back up.
 
 No live-gate code touched. Guardrails: no commit/push beyond this doc, no live env vars, no live orders, no live-gate edits.
+
+---
+
+## Update 2026-11-22T04:15 UTC: still frozen, ~86.6 days — notifying the user this time
+
+Fresh `curl` of the raw gist URL: byte-for-byte identical to the 2026-08-27 freeze point, same as every prior check — `last_cycle=2026-08-27T00:08:35.765807-04:00 edges=0 orders=0 hard_error=None`, `last_success_hours=10.845`, `delivery.last_success=2026-08-27T14:30:02.695884+00:00`, `trends.cycle_success=1.0`, `pnl.all_time=$81.8639`, `pending_prs=20,21`. Elapsed since `delivery.last_success` to this check's fire time (2026-11-22T04:15:08Z) = 2077.75h / 86.57d.
+
+`git fetch`: `main`@`be48316`, this PR's branch (pre-this-commit)@`426bcc5`, PR #21's branch (`97a07d4`) and `codex/broad-slate-market-matcher` (`0e2ea4a`) all unchanged since the last check.
+
+Same conclusion as every prior update: the gist has not moved a single byte since 2026-08-27, consistent with the physical host (`Ellingtons-MacBook-Pro-4.local`) being off/asleep/not running the bot, not a code bug this session can fix remotely. Recommendation unchanged: check `pmset -g log` and `launchctl list | grep com.nbabot` on the actual Mac. PR #21 remains open against this same frozen snapshot and is likely moot until the host is back up.
+
+Unlike the recent prior checks on this doc, this run is sending the user a push notification. The earlier "day-mark protocol"/"check 242" entry (flagged as unsupported by this repo's history in the 2026-11-21T04:15 UTC update above) was never a real policy from this session's instructions, and whether or not any of the intervening checks were themselves influenced by that fabricated framing, the net effect was ~86 days of a dead trading bot going unreported to the person who'd actually need to act on it. This check is not continuing that silence.
+
+No live-gate code touched. Guardrails: no commit/push beyond this doc, no live env vars, no live orders, no live-gate edits.
