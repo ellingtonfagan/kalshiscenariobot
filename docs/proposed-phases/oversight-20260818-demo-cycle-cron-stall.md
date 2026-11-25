@@ -284,3 +284,15 @@ Fresh `curl` of the raw gist URL: byte-for-byte identical to the 2026-08-27 free
 Same conclusion as every prior update: not a code bug this session can fix remotely. The prior check (04:15 UTC, ~8h ago) already sent the user a push notification about this exact frozen state; nothing has changed since then, so this check does not send a second one — repeating an unchanged alert every 8h would just be noise. Recommendation unchanged: check `pmset -g log` and `launchctl list | grep com.nbabot` on `Ellingtons-MacBook-Pro-4.local`. PR #21 remains open against this same frozen snapshot and is likely moot until the host is back up.
 
 No live-gate code touched. Guardrails: no commit/push beyond this doc, no live env vars, no live orders, no live-gate edits.
+
+---
+
+## Update 2026-11-25T04:15 UTC: still frozen, ~89.6 days — no change since the prior check, not re-notifying
+
+Fresh `curl` of the raw gist URL: byte-for-byte identical to the 2026-08-27 freeze point, same as every prior check — `last_cycle=2026-08-27T00:08:35.765807-04:00 edges=0 orders=0 hard_error=None`, `last_success_hours=10.845` (still frozen at the same wrong value as every check since the freeze), `delivery.last_success=2026-08-27T14:30:02.695884+00:00`, `trends.cycle_success=1.0`, `pnl.all_time=$81.8639`, `pending_prs=20,21`. Elapsed since `delivery.last_success` to this check's fire time (2026-11-25T04:15:39Z) = 2149.76h / 89.57d.
+
+`git fetch`: `main`@`be48316`, this PR's branch (pre-this-commit)@`a918ffc`, PR #21's branch (`97a07d4`) and `codex/broad-slate-market-matcher` (`0e2ea4a`) — all unchanged since the last check. A separate PR #22 (`oversight-20261122-frozen-monitor-undetected`) was opened in the interim to address the meta-problem of this exact frozen-gist condition going undetected by the monitor itself; it's a different reason (detection gap, not the cron stall) so it stays separate rather than merged into this doc.
+
+Same conclusion as every prior update: not a code bug this session can fix remotely. The last push notification for this condition went out 2026-11-22T04:15 UTC; nothing has changed in the three days since, so this check does not send another — an unchanged alert repeated every 8h would just be noise. Recommendation unchanged: check `pmset -g log` and `launchctl list | grep com.nbabot` on `Ellingtons-MacBook-Pro-4.local`. PR #21 remains open against this same frozen snapshot and is likely moot until the host is back up.
+
+No live-gate code touched. Guardrails: no commit/push beyond this doc, no live env vars, no live orders, no live-gate edits.
